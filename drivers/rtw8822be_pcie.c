@@ -27,7 +27,8 @@ static struct {
     WifiClient client;
     uint8_t mac[6];
     unsigned txwp[8], tx_sent, tx_busy, tx_errors;
-    unsigned rp, tag, received, dropped;
+    unsigned rp, tag, received, dropped, rx_invalid_tag, rx_invalid_packet, rx_c2h;
+    unsigned rx_dma_polls, rx_pending, rx_last_index;
 } dev;
 static int rd(void *ctx,uint32_t reg,unsigned width,uint32_t *out) {
     (void)ctx; return drv_mmio_read(&dev.mmio,reg,width,out);
@@ -167,14 +168,20 @@ static int receive(void *ctx,uint8_t *out,unsigned capacity,unsigned *bytes,int1
     int rc=read32(0x3b4,&index);
     if(rc) return rc;
     unsigned wp=(index>>16)&0xfff;
+    dev.rx_dma_polls++;
+    dev.rx_last_index=index;
     if(wp>=RX_COUNT) return DRV_EIO;
     if(wp==dev.rp) return 0;
+    dev.rx_pending++;
     drv_memory_barrier();
     const volatile uint16_t *bd=(volatile uint16_t *)((uint8_t *)dev.descriptors.cpu+dev.rp*8);
     unsigned tag=bd[1];
     RtwRxPacket packet;
     const uint8_t *payload=(const uint8_t *)dev.payload.cpu+dev.rp*RX_BYTES;
+    if(tag!=dev.tag) dev.rx_invalid_tag++;
     rc=tag==dev.tag ? rtw8822b_rx_parse(payload,RX_BYTES,&packet) : DRV_EIO;
+    if(rc && tag==dev.tag) dev.rx_invalid_packet++;
+    if(!rc && packet.c2h) dev.rx_c2h++;
     int delivered=0;
     if(!rc && !packet.c2h && packet.frame_bytes<=capacity) {
         memcpy(out,packet.frame,packet.frame_bytes); *bytes=packet.frame_bytes;
@@ -407,6 +414,18 @@ void rtw8822be_status(char *out,size_t cap) {
     }
     char n[20]; append(out,"\nRX frames=",cap); number(n,dev.received); append(out,n,cap);
     append(out," dropped=",cap); number(n,dev.dropped); append(out,n,cap);
+    append(out,"\\nRX DMA polls=",cap); number(n,dev.rx_dma_polls); append(out,n,cap);
+    append(out," pending=",cap); number(n,dev.rx_pending); append(out,n,cap);
+    append(out," bad_tag=",cap); number(n,dev.rx_invalid_tag); append(out,n,cap);
+    append(out," parse_fail=",cap); number(n,dev.rx_invalid_packet); append(out,n,cap);
+    append(out," c2h=",cap); number(n,dev.rx_c2h); append(out,n,cap);
+    append(out,"\\nRX index=",cap); hex(n,dev.rx_last_index); append(out,n,cap);
+    append(out," rp=",cap); number(n,dev.rp); append(out,n,cap);
+    append(out," tag=",cap); number(n,dev.tag); append(out,n,cap);
+    append(out,"\\nScan active=",cap); number(n,dev.scanner.scanning ? 1u : 0u);append(out,n,cap);
+    append(out," channel_idx=",cap);number(n,dev.scanner.channel_index);append(out,n,cap);
+    append(out," found=",cap);number(n,dev.scanner.count);append(out,n,cap);
+    append(out," PHY channel=",cap);number(n,dev.phy.hal.current_channel);append(out,n,cap);
     if(dev.scanner.error) {
         append(out," scan error=",cap); number(n,(uint32_t)-dev.scanner.error); append(out,n,cap);
     }
