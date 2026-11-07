@@ -1,6 +1,10 @@
+#include "../ui/calendar.h"
 #include "boot.h"
+#include "clock.h"
 #include "driver.h"
+#include "memory.h"
 #include "wifi.h"
+#include "../drivers/iwl_pcie.h"
 #include "../drivers/rtw8822be_pcie.h"
 #include "install.h"
 #include "luna.h"
@@ -13,16 +17,19 @@ void kmain(void) {
         serial_write("Boot: UEFI x64 firmware / native i386 kernel bridge\n");
     platform_init();
     __asm__ volatile("clts; fninit");
+    memory_init();
     serial_write("CPU: protected mode / timer 1000 Hz / E820 memory map\n");
     disk_init();
     fs_init();
     settings_init();
+    clock_init();
     input_init();
     net_init();
     audio_init();
     task_init();
     driver_services_init();
     rtw8822be_init();
+    wifi_intel_init();
     gui_init();
     gui_draw();
     serial_write("READY\n");
@@ -45,6 +52,7 @@ void kmain(void) {
             }
         }
         setup_poll();
+        clock_poll();
         /* Deferred driver work and the polled devices run on their own
          * deadlines. An idle kernel no longer polls every service a thousand
          * times per second just because the PIT ticks at 1 kHz. */
@@ -70,6 +78,7 @@ void kmain(void) {
         }
         if (ticks - last_clock >= 100) {
             last_clock = ticks;
+            calendar_refresh();
             gui_invalidate_app(APP_TASKS);
             gui_damage(W - 136, 8, 130, 28); /* the clock in the top bar */
         }

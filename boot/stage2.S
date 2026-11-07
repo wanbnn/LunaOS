@@ -50,7 +50,7 @@ memory_map:
  jne map_done
  incl 0x5000
  addw $24,%di
- cmpl $64,0x5000
+ cmpl $128,0x5000
  jae map_done
  testl %ebx,%ebx
  jnz memory_map

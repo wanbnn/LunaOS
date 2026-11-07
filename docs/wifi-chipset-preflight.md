@@ -47,7 +47,7 @@ USB MT7612U and combo Bluetooth functions are separate transport stacks.
 RTL8822BE firmware `rtw88/rtw8822b_fw.bin` is distributed with its Realtek
 license and pinned provenance in `assets/firmware/provenance.json`. Other
 chipset firmware is not included. The native firmware loader permits at most
-16 entries, 512 KiB per blob, 2 MiB archive total; some images may exceed
+16 entries, 2 MiB per blob, 2 MiB archive total including metadata; some images may exceed
 those limits. A readable blob does not establish correct revision/API.
 
 References: pinned Linux source in `assets/driver-sources/manifest.json`,

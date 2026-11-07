@@ -1,4 +1,7 @@
+#include "clock.h"
 #include "../drivers/rtw8822be_diag.h"
+#include "../drivers/iwl_pcie.h"
+#include "memory.h"
 #include "../drivers/rtw8822be_pcie.h"
 #include "driver.h"
 #include "install.h"
@@ -19,7 +22,7 @@ static const char *commands[] = {
     "uname",  "free",  "uptime",  "date",     "pci",     "net",     "ifconfig", "ping",  "wget",
     "browse", "audio", "beep",    "sync",     "history", "source",  "set",      "env",   "true",
     "false",  "sleep", "reboot",  "poweroff", "about",   "ps",      "tasks",    "kill",  "ringtest",
-    "js",     "bench", "drvinfo", "whoami",   "setup",   "drvtest", "fwinfo",   "wifidiag", 0};
+    "js",     "bench", "drvinfo", "whoami",   "setup",   "drvtest", "fwinfo",   "wifidiag", "memtest", 0};
 #define CAP 8192
 static void emit(char *out, const char *s) {
     append(out, s, CAP);
@@ -392,17 +395,69 @@ static int execute(int argc, char **a, const char *input, char *out) {
                   "Tight and software glass compositor.\nNo Linux, Bun, libc or external shell "
                   "runs inside this image.\n");
     } else if (!strcmp(c, "free")) {
-        emit(out, "Firmware usable RAM: ");
-        num(out, memory_mb);
-        emit(out, " MiB\nStatic buffers; private page tables and guarded application stacks.\n");
+        memory_status(out,CAP);
+    } else if (!strcmp(c, "memtest")) {
+        uint32_t mib=4;
+        if (argc>2) { emit(out,"usage: memtest [MiB] (1..4095)\n"); return 2; }
+        if (argc==2) {
+            mib=0;
+            for (const char *p=a[1]; *p; p++) {
+                if (*p<'0' || *p>'9' || mib>4095) { emit(out,"usage: memtest [MiB] (1..4095)\n"); return 2; }
+                mib=mib*10+(unsigned)(*p-'0');
+            }
+            if (!mib || mib>4095) { emit(out,"usage: memtest [MiB] (1..4095)\n"); return 2; }
+        }
+        return memory_test(mib,out,CAP) ? 1 : 0;
     } else if (!strcmp(c, "uptime")) {
         num(out, ticks / 100);
         emit(out, " seconds since kernel timer start\n");
     } else if (!strcmp(c, "date")) {
-        char b[40];
-        rtc_string(b);
-        emit(out, b);
-        emit(out, " UTC (firmware clock)\n");
+        bool ok = true;
+        if (argc == 4 && !strcmp(a[1], "set")) {
+            DateTime d;
+            ok = datetime_parse(a[2], a[3], &d) && clock_set(&d);
+        } else if (argc == 3 && !strcmp(a[1], "zone")) {
+            int z;
+            ok = datetime_offset_parse(a[2], &z) && clock_zone(z);
+        } else if (argc == 3 && !strcmp(a[1], "auto") &&
+                   (!strcmp(a[2], "on") || !strcmp(a[2], "off")))
+            clock_automatic(!strcmp(a[2], "on"));
+        else if (argc == 2 && !strcmp(a[1], "sync"))
+            clock_sync();
+        else if ((argc == 3 || argc == 4) && !strcmp(a[1], "server")) {
+            unsigned p = 123;
+            if (argc == 4) {
+                p = 0;
+                for (const char *q = a[3]; *q; q++) {
+                    if (*q < '0' || *q > '9' || p > 65535) {
+                        p = 0;
+                        break;
+                    }
+                    p = p * 10 + *q - '0';
+                }
+            }
+            ok = clock_endpoint(a[2], p);
+        } else if (argc != 1)
+            ok = false;
+        if (!ok) {
+            emit(out, "usage: date [set YYYY-MM-DD HH:MM:SS | zone +/-HH:MM | auto on|off | sync | "
+                      "server HOST [PORT]]\n");
+            return 2;
+        }
+        DateTime d;
+        char b[20], z[7];
+        if (clock_local(&d)) {
+            datetime_format(&d, b);
+            emit(out, b);
+        }
+        datetime_offset_format(clock_offset(), z);
+        emit(out, " UTC");
+        emit(out, z);
+        emit(out, "\n");
+        emit(out, clock_status());
+        emit(out, "\nNTP: ");
+        emit(out, clock_server());
+        emit(out, clock_auto() ? " (automatic)\n" : " (manual)\n");
     } else if (!strcmp(c, "pci"))
         pci_list(out, CAP);
     else if (!strcmp(c, "net") || !strcmp(c, "ifconfig"))
@@ -549,11 +604,12 @@ static int execute(int argc, char **a, const char *input, char *out) {
         emit(out, "\n");
         return 0;
     } else if (!strcmp(c, "wifidiag")) {
+        if (argc == 2 && !strcmp(a[1], "intel")) return wifi_intel_diag(out, CAP) ? 1 : 0;
         if (rtw8822be_present()) { rtw8822be_status(out, CAP); return 0; }
         if (argc == 1) return rtw8822be_diag(out, CAP) ? 1 : 0;
         if (argc == 2 && !strcmp(a[1], "power"))
             return rtw8822be_power_test(out, CAP) ? 1 : 0;
-        emit(out, "usage: wifidiag [power] (MAC power cycle only; no scan/connect)\n");
+        emit(out, "usage: wifidiag [power|intel] (MAC power cycle only; no scan/connect)\n");
         return 2;
     } else if (!strcmp(c, "drvinfo")) {
         driver_services_status(out, CAP);

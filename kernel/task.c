@@ -1,5 +1,8 @@
 #include "task.h"
 #include "driver.h"
+#include "heap.h"
+#include "memory.h"
+#include "boot.h"
 #define KSTACK_BYTES (128 * 1024)
 #define SHELL_STACK_BYTES (1024 * 1024)
 #define STACK_MAGIC 0x51ac7a5bu
@@ -11,8 +14,8 @@ static uint32_t directories[TASK_MAX][1024] __attribute__((aligned(4096)));
 static uint32_t user_tables[TASK_MAX][1024] __attribute__((aligned(4096)));
 static uint8_t user_code[4096] __attribute__((aligned(4096)));
 static uint8_t user_stacks[TASK_MAX][USER_STACK_BYTES] __attribute__((aligned(4096)));
-static uint8_t kernel_stacks[TASK_MAX][KSTACK_BYTES] __attribute__((aligned(16), section(".bss.stacks")));
-static uint8_t shell_stack[SHELL_STACK_BYTES] __attribute__((aligned(16)));
+static uint8_t kernel_stacks[TASK_MAX][KSTACK_BYTES] __attribute__((aligned(4096), section(".bss.stacks")));
+static uint8_t shell_stack[SHELL_STACK_BYTES] __attribute__((aligned(4096)));
 #define MMIO_BASE 0x3c000000u
 #define MMIO_PAGES 4096u
 static uint32_t mmio_tables[4][1024] __attribute__((aligned(4096)));
@@ -41,6 +44,46 @@ static uint64_t segment(uint32_t base, uint32_t limit, uint8_t access, uint8_t f
 }
 Task *task_current(void) {
     return &tasks[current_task];
+}
+uint32_t task_memory_owner(void) {
+    if (!initialized) return 1; /* Boot allocations belong to the future kernel PID. */
+    Task *t=task_current();
+    return t->memory_owner ? t->memory_owner : t->pid;
+}
+uint32_t task_memory_enter(uint32_t pid) {
+    uint32_t previous=task_current()->memory_owner;
+    task_current()->memory_owner=pid ? pid : 1; return previous;
+}
+void task_memory_leave(uint32_t previous) { task_current()->memory_owner=previous; }
+static uint32_t private_reservation(const Task *t) {
+    return t->ring ? t->stack_bytes+USER_STACK_BYTES+sizeof(directories[0])+sizeof(user_tables[0]) : 0;
+}
+void task_memory_stats(const Task *t,TaskMemoryStats *out) {
+    if (!out) return;
+    *out=(TaskMemoryStats){0};
+    if (!t || t->state==TASK_UNUSED || t->state==TASK_EXITED) return;
+    HeapStats own; heap_stats(t->pid,&own);
+    out->heap_committed=own.committed_bytes; out->heap_live=own.live_bytes;
+    out->heap_allocations=own.allocations;
+    if (t->ring) {
+        out->stack_reserved=t->stack_bytes+USER_STACK_BYTES;
+        out->page_tables=sizeof(directories[0])+sizeof(user_tables[0]);
+        out->ram_bytes=private_reservation(t)+own.committed_bytes;
+    } else {
+        extern uint8_t __bss_low_end[],__bss_high_start[],__bss_end[];
+        uint64_t linked=(((uint64_t)(uintptr_t)__bss_low_end+4095)&~UINT64_C(4095))-0x100000u+
+            ((((uint64_t)(uintptr_t)__bss_end+4095)&~UINT64_C(4095))-(uintptr_t)__bss_high_start);
+        uint64_t assigned=0;
+        for (unsigned i=1; i<TASK_MAX; i++) if (tasks[i].state!=TASK_UNUSED && tasks[i].state!=TASK_EXITED) {
+            HeapStats h; heap_stats(tasks[i].pid,&h);
+            assigned+=private_reservation(tasks+i)+h.committed_bytes;
+        }
+        MemoryStats memory; memory_stats(&memory);
+        uint64_t metadata=((uint64_t)memory.metadata_bytes+4095)&~UINT64_C(4095);
+        uint64_t total=linked+memory.allocated_bytes+metadata+0x300000u; /* Bootstrap stack reservation. */
+        if (boot_is_uefi()) total+=LUNA_UEFI_INFO->ram_bytes; /* Kernel-owned RAM disk. */
+        out->ram_bytes=total>assigned ? total-assigned : 0;
+    }
 }
 Task *task_by_pid(uint32_t pid) {
     for (int i = 0; i < TASK_MAX; i++)
@@ -175,8 +218,16 @@ static void finish(Task *t, unsigned code) {
     t->exit_code = code;
     t->state = TASK_EXITED;
     net_cancel_owner(t->pid);
-    if (t->app >= 0)
+    if (t->app >= 0) {
+        uint32_t previous=task_memory_enter(t->pid);
+        app_close(t->app);
+        task_memory_leave(previous);
         gui_task_closed(t->app);
+    }
+    if (heap_release_owner(t->pid)) {
+        serial_write("Process heap release failed\n");
+        kernel_fault();
+    }
     gui_damage_all();
 }
 bool task_kill(uint32_t pid) {
@@ -380,7 +431,7 @@ TrapFrame *trap_dispatch(TrapFrame *f) {
 }
 void task_list(char *out, size_t cap) {
     out[0] = 0;
-    append(out, "PID  RING  STATE       STACK KiB  SWITCHES  NAME\n", cap);
+    append(out, "PID  RING  STATE       RAM KiB  HEAP KiB  STACK KiB  SWITCHES  NAME\n", cap);
     for (int i = 0; i < TASK_MAX; i++) {
         Task *t = &tasks[i];
         if (t->state == TASK_UNUSED || t->state == TASK_EXITED)
@@ -394,8 +445,11 @@ void task_list(char *out, size_t cap) {
         append(out, "    ", cap);
         append(out, task_state_name(t->state), cap);
         append(out, "    ", cap);
-        number(b, (t->stack_bytes + (t->ring ? USER_STACK_BYTES : 0)) / 1024);
-        append(out, b, cap);
+        TaskMemoryStats memory; task_memory_stats(t,&memory);
+        number(b,(uint32_t)((memory.ram_bytes+1023)/1024)); append(out,b,cap); append(out,"    ",cap);
+        number(b,(uint32_t)((memory.heap_committed+1023)/1024)); append(out,b,cap); append(out,"    ",cap);
+        number(b,memory.stack_reserved/1024);
+        append(out,b,cap);
         append(out, "    ", cap);
         number(b, t->switches);
         append(out, b, cap);

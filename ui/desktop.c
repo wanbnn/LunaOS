@@ -2,6 +2,7 @@
 #include "settings.h"
 #include "window.h"
 #include "webengine.h"
+#include "memory.h"
 #define WHITE 0xf2f7ff
 #define MUTED 0xb5cbdf
 extern int display_brightness;
@@ -338,6 +339,13 @@ void app_reset(int app) {
         task_page = task_scroll = 0;
     }
 }
+void app_close(int app) {
+    if (app==APP_BROWSER) {
+        web_close();
+        browser_body[0]=0;
+        browser_loading=false;
+    }
+}
 static bool matches(const char *s, const char *query) {
     if (!*query)
         return true;
@@ -662,6 +670,16 @@ static void percent(int x, int y, unsigned value) {
     strcat(b, "%");
     text(x, y, b, 13, WHITE);
 }
+static void memory_label(char out[32],uint64_t bytes) {
+    char fraction[16];
+    if (bytes<1024*1024) {
+        number(out,(uint32_t)((bytes+1023)/1024)); strcat(out," KiB");
+    } else {
+        number(out,(uint32_t)(bytes/(1024*1024))); strcat(out,".");
+        number(fraction,(uint32_t)((bytes%(1024*1024))*10/(1024*1024)));
+        strcat(out,fraction); strcat(out," MiB");
+    }
+}
 static void task_manager(int x, int y, int w, int h) {
     unsigned cpu = cpu_total();
     if (ticks - graph_tick >= 100) {
@@ -698,7 +716,7 @@ static void task_manager(int x, int y, int w, int h) {
         icon(left + 10, y + 84, ICON_SEARCH, 20, MUTED);
         text(left + 40, y + 85, *task_search ? task_search : "Type to search processes...", 13,
              MUTED);
-        const char *cols[] = {"Process", "PID", "Ring", "CPU", "Stack", "State"};
+        const char *cols[] = {"Process", "PID", "Ring", "CPU", "RAM", "State"};
         int pos[] = {0, 204, 250, 295, 360, 451};
         for (int i = 0; i < 6; i++)
             label(left + pos[i], y + 131, cols[i]);
@@ -733,27 +751,32 @@ static void task_manager(int x, int y, int w, int h) {
             number_text(left + 250, yy + 8, t->observed_ring == 255 ? t->ring : t->observed_ring,
                         13, WHITE);
             percent(left + 295, yy + 8, t->cpu_permille);
-            char mem[32];
-            number(mem, (t->stack_bytes + (t->ring ? USER_STACK_BYTES : 0)) / 1024);
-            strcat(mem, " KiB");
-            text(left + 360, yy + 8, t->ring ? mem : "shared", 13, WHITE);
+            TaskMemoryStats memory; task_memory_stats(t,&memory);
+            char mem[32]; memory_label(mem,memory.ram_bytes);
+            text(left + 360, yy + 8, mem, 13, WHITE);
             text(left + 451, yy + 8, task_state_name(t->state), 13, MUTED);
         }
         Task *selected = task_by_pid(selected_pid);
         label(left, y + h - 27,
               selected && selected->system ? "System task: protected"
-                                           : "Stack reservation / shared kernel services");
+                                           : "RAM: heap pages + stacks + page tables");
         button(x + w - 154, y + h - 38, 154, "End task",
                selected && !selected->system && selected->state != TASK_EXITED);
     } else if (task_page == 1) {
-        extern uint8_t __bss_start[], __bss_end[];
-        unsigned kb = (__bss_end - __bss_start) / 1024;
-        number_text(left, y + 98, kb, 48, WHITE);
-        text(left + 208, y + 125, "KiB static kernel buffers", 16, MUTED);
-        wrapped(left, y + 194, width,
-                "Includes compositor buffers, page tables, task stacks and LunaFS. Stack "
-                "reservations in Processes are part of this pool, not additional resident memory.",
-                16, 8, false);
+        MemoryStats memory; memory_stats(&memory);
+        number_text(left,y+98,(uint32_t)(memory.firmware_usable>>20),48,WHITE);
+        text(left+208,y+125,"MiB usable firmware RAM",16,MUTED);
+        const char *labels[]={"Addressable RAM", "Free physical pages", "Allocated heap + DMA", "Reserved kernel / firmware"};
+        uint64_t values[]={memory.addressable_usable,memory.free_bytes,memory.allocated_bytes,memory.reserved_bytes};
+        for (unsigned i=0;i<4;i++) {
+            char amount[32]; memory_label(amount,values[i]);
+            text(left,y+190+(int)i*31,labels[i],16,MUTED);
+            text(left+width-130,y+190+(int)i*31,amount,16,WHITE);
+        }
+        wrapped(left,y+333,width,
+                "Process RAM counts physical heap arenas, stacks and page tables once. "
+                "Kernel RAM includes drivers and shared buffers. No fixed per-process RAM quota.",
+                14,4,false);
     } else {
         const char *info =
             "Ring 0: kernel, drivers and compositor.\nRing 1: reserved service privilege.\nRing 2: "
@@ -765,6 +788,8 @@ static void task_manager(int x, int y, int w, int h) {
     }
 }
 void app_draw(int app, int x, int y, int w, int h) {
+    Task *owner=task_for_app(app);
+    uint32_t previous=task_memory_enter(owner ? owner->pid : 1);
     switch (app) {
     case APP_NOTES:
         notes_draw(x, y, w, h);
@@ -788,4 +813,5 @@ void app_draw(int app, int x, int y, int w, int h) {
         task_manager(x, y, w, h);
         break;
     }
+    task_memory_leave(previous);
 }

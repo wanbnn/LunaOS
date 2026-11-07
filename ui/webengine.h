@@ -110,6 +110,7 @@ void web_js_release(void);
 
 /* browser surface */
 void web_reset(void);
+void web_close(void);
 void web_relayout(void);
 bool web_load_document(const char *url, const char *html, size_t len, char *error, size_t ecap);
 bool web_decode_image(WebNode *node, const unsigned char *data, size_t len);

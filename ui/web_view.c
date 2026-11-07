@@ -193,6 +193,12 @@ void web_reset(void) {
     document_error[0] = 0;
     web_free_fragments();
 }
+void web_close(void) {
+    web_reset();
+    web_free(sheet_text);
+    sheet_text=0; sheet_capacity=sheet_length=0;
+    document_url[0]=0;
+}
 void web_relayout(void) {
     if (!document_root)
         return;

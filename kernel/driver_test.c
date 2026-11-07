@@ -150,24 +150,30 @@ static void never_run(void *arg) {
     (void)arg;
 }
 static bool test_limits(void) {
-    DrvDma pages[512] = {0};
+    DrvDma pages[32] = {0};
     DrvWork work[65] = {0};
     DrvTimer timers[33] = {0};
     DrvPacketQueue queue = {0};
     DrvPacket *packets[65] = {0};
     size_t before = drv_dma_available();
-    unsigned count = before / 4096;
-    bool ok = count <= 512;
-    for (unsigned i = 0; i < count && ok; i++)
-        ok = !drv_dma_alloc(4096, 4096, UINT32_MAX, 0, &pages[i]);
-    DrvDma extra = {0};
-    if (ok)
-        ok = drv_dma_alloc(1, 16, UINT32_MAX, 0, &extra) == DRV_ENOMEM;
-    for (unsigned i = 0; i < 512; i++)
-        if (pages[i].cookie)
-            drv_dma_free(&pages[i]);
-    if (extra.cookie)
-        drv_dma_free(&extra);
+    /* Exhaust a DMA-address-constrained window, not all installed RAM.
+     * One free 64 KiB span plus at most 15 preceding alignment pages. */
+    DrvDma window={0};
+    bool ok=!drv_dma_alloc(65536,65536,UINT32_MAX,65536,&window);
+    uint32_t ceiling=window.bus+65535;
+    if (ok) ok=!drv_dma_free(&window);
+    unsigned count=0;
+    while (ok && count<32) {
+        int rc=drv_dma_alloc(4096,4096,ceiling,0,&pages[count]);
+        if (rc==DRV_ENOMEM) break;
+        if (rc) { ok=false; break; }
+        count++;
+    }
+    DrvDma extra={0};
+    if (ok) ok=count>0 && count<32 && drv_dma_alloc(1,16,ceiling,0,&extra)==DRV_ENOMEM;
+    for (unsigned i=0; i<count; i++) if (pages[i].cookie) drv_dma_free(&pages[i]);
+    if (extra.cookie) drv_dma_free(&extra);
+    if (window.cookie) drv_dma_free(&window);
     for (unsigned i = 0; i < 65; i++)
         drv_work_init(&work[i], never_run, 0);
     for (unsigned i = 0; i < 64 && ok; i++)
@@ -239,7 +245,7 @@ int driver_services_test(char *out, size_t cap) {
     drv_dma_free(&a);
     drv_dma_free(&b);
     CHECK(test_limits(),
-          "DMA exhaustion / work and timer limits / packet queue saturation and FIFO");
+          "DMA mask exhaustion / work and timer limits / packet queue saturation and FIFO");
     DrvLock lock = {0};
     uint32_t flags, again;
     CHECK(!drv_lock(&lock, &flags), "IRQ-save lock acquired");

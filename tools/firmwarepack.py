@@ -7,7 +7,7 @@ import struct
 
 SECTOR = 16384
 LIMIT = 2 * 1024 * 1024
-MAX_FILE = 512 * 1024
+MAX_FILE = 2 * 1024 * 1024
 MAX_ENTRIES = 16
 
 

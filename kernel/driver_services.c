@@ -1,13 +1,10 @@
 #include "driver.h"
 #include "task.h"
-#define DMA_PAGES 512
+#include "memory.h"
 #define PAGE 4096u
 #define MAX_WORK 64
 #define MAX_TIMERS 32
-static uint8_t dma_pool[DMA_PAGES * PAGE] __attribute__((aligned(PAGE)));
-static uint16_t allocations[DMA_PAGES];
-static uint32_t sizes[DMA_PAGES], generations[DMA_PAGES], generation;
-static bool pool_ready, polling;
+static bool polling;
 static unsigned work_count;
 static DrvWork *work_head, *work_tail;
 static DrvTimer *timers[MAX_TIMERS];
@@ -77,22 +74,7 @@ int drv_udelay(unsigned us) {
         __asm__ volatile("pause");
     return 0;
 }
-static bool usable_pool(void) {
-    uint64_t start = (uint32_t)dma_pool, end = start + sizeof(dma_pool);
-    uint32_t count = *(volatile uint32_t *)0x5000;
-    for (uint32_t i = 0; i < count && i < 64; i++) {
-        const uint8_t *entry = (void *)(0x5004 + i * 24);
-        uint64_t base, length;
-        memcpy(&base, entry, 8);
-        memcpy(&length, entry + 8, 8);
-        if (*(const uint32_t *)(entry + 16) == 1 && base <= start && length <= UINT64_MAX - base &&
-            base + length >= end)
-            return true;
-    }
-    return false;
-}
 void driver_services_init(void) {
-    pool_ready = usable_pool();
     uint32_t a = 1, b, c, d;
     __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "=c"(c), "=d"(d));
     if ((d & (1u << 4)) && drv_irqs_enabled()) {
@@ -107,105 +89,40 @@ void driver_services_init(void) {
         if (rate && rate <= UINT32_MAX)
             cycles_per_us = rate;
     }
-    serial_write(pool_ready ? "Driver services: E820-backed 2 MiB DMA pool / workers / timers\n"
-                            : "Driver services: DMA pool unavailable in E820 map\n");
-}
-static bool power2(size_t v) {
-    return v && !(v & (v - 1));
+    MemoryStats stats; memory_stats(&stats);
+    serial_write(stats.ready ? "Driver services: shared physical RAM / DMA masks / workers / timers\n"
+                             : "Driver services: physical memory manager unavailable\n");
 }
 int drv_dma_alloc(size_t bytes, size_t align, uint32_t mask, size_t boundary, DrvDma *out) {
-    if (!out)
-        return DRV_EINVAL;
-    /* Caller passes an empty handle; never overwrite a live allocation. */
-    if (out->cpu || out->cookie)
-        return DRV_EBUSY;
-    if (!bytes || bytes > sizeof(dma_pool) || !power2(align) || align > sizeof(dma_pool) ||
-        (boundary && (!power2(boundary) || boundary < bytes)))
-        return DRV_EINVAL;
-    if (!pool_ready)
-        return DRV_ENOMEM;
-    if (drv_in_irq() && bytes > PAGE)
-        return DRV_ENOTSUP;
-    unsigned pages = (bytes + PAGE - 1) / PAGE;
-    uint32_t flags = drv_irq_save();
-    for (unsigned i = 0; i + pages <= DMA_PAGES; i++) {
-        uint32_t bus = (uint32_t)(dma_pool + i * PAGE);
-        uint64_t last = (uint64_t)bus + bytes - 1;
-        if ((bus & (align - 1)) || last > mask || (boundary && (bus / boundary != last / boundary)))
-            continue;
-        unsigned n = 0;
-        while (n < pages && !allocations[i + n])
-            n++;
-        if (n != pages) {
-            i += n;
-            continue;
-        }
-        allocations[i] = pages;
-        for (unsigned j = 1; j < pages; j++)
-            allocations[i + j] = 0xffff;
-        sizes[i] = bytes;
-        if (!++generation)
-            ++generation;
-        generations[i] = generation;
-        *out = (DrvDma){dma_pool + i * PAGE, bus, bytes, generation};
-        drv_irq_restore(flags);
-        memset(out->cpu, 0, pages * PAGE);
-        return 0;
-    }
-    drv_irq_restore(flags);
-    return DRV_ENOMEM;
-}
-static int allocation_index(void *cpu) {
-    uintptr_t p = (uintptr_t)cpu, base = (uintptr_t)dma_pool;
-    if (p < base || p >= base + sizeof(dma_pool) || (p - base) % PAGE)
-        return -1;
-    return (p - base) / PAGE;
-}
-int drv_dma_free(DrvDma *mem) {
-    if (!mem)
-        return DRV_EINVAL;
-    int i = allocation_index(mem->cpu);
-    if (i < 0)
-        return DRV_EINVAL;
-    uint32_t flags = drv_irq_save();
-    unsigned count = allocations[i];
-    if (!count || count == 0xffff || mem->bus != (uint32_t)mem->cpu ||
-        mem->cookie != generations[i] || mem->size != sizes[i]) {
-        drv_irq_restore(flags);
-        return DRV_EINVAL;
-    }
-    for (unsigned j = 0; j < count; j++)
-        allocations[i + j] = 0;
-    sizes[i] = 0;
-    memset(mem, 0, sizeof(*mem));
-    drv_irq_restore(flags);
+    if (!out) return DRV_EINVAL;
+    if (out->cpu || out->cookie) return DRV_EBUSY;
+    if (drv_in_irq() && bytes > PAGE) return DRV_ENOTSUP;
+    PmmAllocation allocation={0};
+    int rc=memory_allocate(bytes,align,mask,boundary,false,true,&allocation);
+    if (rc) return rc;
+    *out=(DrvDma){(void *)(uintptr_t)allocation.address,allocation.address,bytes,allocation.cookie};
     return 0;
 }
+int drv_dma_free(DrvDma *mem) {
+    if (!mem || mem->bus!=(uintptr_t)mem->cpu) return DRV_EINVAL;
+    PmmAllocation allocation={mem->bus,mem->size,mem->cookie};
+    int rc=memory_release(&allocation);
+    if (!rc) memset(mem,0,sizeof(*mem));
+    return rc;
+}
 void *drv_alloc(size_t bytes) {
-    DrvDma mem = {0};
-    return drv_dma_alloc(bytes, 16, UINT32_MAX, 0, &mem) ? 0 : mem.cpu;
+    DrvDma mem={0};
+    return drv_dma_alloc(bytes,16,UINT32_MAX,0,&mem) ? 0 : mem.cpu;
 }
 int drv_free(void *ptr) {
-    if (!ptr)
-        return 0;
-    int i = allocation_index(ptr);
-    if (i < 0)
-        return DRV_EINVAL;
-    uint32_t flags = drv_irq_save();
-    DrvDma mem = {ptr, (uint32_t)ptr, sizes[i], generations[i]};
-    int result = drv_dma_free(&mem);
-    drv_irq_restore(flags);
-    return result;
+    if (!ptr) return 0;
+    PmmAllocation allocation;
+    int rc=memory_lookup((uintptr_t)ptr,&allocation);
+    return rc ? rc : memory_release(&allocation);
 }
 size_t drv_dma_available(void) {
-    uint32_t flags = drv_irq_save();
-    size_t pages = 0;
-    if (pool_ready)
-        for (unsigned i = 0; i < DMA_PAGES; i++)
-            if (!allocations[i])
-                pages++;
-    drv_irq_restore(flags);
-    return pages * PAGE;
+    MemoryStats stats; memory_stats(&stats);
+    return (size_t)stats.free_bytes;
 }
 void drv_work_init(DrvWork *work, DrvCallback fn, void *arg) {
     *work = (DrvWork){.fn = fn, .arg = arg};
@@ -379,7 +296,7 @@ int drv_sleep_ms(uint32_t ms) {
 void driver_services_status(char *out, size_t cap) {
     char n[20];
     out[0] = 0;
-    append(out, "Native driver services v1 / x86 UP\nDMA available: ", cap);
+    append(out, "Native driver services v1 / x86 UP\nShared DMA-addressable free RAM: ", cap);
     number(n, drv_dma_available());
     append(out, n, cap);
     append(out, " bytes\nPCI INTx / uncached MMIO / packet queues / binary firmware\n", cap);

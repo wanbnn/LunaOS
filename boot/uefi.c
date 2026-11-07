@@ -132,7 +132,7 @@ static int memory_handoff(uint8_t *buffer,uint64_t size,uint64_t stride,uint8_t 
    regions[used-1].length+=regions[i].length;
   else regions[used++]=regions[i];
  }
- if(used>64) return 0;
+ if(used>128) return 0;
  *(uint32_t *)out=used;memcpy(out+4,regions,used*sizeof(Region));return 1;
 }
 EFI_STATUS efi_main(EFI_HANDLE image,EFI_SYSTEM_TABLE *table) {

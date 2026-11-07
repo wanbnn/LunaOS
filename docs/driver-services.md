@@ -10,7 +10,7 @@ os headers ou a totalidade das APIs de drivers Linux. Não é possível compilar
 
 | Serviço | Implementação e contrato |
 | --- | --- |
-| Memória de driver | Pool próprio de 2 MiB, separado do allocator JS, validado contra E820, zero na alocação, páginas físicas contíguas, liberação e rejeição de handles DMA obsoletos |
+| Memória de driver | Páginas do gerenciador físico E820 compartilhado com o heap, sem pool fixo de 2 MiB; zero na alocação, páginas físicas contíguas, liberação e rejeição de handles DMA obsoletos |
 | DMA coerente | Endereço CPU e endereço de barramento separados; máscara, alinhamento e fronteira solicitados; implementação x86 com identidade física, sem IOMMU |
 | PCI | Busca multifunção, revisão/subsistema, posse exclusiva, leitura/escrita de configuração de 8/16/32 bits, sondagem/restauração de BARs, enable separado de bus master |
 | MMIO | Arena virtual de 16 MiB em `0x3c000000`, PTEs supervisor com PCD/PWT, partilhada pelos CR3s, acesso de 8/16/32 bits com limites/alinhamento e barreiras |
@@ -19,9 +19,9 @@ os headers ou a totalidade das APIs de drivers Linux. Não é possível compilar
 | Trabalho diferido | FIFO de até 64 trabalhos pendentes, supressão de duplicatas, cancelamento, reenvio e orçamento por iteração |
 | Tempo | PIT monotônico em milissegundos, até 32 timers de disparo único com callbacks diferidos, cancelamento; `udelay` de até 1 ms calibrado por TSC/PIT |
 | Pacotes | Buffers DMA, headroom/tailroom, push/pull/put, referências, FIFO limitada a 64 entradas e transferência explícita de propriedade |
-| Firmware | Arquivo binário separado no disco, até 16 entradas, 512 KiB por arquivo e 2 MiB totais, nomes relativos, checagem de integridade e liberação |
+| Firmware | Arquivo binário separado no disco, até 16 entradas, 2 MiB por arquivo e 2 MiB totais, nomes relativos, checagem de integridade e liberação |
 
-O heap e os metadados são limitados; falhas retornam `DRV_ENOMEM`/`DRV_ENOSPC`.
+A capacidade de heap/DMA depende das páginas físicas disponíveis e da máscara de endereço do dispositivo; falhas retornam `DRV_ENOMEM`/`DRV_ENOSPC`.
 Não há fallbacks que anunciem sucesso para operações não implementadas.
 `drv_pci_msi_enable` retorna `DRV_ENOTSUP`. IRQs sem roteamento legado utilizável
 também retornam `DRV_ENOTSUP`.
@@ -56,7 +56,7 @@ também retornam `DRV_ENOTSUP`.
   ou retorna timeout. Em IRQ, worker ou com IF=0 retorna `DRV_EDEADLK`.
 - A alocação de até uma página é permitida em IRQ, com custo limitado; blocos
   maiores exigem contexto de processo. Não usar `drv_free` sobre memória que não
-  veio do pool. Liberação de DMA exige que o dispositivo tenha parado de usá-la.
+  veio do alocador físico. Liberação de DMA exige que o dispositivo tenha parado de usá-la.
 - Pacotes podem compartilhar referências fora das filas, mas mutações exigem
   uma referência única. Enfileirar exige propriedade exclusiva e transfere essa
   referência à fila. Não liberar/modificar enquanto enfileirado. Dequeue devolve

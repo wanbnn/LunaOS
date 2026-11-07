@@ -39,12 +39,16 @@ int main(void) {
     assert(!wifi_scan_attach(&scanner,&radio,channels,2));
     assert(!wifi_scan_start()); assert(wifi_scan_start()==-16);
     wifi_poll();
-    WifiAp aps[8]; unsigned count;
+    WifiAp aps[WIFI_MAX_APS]; unsigned count;
     assert(!wifi_scan_results(aps,8,&count) && count==1);
     assert(!strcmp(aps[0].ssid,"test") && aps[0].security==WIFI_WPA2_PSK);
+    assert(aps[0].bssid[0]==2 && aps[0].bssid[5]==1);
+    assert(wifi_channel_band(aps[0].channel)==WIFI_BAND_2GHZ);
     clock_ms=220; wifi_poll(); assert(channel==36); wifi_poll();
     assert(!wifi_scan_results(aps,8,&count) && count==2);
     assert(!strcmp(aps[1].ssid,"five") && aps[1].security==WIFI_OPEN);
+    assert(aps[1].bssid[5]==36);
+    assert(wifi_channel_band(aps[1].channel)==WIFI_BAND_5GHZ);
     clock_ms=440; wifi_poll();
     WifiState state; assert(!wifi_state(&state) && state.link==WIFI_IDLE && stops==1);
     assert(wifi_connect_ap(aps,"12345678")==-95); /* scan is not association */

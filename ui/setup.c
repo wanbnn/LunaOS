@@ -358,7 +358,11 @@ void setup_draw(void) {
             const char *security = ap->security == WIFI_OPEN ? "Open" :
                                    ap->security == WIFI_WPA2_PSK ? "WPA2-PSK" :
                                    "Security unsupported";
-            row(158, 396 + (int)i * 55, 708, ap->ssid, security,
+            char detail[96] = {0};
+            append(detail, wifi_channel_band(ap->channel) == WIFI_BAND_2GHZ ?
+                   "2.4 GHz | " : "5 GHz | ", sizeof(detail));
+            append(detail, security, sizeof(detail));
+            row(158, 396 + (int)i * 55, 708, ap->ssid, detail,
                 wifi_selected == (int)(wifi_first + i), ap->security != WIFI_OTHER);
         }
         if (wifi_state_rc == 0 && wifi_link.link == WIFI_ONLINE) {

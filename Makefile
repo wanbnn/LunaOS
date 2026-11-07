@@ -5,7 +5,7 @@ PYTHON ?= python3
 # Local build-only dependencies may also be installed with tools/bootstrap.sh.
 export PYTHONPATH := $(CURDIR)/.tools/python:$(PYTHONPATH)
 CFLAGS := -m32 -std=gnu11 -O2 -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -fno-asynchronous-unwind-tables -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Ikernel -Ibuild
-SOURCES := $(wildcard kernel/*.c drivers/*.c lib/*.c ui/*.c apps/*.c net/wireless/*.c)
+SOURCES := $(wildcard kernel/*.c drivers/*.c lib/*.c ui/*.c apps/*.c net/*.c net/wireless/*.c)
 MUSLINC := -nostdinc -isystem third_party/musl/include -isystem third_party/musl/arch/i386 -isystem third_party/musl/arch/generic -isystem third_party/musl/obj/include -isystem $(shell $(CC) -print-file-name=include)
 LIBGCC32 := $(firstword $(wildcard .tools/usr/lib/gcc/*/*/32/libgcc.a /usr/lib/gcc/*/*/32/libgcc.a))
 NATIVEFLAGS := -fexcess-precision=standard -m32 -Os -ffreestanding -fno-builtin -fno-pie -fno-stack-protector -ffunction-sections -fdata-sections -mno-sse -mfpmath=387 $(MUSLINC) -Ikernel -Ibuild -Ithird_party/quickjs
@@ -92,7 +92,7 @@ run-iso: all
 	LUNA_IMAGE=dist/LunaOS.iso tools/run-qemu.sh
 run: all
 	tools/run-qemu.sh
-test: all test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
+test: all test-pmm test-heap test-wpa2 test-dhcp test-wifi-station test-iwl-firmware test-iwl-pcie test-wifi-intel test-wifi-scan test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
 	$(PYTHON) tests/smoke.py
 	$(PYTHON) tests/multitask.py
 	$(PYTHON) tests/desktop.py
@@ -104,7 +104,7 @@ test: all test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-d
 	$(PYTHON) tests/iso.py
 test-iso-install: all
 	LUNA_SETUP_ISO=1 LUNA_TEST_DIR=build/test-iso-install $(PYTHON) tests/setup.py
-check: all test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
+check: all test-pmm test-heap test-wpa2 test-dhcp test-wifi-station test-iwl-firmware test-iwl-pcie test-wifi-intel test-wifi-scan test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
 	$(PYTHON) tools/check_image.py
 	$(PYTHON) tools/check_iso.py
 clean:
@@ -168,3 +168,53 @@ test-webengine:
 	@mkdir -p build
 	$(CC) -std=c11 -g -Wall -Wextra -Werror -fsanitize=address,undefined -Ikernel -Ibuild tests/webengine_test.c ui/web_dom.c ui/web_css.c ui/web_layout.c ui/web_image.c -o build/webengine-test
 	./build/webengine-test
+
+.PHONY: test-wifi-intel
+test-wifi-intel:
+	@mkdir -p build
+	$(CC) -std=c11 -O2 -ffunction-sections -fdata-sections -Wall -Wextra -Werror -Ikernel drivers/wifi_intel.c tests/wifi_intel.c -Wl,--gc-sections -o build/wifi-intel-test
+	./build/wifi-intel-test
+
+build/net/wpa2.o: net/wpa2.c third_party/musl/lib/libc.a
+	@mkdir -p build/net
+	$(CC) $(CFLAGS) $(MUSLINC) -Ithird_party/bearssl/inc -c $< -o $@
+
+.PHONY: test-iwl-firmware test-wpa2 test-dhcp
+test-iwl-firmware:
+	@mkdir -p build
+	$(CC) -std=c11 -O2 -Wall -Wextra -Werror drivers/iwl_firmware.c tests/iwl_firmware.c -o build/iwl-firmware-test
+	./build/iwl-firmware-test assets/firmware/iwlwifi-so-a0-gf-a0-89.ucode
+
+build/host-bearssl/%.o: third_party/bearssl/src/%.c
+	@mkdir -p $(dir $@)
+	$(CC) -std=c11 -O2 -Ithird_party/bearssl/inc -Ithird_party/bearssl/src -c $< -o $@
+HOST_WPA_CRYPTO := codec/dec32be codec/enc32be codec/ccopy hash/sha1 mac/hmac mac/hmac_ct hash/dig_size symcipher/aes_ct symcipher/aes_ct_dec symcipher/aes_ct_cbcdec
+test-wpa2: $(addprefix build/host-bearssl/,$(addsuffix .o,$(HOST_WPA_CRYPTO)))
+	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -Ithird_party/bearssl/inc net/wpa2.c tests/wpa2.c $^ -o build/wpa2-test
+	./build/wpa2-test
+
+test-dhcp:
+	@mkdir -p build
+	$(CC) -std=c11 -O2 -Wall -Wextra -Werror net/dhcp.c tests/dhcp.c -o build/dhcp-test
+	./build/dhcp-test
+
+.PHONY: test-wifi-station
+test-wifi-station: $(addprefix build/host-bearssl/,$(addsuffix .o,$(HOST_WPA_CRYPTO)))
+	$(CC) -std=c11 -O2 -ffunction-sections -fdata-sections -Wall -Wextra -Werror -Wno-pointer-to-int-cast -Ikernel -Ithird_party/bearssl/inc drivers/net.c drivers/wifi_station.c net/wpa2.c net/netif.c net/dhcp.c net/time_dns.c tests/wifi_station.c $^ -Wl,--gc-sections -o build/wifi-station-test
+	./build/wifi-station-test
+
+.PHONY: test-iwl-pcie
+test-iwl-pcie:
+	@mkdir -p build
+	$(CC) -std=c11 -O2 -ffunction-sections -fdata-sections -Wall -Wextra -Werror -Ikernel drivers/iwl_pcie.c drivers/iwl_firmware.c tests/iwl_pcie.c -Wl,--gc-sections -o build/iwl-pcie-test
+	./build/iwl-pcie-test
+
+.PHONY: test-pmm test-heap
+test-pmm:
+	@mkdir -p build
+	$(CC) -std=c11 -O2 -Wall -Wextra -Werror kernel/pmm.c tests/pmm.c -o build/pmm-test
+	./build/pmm-test
+test-heap:
+	@mkdir -p build
+	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -Ikernel kernel/pmm.c kernel/heap.c tests/heap.c -o build/heap-test
+	./build/heap-test

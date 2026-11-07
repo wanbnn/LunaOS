@@ -1,3 +1,4 @@
+#include "calendar.h"
 #include "install.h"
 #include "settings.h"
 #include "web.h"
@@ -283,11 +284,13 @@ void gui_open(int app) {
         return;
     Window *w = &windows[app];
     if (!w->open) {
-        app_reset(app);
         surface_valid[app] = false;
         uint32_t pid = task_spawn(app, names[app], 3, 0);
         if (!pid)
             return;
+        uint32_t previous=task_memory_enter(pid);
+        app_reset(app);
+        task_memory_leave(previous);
         int width = app == APP_SETTINGS ? 880
                     : app == APP_HOME   ? 650
                     : app == APP_TASKS  ? 864
@@ -642,6 +645,7 @@ static void paint_region(int rx, int ry, int rw, int rh) {
     if (launcher_open)
         launcher_draw();
     gfx_set_origin(0, 0);
+    calendar_draw();
     if (switch_count) {
         glass((W - 468) / 2, H - 208, 468, 62, 22, 1);
         icon((W - 468) / 2 + 20, H - 192, app_icons[active_app], 28, 0xffffff);
@@ -744,6 +748,7 @@ void gui_pointer(int x, int y, int buttons) {
                              y - windows[APP_SETTINGS].y - 46});
     if (!pressed)
         return;
+    if(calendar_click(x,y)){controls_open=false;launcher_open=false;gui_damage_all();return;}
     if (launcher_open) {
         x -= (W - GFX_BOOT_W) / 2;
         int found[APP_COUNT], n = launcher_results(found);

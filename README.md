@@ -20,7 +20,7 @@ make run
 make run-iso
 ```
 
-Feche uma instância antiga para iniciar a imagem nova. O launcher usa 64 MiB de RAM,
+Feche uma instância antiga para iniciar a imagem nova. O launcher usa 64 MiB de RAM por padrão de teste (configure, por exemplo, `LUNA_RAM=4096 make run`),
 VGA padrão com modo nativo de 32 bits, IDE, RTL8139 e AC97. Usa KVM e CPU host quando
 `/dev/kvm` está acessível; caso contrário usa TCG e CPU max. O guest desta versão
 requer **64 MiB**, por causa dos caches gráficos e reservas do runtime.
@@ -262,3 +262,41 @@ nas capturas, limites do mouse e persistência até 1920×1080, com 64 MiB de RA
 próprio com El Torito e continua lendo a origem pelo driver ATAPI nativo. A mídia
 óptica é somente leitura, e o instalador pode copiar para um disco IDE separado.
 Veja [iso.md](docs/iso.md) para comandos, testes e limites BIOS/ATAPI.
+
+### Base compartilhada de Wi-Fi e Intel AX211
+
+A API preserva BSSID, canal e segurança de até 32 redes e a configuração exibe
+2,4 ou 5 GHz. O inventário Intel reconhece o AX211 desta máquina
+(`8086:51f0`, subsistema `8086:4090`), mas **scan e conexão no AX211 ainda
+dependem de um backend Intel nativo**. A conexão Wi-Fi continua indisponível.
+Há agora parser e firmware Intel licenciado, preparação PCI/MMIO (`wifidiag intel`),
+handshake WPA2-PSK/CCMP compartilhado, porta de dados e integração DHCP/IPv4.
+Essas camadas passam por testes com rádio simulado; o boot do firmware e o rádio
+Intel ainda não estão implementados. Arquitetura, limites e etapas restantes:
+[Intel AX211](docs/intel-ax211-wifi.md).
+
+### Memória física e heap sob demanda
+
+O kernel agora aloca páginas nas regiões utilizáveis do mapa E820/UEFI, sem teto
+de 64 MiB e sem os antigos pools fixos de 2 MiB para DMA e 8 MiB para o runtime.
+Heap, JavaScript e drivers passam a crescer conforme a RAM física disponível.
+`free` mostra memória descoberta, endereçável, reservada, alocada e livre;
+`memtest 96` verifica 96 MiB de heap + DMA e a devolução das páginas.
+
+O kernel permanece i386 sem PAE: RAM remapeada acima de 4 GiB é informada, mas
+ainda não pode ser alocada. Isso inclui parte dos 4 GiB instalados em máquinas
+que remapeiam RAM por causa de MMIO. Detalhes e testes: [memória física](docs/physical-memory.md).
+
+### Consumo de RAM por processo
+
+O Task Manager mostra **RAM** por PID (páginas de heap + pilhas + tabelas de
+páginas), com arenas físicas exclusivas por processo e liberação no encerramento.
+O kernel mantém sua própria conta de drivers e buffers compartilhados, sem contar
+novamente o heap dos apps. `ps` detalha RAM, heap e pilha. Não há quota fixa por
+PID; os backends continuam sendo serviços do kernel, sem isolamento completo de
+heaps de usuário. [Implementação e testes](docs/process-memory.md).
+
+O relógio da barra superior abre um calendário mensal. Em **Configurações > Data e hora**,
+é possível ajustar data/hora offline, escolher o fuso UTC e sincronizar por NTP
+com `time.cloudflare.com` (servidor configurável). Veja [calendário e horário](docs/calendar.md)
+para comandos, persistência, limites e testes.

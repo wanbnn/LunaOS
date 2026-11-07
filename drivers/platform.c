@@ -81,7 +81,7 @@ void platform_init(void) {
     outb(0x40, 1193 >> 8);
     uint32_t count = *(volatile uint32_t *)0x5000;
     uint64_t total = 0;
-    for (uint32_t i = 0; i < count && i < 64; i++) {
+    for (uint32_t i = 0; i < count && i < 128; i++) {
         uint8_t *e = (uint8_t *)(0x5004 + i * 24);
         if (*(uint32_t *)(e + 16) == 1)
             total += *(uint64_t *)(e + 8);
@@ -118,49 +118,4 @@ void poweroff(void) {
     outw(0x604, 0x2000);
     outw(0xb004, 0x2000);
     outw(0x4004, 0x3400);
-}
-static uint8_t cmos(int r) {
-    outb(0x70, r);
-    return inb(0x71);
-}
-static int bcd(int x) {
-    return (x >> 4) * 10 + (x & 15);
-}
-void rtc_string(char *s) {
-    for (int i = 0; i < 100000 && (cmos(0xa) & 0x80); i++)
-        ;
-    int h = cmos(4), m = cmos(2), d = cmos(7), mo = cmos(8), y = cmos(9);
-    if (!(cmos(0xb) & 4)) {
-        h = bcd(h & 0x7f);
-        m = bcd(m);
-        d = bcd(d);
-        mo = bcd(mo);
-        y = bcd(y);
-    }
-    char b[16];
-    strcpy(s, "20");
-    number(b, y);
-    if (y < 10)
-        strcat(s, "0");
-    strcat(s, b);
-    strcat(s, "-");
-    if (mo < 10)
-        strcat(s, "0");
-    number(b, mo);
-    strcat(s, b);
-    strcat(s, "-");
-    if (d < 10)
-        strcat(s, "0");
-    number(b, d);
-    strcat(s, b);
-    strcat(s, "  ");
-    if (h < 10)
-        strcat(s, "0");
-    number(b, h);
-    strcat(s, b);
-    strcat(s, ":");
-    if (m < 10)
-        strcat(s, "0");
-    number(b, m);
-    strcat(s, b);
 }

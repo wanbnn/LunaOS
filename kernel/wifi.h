@@ -3,7 +3,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#define WIFI_MAX_APS 8
+#define WIFI_MAX_APS 32
 #define WIFI_MAX_SSID 32
 #define WIFI_MAX_PASSWORD 63
 typedef enum {
@@ -11,11 +11,17 @@ typedef enum {
     WIFI_ASSOCIATING = 3, WIFI_ASSOCIATED = 4, WIFI_ONLINE = 5
 } WifiLink;
 typedef enum { WIFI_OPEN = 0, WIFI_WPA2_PSK = 1, WIFI_OTHER = 2 } WifiSecurity;
+typedef enum { WIFI_BAND_UNKNOWN = 0, WIFI_BAND_2GHZ = 1, WIFI_BAND_5GHZ = 2 } WifiBand;
+/* Frequency mapping only; permission to tune/transmit comes from the backend
+ * EEPROM/NVM and country policy, never from this helper. */
+unsigned wifi_channel_frequency(uint8_t channel);
+WifiBand wifi_channel_band(uint8_t channel);
 typedef struct {
     char ssid[WIFI_MAX_SSID + 1];
     uint8_t ssid_len, channel;
     int16_t rssi_dbm;
     WifiSecurity security;
+    uint8_t bssid[6]; /* Unicast AP identity, preserved through connection. */
 } WifiAp;
 typedef struct {
     WifiLink link;

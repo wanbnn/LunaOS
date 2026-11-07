@@ -30,7 +30,7 @@ int javascript_eval(const char *source, char *out, size_t cap) {
         append(out, "JavaScript: out of memory.\n", cap);
         return -1;
     }
-    JS_SetMemoryLimit(rt, 4 * 1024 * 1024);
+    /* Runtime allocations use the growable physical-memory-backed heap. */
     JS_SetMaxStackSize(rt, 48 * 1024);
     deadline = frame_clock + 100;
     JS_SetInterruptHandler(rt, interrupt_js, 0);

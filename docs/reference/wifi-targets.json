@@ -100,6 +100,14 @@
       "pci": "14e4:43ba",
       "state": "port_pending",
       "source": "https://raw.githubusercontent.com/torvalds/linux/master/drivers/net/wireless/broadcom/brcm80211/include/brcm_hw_ids.h"
+    },
+    {
+      "name": "Intel AX211 (development machine, CNVio2)",
+      "pci": "8086:51f0",
+      "subsystem": "8086:4090",
+      "revision": "01",
+      "state": "inventory_only_backend_pending",
+      "source": "https://raw.githubusercontent.com/torvalds/linux/v6.12/drivers/net/wireless/intel/iwlwifi/pcie/drv.c"
     }
   ]
 }

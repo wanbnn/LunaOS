@@ -88,6 +88,7 @@ static void ingest(WifiScanner *w, unsigned bytes, int16_t rssi) {
     WifiAp *ap=w->aps+slot;
     *ap=(WifiAp){.ssid_len=b.ssid_len,.channel=channel,.rssi_dbm=rssi,
         .security=security(w->frame,bytes,b.capability)};
+    memcpy(ap->bssid,b.bssid,6);
     memcpy(ap->ssid,b.ssid,b.ssid_len); memcpy(w->bssid[slot],b.bssid,6);
 }
 static void finish(WifiScanner *w, int error) {
@@ -120,7 +121,7 @@ int wifi_scan_attach(WifiScanner *w, const WifiScanRadio *r,
        !r->receive || !r->stop || !channels || !count || count>64) return EINVAL;
     if(w->attached) return -16; /* context must be zero-initialized */
     for(unsigned i=0;i<count;i++) {
-        if(!channels[i] || channels[i]>196) return EINVAL;
+        if(!wifi_channel_frequency(channels[i])) return EINVAL;
         for(unsigned j=0;j<i;j++) if(channels[j]==channels[i]) return EINVAL;
     }
     memset(w,0,sizeof(*w)); w->radio=*r; w->channel_count=count;

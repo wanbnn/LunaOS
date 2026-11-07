@@ -1,3 +1,4 @@
+#include "clock.h"
 #include "settings.h"
 Preferences prefs = {.mouse_speed = 100,
                      .repeat_delay = 500,
@@ -90,5 +91,5 @@ const char *system_text(const char *en, const char *pt) {
 }
 
 bool settings_save(void) {
-    return settings_write() && fs_save();
+    return settings_write() && clock_write() && fs_save();
 }

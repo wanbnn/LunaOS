@@ -1,3 +1,4 @@
+#include "calendar.h"
 #include "settings.h"
 #include "window.h"
 #define WHITE 0xf2f7ff
@@ -6,14 +7,14 @@ static int page, slider = -1;
 static bool path_edit, resolution_open;
 static char status[192] = "Changes apply immediately. Save to keep them after restart.";
 static const char *pages[] = {"Keyboard",   "Mouse",   "Displays", "Sound",
-                              "Appearance", "Network", "System"};
+                              "Appearance", "Network", "System", "Date & time"};
 static const char *pages_pt[] = {"Teclado",   "Mouse", "Monitores", "Som",
-                                 "Aparência", "Rede",  "Sistema"};
+                                 "Aparência", "Rede",  "Sistema", "Data e hora"};
 static const char *page_name(int i) {
     return system_text(pages[i], pages_pt[i]);
 }
 static const int page_icons[] = {ICON_COMMAND, ICON_CURSOR,   ICON_SUN,    ICON_VOLUME,
-                                 ICON_MOON,    ICON_ETHERNET, ICON_SLIDERS};
+                                 ICON_MOON,    ICON_ETHERNET, ICON_SLIDERS, ICON_SUN};
 static uint32_t accents[] = {0x518bea, 0x7e76e7, 0x359e99, 0xd279a5, 0xc58d51, 0x8296ab};
 uint32_t settings_accent(void) {
     return accents[prefs.accent % 6];
@@ -88,7 +89,7 @@ static void button(int x, int y, int w, const char *s) {
 void settings_draw(int x, int y, int w, int h) {
     round_rect(x, y, 176, h, 15, 0x13283e, 95);
     text(x + 17, y + 14, system_text("Settings", "Configurações"), 20, WHITE);
-    for (int i = 0; i < 7; i++) {
+    for (int i = 0; i < 8; i++) {
         int yy = y + 62 + i * 47;
         round_rect(x + 8, yy, 160, 37, 11, 0xffffff, i == page ? 35 : 5);
         icon(x + 17, yy + 9, page_icons[i], 20, WHITE);
@@ -98,6 +99,7 @@ void settings_draw(int x, int y, int w, int h) {
     int a = x + 198, b = y, width = w - 198;
     text(a, b + 3, page_name(page), 28, WHITE);
     label(a, b + 47, status);
+    if (page == 7) { time_settings_draw(a,b,width); return; }
     if (page == 0) {
         row(a, b + 83, width, "Layout",
             prefs.keyboard_layout ? "Portuguese / ABNT2 basics" : "English / US QWERTY");
@@ -224,6 +226,7 @@ void settings_draw(int x, int y, int w, int h) {
     }
 }
 void settings_key(int key) {
+    if(page==7){time_settings_key(key);return;}
     int code = key & 0xfff;
     if (!path_edit)
         return;
@@ -283,8 +286,8 @@ void settings_click(int x, int y, int width, int height) {
         return;
     }
     if (x < 176) {
-        if (y >= 62 && y < 391)
-            page = (y - 62) / 47;
+        if (y >= 62 && y < 438)
+            { page = (y - 62) / 47; if(page==7)time_settings_load(); }
         if (y >= height - 46) {
             bool ok = settings_save();
             strcpy(status, ok ? "Settings saved to disk."
@@ -293,6 +296,7 @@ void settings_click(int x, int y, int width, int height) {
         gui_invalidate_app(APP_SETTINGS);
         return;
     }
+    if(page==7){time_settings_click(x-198,y);return;}
     int a = x - 198, w = width - 198;
     if (page == 6) {
         if (y >= 83 && y < 138)
@@ -420,3 +424,7 @@ void quick_pointer(int x, int y, bool pressed, bool released) {
 void quick_key(int key) {
     (void)key;
 }
+
+void settings_open_time(void){page=7;time_settings_load();gui_invalidate_app(APP_SETTINGS);}
+
+void settings_clock_refresh(void){if(page==7&&windows[APP_SETTINGS].open)gui_invalidate_app(APP_SETTINGS);}

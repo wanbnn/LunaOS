@@ -13,8 +13,9 @@ SECTIONS {
  __bss_start = .;
  .bss.low (NOLOAD) : { build/kernel/account.o(.bss) build/kernel/driver_services.o(.bss) build/kernel/fs.o(.bss) build/kernel/task.o(.bss) } :data
  __bss_low_end = .;
- /* Keep OVMF legacy ACPI NVS at 8 MiB intact across ExitBootServices. */
- . = MAX(., 0x810000);
+ /* Leave low firmware/ACPI allocations below 16 MiB intact. The UEFI
+  * loader still validates the actual linked spans against its memory map. */
+ . = MAX(., 0x1000000);
  __bss_high_start = .;
  .bss (NOLOAD) : { *(.bss*) *(COMMON) } :data
  __bss_end = .;

@@ -1,5 +1,6 @@
 #include "luna.h"
 #include "wifi_port.h"
+#include "wifi_intel.h"
 #include "rtw8822be_pcie.h"
 /* Other devices remain discovery-only. */
 typedef struct { uint16_t vendor, device; const char *name; } WirelessTarget;
@@ -23,6 +24,12 @@ void wireless_status(char *out, size_t cap) {
         scanned = true;
         report[0] = 0;
         unsigned devices = 0;
+        char intel_report[1024];
+        wifi_intel_status(intel_report, sizeof(intel_report));
+        if (intel_report[0]) {
+            append(report, intel_report, sizeof(report));
+            devices++;
+        }
         if (rtw8822be_present()) {
             rtw8822be_status(report, sizeof(report));
             devices++;

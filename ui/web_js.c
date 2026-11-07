@@ -1218,7 +1218,7 @@ bool web_js_run(WebNode *root, char *error, size_t ecap) {
             append(error, "JavaScript runtime could not be created.", ecap);
         return false;
     }
-    JS_SetMemoryLimit(js_runtime, 4 * 1024 * 1024);
+    /* Runtime allocations use the growable physical-memory-backed heap. */
     JS_SetMaxStackSize(js_runtime, 48 * 1024);
     JS_SetInterruptHandler(js_runtime, interrupt_js, 0);
     js_context = JS_NewContext(js_runtime);

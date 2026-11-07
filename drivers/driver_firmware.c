@@ -1,7 +1,7 @@
 #include "driver.h"
 #define FW_SECTOR 16384u
 #define FW_LIMIT (2u * 1024 * 1024)
-#define FW_MAX_FILE (512u * 1024)
+#define FW_MAX_FILE (2u * 1024 * 1024)
 #define FW_ENTRIES 16
 #define FW_NAME 96
 static uint32_t hash_bytes(const uint8_t *p, unsigned n, uint32_t hash) {

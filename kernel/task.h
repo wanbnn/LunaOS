@@ -55,12 +55,21 @@ typedef struct {
     uint32_t *directory;
     uint8_t *kernel_stack;
     uint32_t stack_bytes;
+    uint32_t memory_owner; /* Per-task service attribution, preserved across yields. */
     uint32_t probe, wake_tick, cpu_permille, cpu_units, switches, run_ticks, exit_code;
     AppEvent events[TASK_EVENTS];
     uint32_t read_event, write_event;
     AppEvent delivered;
     bool event_pending, system;
 } Task;
+typedef struct {
+    uint64_t ram_bytes, heap_committed, heap_live;
+    uint32_t stack_reserved, page_tables, heap_allocations;
+} TaskMemoryStats;
+uint32_t task_memory_owner(void);
+uint32_t task_memory_enter(uint32_t pid);
+void task_memory_leave(uint32_t previous);
+void task_memory_stats(const Task *,TaskMemoryStats *);
 extern Task tasks[TASK_MAX];
 extern int current_task;
 void task_init(void);
@@ -80,6 +89,7 @@ TrapFrame *trap_dispatch(TrapFrame *);
 void task_kernel_fault(void);
 void app_event(int, AppEvent);
 void app_reset(int);
+void app_close(int);
 void gui_task_closed(int);
 void gui_serial(int);
 void gui_pointer(int, int, int);

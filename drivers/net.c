@@ -3,11 +3,19 @@
 #include "luna.h"
 #include "task.h"
 #include "web.h"
+#include "netif.h"
+#include "net_time.h"
+#include "../include/net/time_dns.h"
 bool net_ready;
 static uint16_t io;
 static uint8_t mac[6], gateway_mac[6];
 static bool gateway_known;
-static const uint8_t local_ip[4] = {10, 0, 2, 15}, gateway[4] = {10, 0, 2, 2},
+static NetInterface external_nic;
+static uint8_t netmask[4]={255,255,255,0};
+static uint8_t peer_ip[4], peer_mac[6], pending_hop[4], pending_frame[1514];
+static unsigned pending_bytes;
+static bool peer_known;
+static uint8_t local_ip[4] = {10, 0, 2, 15}, gateway[4] = {10, 0, 2, 2},
                      dns_ip[4] = {10, 0, 2, 3};
 static uint8_t rx[65536 + 2048] __attribute__((aligned(256))),
     tx[4][1536] __attribute__((aligned(256)));
@@ -18,6 +26,17 @@ static bool ping_done, dns_done;
 /* The task that currently owns the network service; nobody else may poll it. */
 static uint32_t network_owner;
 static uint8_t resolved[4];
+static struct {
+    unsigned phase; /* 0=idle, 1=resolve, 2=send request, 3=wait response, 4=done */
+    uint8_t address[4],request[48],response[512];
+    char host[128];
+    uint16_t port,local_port,id;
+    uint32_t deadline,sent,rtt;
+    unsigned bytes;
+    int error;
+} time_query;
+static void time_network_poll(void);
+static void time_network_input(const uint8_t [4],const uint8_t *,unsigned);
 static struct {
     int state;
     uint8_t ip[4];
@@ -68,6 +87,11 @@ static uint16_t sum(const uint8_t *b, unsigned n, uint32_t s) {
 static bool send_frame(const uint8_t *p, unsigned n) {
     if (!net_ready || n > 1514)
         return false;
+    if (external_nic.started) {
+        int rc=netif_transmit(&external_nic,p,n);
+        if (!rc) txcount++;
+        return !rc;
+    }
     int slot = txslot++ & 3;
     uint32_t start = ticks;
     while (!(inl(io + 0x10 + slot * 4) & (1 << 13)))
@@ -83,7 +107,7 @@ static bool send_frame(const uint8_t *p, unsigned n) {
     txcount++;
     return true;
 }
-static void arp_request(void) {
+static void arp_request_to(const uint8_t target[4]) {
     uint8_t p[60];
     memset(p, 0, sizeof(p));
     memset(p, 255, 6);
@@ -96,9 +120,10 @@ static void arp_request(void) {
     put16(p + 20, 1);
     memcpy(p + 22, mac, 6);
     memcpy(p + 28, local_ip, 4);
-    memcpy(p + 38, gateway, 4);
+    memcpy(p + 38, target, 4);
     send_frame(p, 42);
 }
+static void arp_request(void) { arp_request_to(gateway); }
 static bool ensure_gateway(void) {
     if (gateway_known)
         return true;
@@ -115,10 +140,16 @@ static bool ensure_gateway(void) {
     return false;
 }
 static void send_ip(const uint8_t *dest, int proto, const uint8_t *payload, unsigned n) {
-    if (n > 1480 || !gateway_known)
-        return;
+    if (n > 1480 || !net_ready) return;
+    bool on_link=true;
+    for (unsigned i=0;i<4;i++)
+        if ((dest[i]&netmask[i])!=(local_ip[i]&netmask[i])) on_link=false;
+    const uint8_t *hop=on_link ? dest : gateway;
+    const uint8_t *destination=0;
+    if (equal(hop,gateway,4) && gateway_known) destination=gateway_mac;
+    else if (peer_known && equal(hop,peer_ip,4)) destination=peer_mac;
     uint8_t p[1514];
-    memcpy(p, gateway_mac, 6);
+    if (destination) memcpy(p,destination,6); else memset(p,0,6);
     memcpy(p + 6, mac, 6);
     put16(p + 12, 0x800);
     uint8_t *h = p + 14;
@@ -133,7 +164,13 @@ static void send_ip(const uint8_t *dest, int proto, const uint8_t *payload, unsi
     memcpy(h + 16, dest, 4);
     put16(h + 10, sum(h, 20, 0));
     memcpy(h + 20, payload, n);
-    send_frame(p, n + 34);
+    if (destination) send_frame(p,n+34);
+    else {
+        /* Bounded single pending packet. ARP replies release it; protocol
+         * callers own retries if a peer never responds. */
+        memcpy(pending_frame,p,n+34); pending_bytes=n+34;
+        memcpy(pending_hop,hop,4); arp_request_to(hop);
+    }
 }
 static void send_tcp(int flags, const char *data, unsigned n) {
     uint8_t p[1460];
@@ -201,9 +238,18 @@ static void receive(uint8_t *p, unsigned n) {
         uint8_t *a = p + 14;
         if (be16(a) != 1 || be16(a + 2) != 0x800 || a[4] != 6 || a[5] != 4)
             return;
+        unsigned opcode=be16(a+6);
+        if ((opcode!=1 && opcode!=2) || (a[8]&1) || !equal(a+8,p+6,6)) return;
         if (equal(a + 14, gateway, 4)) {
             memcpy(gateway_mac, a + 8, 6);
             gateway_known = true;
+        }
+        if (equal(a+24,local_ip,4)) {
+            memcpy(peer_ip,a+14,4); memcpy(peer_mac,a+8,6); peer_known=true;
+            if (pending_bytes && equal(a+14,pending_hop,4)) {
+                unsigned bytes=pending_bytes; pending_bytes=0;
+                memcpy(pending_frame,a+8,6); send_frame(pending_frame,bytes);
+            }
         }
         if (be16(a + 6) == 1 && equal(a + 24, local_ip, 4)) {
             uint8_t reply[42];
@@ -230,11 +276,19 @@ static void receive(uint8_t *p, unsigned n) {
     unsigned len = total - ih;
     if (h[9] == 1 && len >= 8 && !sum(d, len, 0) && d[0] == 0 && be16(d + 4) == 0x4c55)
         ping_done = true;
-    if (h[9] == 1 && len >= 8 && d[0] == 8) {
+    if (h[9] == 1 && len >= 8 && !sum(d, len, 0) && d[0] == 8) {
         d[0] = 0;
         d[2] = d[3] = 0;
         put16(d + 2, sum(d, len, 0));
         send_ip(h + 12, 1, d, len);
+    }
+    if (h[9]==17 && len>=8 && time_query.phase &&
+        (be16(d+2)==49152 || be16(d+2)==time_query.local_port)) {
+        unsigned bytes=be16(d+4);
+        uint32_t pseudo=be16(h+12)+be16(h+14)+be16(h+16)+be16(h+18)+17+bytes;
+        if (bytes>=8 && bytes==len && (!be16(d+6) || !sum(d,bytes,pseudo)))
+            time_network_input(h+12,d,bytes);
+        return;
     }
     if (h[9] == 17 && len >= 8 && be16(d) == 53 && be16(d + 2) == 53000 &&
         equal(h + 12, dns_ip, 4)) {
@@ -289,9 +343,54 @@ static void receive(uint8_t *p, unsigned n) {
         tcp.state = 3;
     }
 }
+static void external_input(void *ctx, uint8_t *p, unsigned n) {
+    (void)ctx;
+    if (!external_nic.dhcp.configured) return;
+    const NetIpv4Config *cfg=&external_nic.dhcp.config;
+    if (!net_ready || memcmp(local_ip,cfg->address,4) || memcmp(gateway,cfg->gateway,4))
+        gateway_known=peer_known=false;
+    memcpy(local_ip,cfg->address,4); memcpy(netmask,cfg->mask,4);
+    memcpy(gateway,cfg->gateway,4); memcpy(dns_ip,cfg->dns,4);
+    net_ready=true;
+    receive(p,n); rxcount++;
+}
+int net_attach_driver(const NetDeviceOps *ops, void *ctx, const uint8_t address[6], uint32_t xid) {
+    if (io || external_nic.started || network_owner) return -16;
+    int rc=netif_start(&external_nic,ops,ctx,address,xid,frame_clock);
+    if (rc) return rc;
+    memcpy(mac,address,6); gateway_known=peer_known=false; pending_bytes=0; net_ready=false;
+    memset(&tcp,0,sizeof(tcp)); return 0;
+}
+void net_detach_driver(const NetDeviceOps *ops, void *ctx) {
+    if (!external_nic.started || external_nic.ops!=ops || external_nic.context!=ctx) return;
+    netif_stop(&external_nic); net_ready=false; gateway_known=peer_known=false; pending_bytes=0;
+    memset(&tcp,0,sizeof(tcp)); memset(mac,0,sizeof(mac));
+    memset(local_ip,0,4); memset(gateway,0,4); memset(dns_ip,0,4);
+}
+bool net_driver_ipv4(const NetDeviceOps *ops, void *ctx, NetIpv4Config *out) {
+    if (!external_nic.started || external_nic.ops!=ops || external_nic.context!=ctx ||
+        !external_nic.dhcp.configured || !external_nic.ops->link_up(ctx)) return false;
+    if (out) *out=external_nic.dhcp.config;
+    return true;
+}
 void net_poll(void) {
-    if (!net_ready)
+    if (external_nic.started) {
+        netif_poll(&external_nic,frame_clock,external_input,0);
+        if (external_nic.dhcp.configured) {
+            const NetIpv4Config *cfg=&external_nic.dhcp.config;
+            if (!net_ready || memcmp(local_ip,cfg->address,4) || memcmp(gateway,cfg->gateway,4))
+                gateway_known=peer_known=false;
+            memcpy(local_ip,cfg->address,4); memcpy(netmask,cfg->mask,4);
+            memcpy(gateway,cfg->gateway,4); memcpy(dns_ip,cfg->dns,4);
+            net_ready=true;
+        } else { net_ready=false; gateway_known=peer_known=false; pending_bytes=0; tcp.state=0; }
+        time_network_poll();
         return;
+    }
+    if (!net_ready) {
+        time_network_poll();
+        return;
+    }
     for (int k = 0; k < 32 && !(inb(io + 0x37) & 1); k++) {
         uint8_t *h = rx + rxpos;
         uint16_t status = *(uint16_t *)h, len = *(uint16_t *)(h + 2);
@@ -314,6 +413,7 @@ void net_poll(void) {
         outw(io + 0x38, rxpos - 16);
     }
     outw(io + 0x3e, 0xffff);
+    time_network_poll();
 }
 void net_init(void) {
     for (int b = 0; b < 256; b++)
@@ -347,7 +447,19 @@ void net_init(void) {
 }
 void net_status(char *out, size_t cap) {
     out[0] = 0;
-    append(out,
+    if (external_nic.started) {
+        append(out, net_ready ? "Wi-Fi/generic interface: IPv4 ready (DHCP)\n" :
+                              "Wi-Fi/generic interface: waiting for DHCP\n", cap);
+        const uint8_t *ips[]={local_ip,gateway,dns_ip};
+        const char *labels[]={"IPv4: ","Gateway: ","DNS: "};
+        for (unsigned i=0; i<3 && net_ready; i++) {
+            append(out,labels[i],cap);
+            for (unsigned j=0;j<4;j++) {
+                char value[16]; number(value,ips[i][j]); append(out,value,cap);
+                append(out,j==3 ? "\n" : ".",cap);
+            }
+        }
+    } else append(out,
            net_ready ? "Ethernet: RTL8139 ready\nIPv4: 10.0.2.15/24 (static)\nGateway: 10.0.2.2 | "
                        "DNS: 10.0.2.3\n"
                      : "Ethernet: no supported RTL8139 found\n",
@@ -368,7 +480,7 @@ void net_status(char *out, size_t cap) {
         append(out, b, cap);
         append(out, "\n", cap);
     }
-    append(out, "Wi-Fi: driver not implemented\nBluetooth: driver not implemented\n", cap);
+    append(out, "Intel Wi-Fi: transport preparation only; radio backend pending\nBluetooth: driver not implemented\n", cap);
 }
 static bool parse_ip(const char *s, uint8_t *out) {
     for (int i = 0; i < 4; i++) {
@@ -388,6 +500,107 @@ static bool parse_ip(const char *s, uint8_t *out) {
             return false;
     }
     return true;
+}
+static void time_udp(const uint8_t dest[4], uint16_t local, uint16_t remote, const uint8_t *body,
+                     unsigned n) {
+    uint8_t packet[520] = {0};
+    put16(packet, local);
+    put16(packet + 2, remote);
+    put16(packet + 4, n + 8);
+    memcpy(packet + 8, body, n);
+    uint32_t pseudo =
+        be16(local_ip) + be16(local_ip + 2) + be16(dest) + be16(dest + 2) + 17 + n + 8;
+    uint16_t check = sum(packet, n + 8, pseudo);
+    put16(packet + 6, check ? check : 65535);
+    send_ip(dest, 17, packet, n + 8);
+}
+void net_time_cancel(void) {
+    memset(&time_query, 0, sizeof(time_query));
+}
+int net_time_begin(const char *host, uint16_t port, const uint8_t request[48]) {
+    if (!host || !request || !port || !time_hostname_valid(host))
+        return -22;
+    if (!net_ready)
+        return -100;
+    if (network_owner || time_query.phase)
+        return -16;
+    uint16_t random[2];
+    if (!random_bytes(random, sizeof(random)))
+        return -5;
+    memset(&time_query, 0, sizeof(time_query));
+    strcpy(time_query.host, host);
+    time_query.port = port;
+    time_query.local_port = 49153 + random[0] % 15000;
+    if (time_query.local_port == 53000)
+        time_query.local_port++;
+    time_query.id = random[1];
+    memcpy(time_query.request, request, 48);
+    if (parse_ip(host, time_query.address))
+        time_query.phase = 2;
+    else {
+        /* Resolve once per query. Keep the dedicated DNS ID/port independent
+         * of the foreground resolver and validate the complete question. */
+        uint8_t question[160];
+        unsigned bytes;
+        if (time_dns_question(host, time_query.id, question, sizeof(question), &bytes))
+            return -22;
+        time_query.phase = 1;
+        time_query.deadline = frame_clock + 5000;
+        time_udp(dns_ip, 49152, 53, question, bytes);
+    }
+    return 0;
+}
+static void time_network_input(const uint8_t source[4], const uint8_t *udp, unsigned bytes) {
+    if (time_query.phase == 1 && be16(udp) == 53 && be16(udp + 2) == 49152 &&
+        equal(source, dns_ip, 4)) {
+        if (!time_dns_answer(time_query.host, time_query.id, udp + 8, bytes - 8,
+                             time_query.address))
+            time_query.phase = 2;
+    } else if (time_query.phase == 3 && be16(udp) == time_query.port &&
+               be16(udp + 2) == time_query.local_port && equal(source, time_query.address, 4) &&
+               bytes - 8 <= sizeof(time_query.response)) {
+        time_query.bytes = bytes - 8;
+        memcpy(time_query.response, udp + 8, time_query.bytes);
+        time_query.rtt = frame_clock - time_query.sent;
+        time_query.phase = 4;
+    }
+}
+static void time_network_poll(void) {
+    if (!time_query.phase || time_query.phase == 4)
+        return;
+    if (!net_ready) {
+        time_query.error = -100;
+        time_query.phase = 4;
+        return;
+    }
+    if (time_query.phase == 2 && !network_owner) {
+        time_query.phase = 3;
+        time_query.sent = frame_clock;
+        time_query.deadline = frame_clock + 5000;
+        time_udp(time_query.address, time_query.local_port, time_query.port, time_query.request,
+                 48);
+    } else if ((time_query.phase == 1 || time_query.phase == 3) &&
+               (int32_t)(frame_clock - time_query.deadline) >= 0) {
+        time_query.error = -110;
+        time_query.phase = 4;
+    }
+}
+int net_time_result(uint8_t *out, unsigned cap, unsigned *bytes, uint32_t *rtt) {
+    if (!out || !bytes || !rtt)
+        return -22;
+    *bytes = 0;
+    if (time_query.phase != 4)
+        return -11;
+    int rc = time_query.error;
+    if (!rc && time_query.bytes > cap)
+        rc = -28;
+    if (!rc) {
+        *bytes = time_query.bytes;
+        *rtt = time_query.rtt;
+        memcpy(out, time_query.response, *bytes);
+    }
+    net_time_cancel();
+    return rc;
 }
 static bool resolve(const char *host, uint8_t *out) {
     if (parse_ip(host, out))
@@ -466,7 +679,7 @@ static bool resolve(const char *host, uint8_t *out) {
 static bool ping_impl(const char *host, char *out, size_t cap) {
     out[0] = 0;
     if (!net_ready || !ensure_gateway()) {
-        append(out, "ping: Ethernet/gateway unavailable\n", cap);
+        append(out, "ping: network/gateway unavailable\n", cap);
         return false;
     }
     uint8_t ip[4];

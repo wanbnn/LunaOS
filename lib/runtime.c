@@ -1,3 +1,4 @@
+#include "clock.h"
 /* Freestanding ISO-C hooks for the embedded JS engine. No host/Linux syscalls. */
 #include "luna.h"
 #include <stdarg.h>
@@ -7,74 +8,13 @@
 #include <time.h>
 
 #include "dtoa.h"
-typedef struct Block {
-    uint32_t bytes, free;
-    struct Block *next;
-    uint32_t magic;
-} Block;
-static uint8_t heap[8 * 1024 * 1024] __attribute__((aligned(16)));
-static Block *blocks;
+#include "heap.h"
 static int native_errno;
-int *__errno_location(void) {
-    return &native_errno;
-}
-void *malloc(size_t n) {
-    if (!n)
-        n = 1;
-    if (n > sizeof(heap) - sizeof(Block))
-        return 0;
-    n = (n + 15) & ~15u;
-    if (!blocks) {
-        blocks = (Block *)heap;
-        *blocks = (Block){sizeof(heap) - sizeof(Block), 1, 0, 0x4c484541};
-    }
-    for (Block *b = blocks; b; b = b->next)
-        if (b->free && b->bytes >= n) {
-            if (b->bytes >= n + sizeof(Block) + 16) {
-                Block *split = (Block *)((uint8_t *)(b + 1) + n);
-                *split = (Block){b->bytes - n - sizeof(Block), 1, b->next, 0x4c484541};
-                b->next = split;
-                b->bytes = n;
-            }
-            b->free = 0;
-            return b + 1;
-        }
-    return 0;
-}
-size_t malloc_usable_size(void *p) {
-    return p ? ((Block *)p - 1)->bytes : 0;
-}
-void free(void *p) {
-    if (!p)
-        return;
-    Block *b = (Block *)p - 1;
-    if (b->magic != 0x4c484541)
-        kernel_fault();
-    b->free = 1;
-    for (Block *a = blocks; a && a->next;)
-        if (a->free && a->next->free) {
-            a->bytes += sizeof(Block) + a->next->bytes;
-            a->next = a->next->next;
-        } else
-            a = a->next;
-}
-void *realloc(void *p, size_t n) {
-    if (!p)
-        return malloc(n);
-    if (!n) {
-        free(p);
-        return 0;
-    }
-    size_t old = malloc_usable_size(p);
-    if (old >= n)
-        return p;
-    void *r = malloc(n);
-    if (!r)
-        return 0;
-    memcpy(r, p, old);
-    free(p);
-    return r;
-}
+int *__errno_location(void) { return &native_errno; }
+void *malloc(size_t n) { return heap_allocate(n); }
+size_t malloc_usable_size(void *p) { return heap_usable_size(p); }
+void free(void *p) { if (heap_release(p)) kernel_fault(); }
+void *realloc(void *p, size_t n) { return heap_resize(p,n); }
 void *calloc(size_t count, size_t n) {
     if (n && count > 0xffffffffu / n)
         return 0;
@@ -259,61 +199,33 @@ int printf(const char *fmt, ...) {
     serial_write(buf);
     return r;
 }
-static unsigned read_decimal(const char *s, int n) {
-    unsigned v = 0;
-    while (n--)
-        v = v * 10 + *s++ - '0';
-    return v;
-}
 uint32_t rtc_epoch_seconds(void) {
-    char date[40];
-    rtc_string(date);
-    unsigned year = read_decimal(date, 4), month = read_decimal(date + 5, 2),
-             day = read_decimal(date + 8, 2), days = 0;
-    for (unsigned y = 1970; y < year; y++)
-        days += 365 + (y % 4 == 0 && (y % 100 || y % 400 == 0));
-    static const unsigned md[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-    for (unsigned m = 1; m < month; m++)
-        days += md[m - 1] + (m == 2 && year % 4 == 0 && (year % 100 || year % 400 == 0));
-    days += day - 1;
-    outb(0x70, 0);
-    unsigned seconds = inb(0x71);
-    outb(0x70, 0xb);
-    if (!(inb(0x71) & 4))
-        seconds = (seconds >> 4) * 10 + (seconds & 15);
-    return days * 86400 + read_decimal(date + 12, 2) * 3600 + read_decimal(date + 15, 2) * 60 +
-           seconds;
+    uint64_t sec=clock_utc_ms()/1000;
+    return sec <= UINT32_MAX ? (uint32_t)sec : 0;
 }
 int gettimeofday(struct timeval *tv, void *tz) {
     (void)tz;
-    tv->tv_sec = rtc_epoch_seconds();
-    tv->tv_usec = (frame_clock % 1000) * 1000;
+    uint64_t ms = clock_utc_ms();
+    tv->tv_sec = ms / 1000;
+    tv->tv_usec = (ms % 1000) * 1000;
     return 0;
 }
 struct tm *localtime_r(const time_t *t, struct tm *out) {
-    uint32_t value = (uint32_t)*t, days = value / 86400;
+    int64_t sec = (int64_t)*t + (int64_t)clock_offset() * 60;
+    DateTime d;
+    if (sec < 0 || !datetime_from_epoch((uint64_t)sec, &d))
+        return NULL;
     memset(out, 0, sizeof(*out));
-    out->tm_sec = value % 60;
-    out->tm_min = value / 60 % 60;
-    out->tm_hour = value / 3600 % 24;
-    out->tm_wday = (days + 4) % 7;
-    unsigned y = 1970;
-    while (days >= 365u + (y % 4 == 0 && (y % 100 || y % 400 == 0))) {
-        days -= 365 + (y % 4 == 0 && (y % 100 || y % 400 == 0));
-        y++;
-    }
-    out->tm_year = y - 1900;
-    out->tm_yday = days;
-    static const unsigned md[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-    unsigned month = 0;
-    while (month < 11) {
-        unsigned n = md[month] + (month == 1 && y % 4 == 0 && (y % 100 || y % 400 == 0));
-        if (days < n)
-            break;
-        days -= n;
-        month++;
-    }
-    out->tm_mon = month;
-    out->tm_mday = days + 1;
+    out->tm_year = d.year - 1900;
+    out->tm_mon = d.month - 1;
+    out->tm_mday = d.day;
+    out->tm_hour = d.hour;
+    out->tm_min = d.minute;
+    out->tm_sec = d.second;
+    out->tm_wday = (datetime_weekday(&d) + 1) % 7;
+    DateTime jan = {d.year, 1, 1, 0, 0, 0};
+    uint64_t first;
+    datetime_to_epoch(&jan, &first);
+    out->tm_yday = ((uint64_t)sec - first) / 86400;
     return out;
 }

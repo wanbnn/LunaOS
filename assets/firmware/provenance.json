@@ -13,6 +13,18 @@
       "path": "assets/licenses/Realtek-Firmware.txt",
       "bytes": 2115,
       "sha256": "a61351665b4f264f6c631364f85b907d8f8f41f8b369533ef4021765f9f3b62e"
+    },
+    {
+      "upstream_path": "intel/iwlwifi/iwlwifi-so-a0-gf-a0-89.ucode",
+      "path": "assets/firmware/iwlwifi-so-a0-gf-a0-89.ucode",
+      "bytes": 1737012,
+      "sha256": "fae8230ebd1426dfb7d5b5594fdd89e346af5144080659d010b8d2a2fd2f7d4a"
+    },
+    {
+      "upstream_path": "LICENSES/LICENCE.iwlwifi_firmware",
+      "path": "assets/licenses/Intel-WiFi-Firmware.txt",
+      "bytes": 2046,
+      "sha256": "16d5040c7cf851fc693b7542e20870935b99802533ea1bfd231c377a2305e5c5"
     }
   ]
 }
