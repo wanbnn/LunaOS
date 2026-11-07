@@ -27,6 +27,7 @@ O LunaOS tem **bootloader próprio**, **kernel próprio em C**, **interface grá
 - Desktop com dock, pesquisa, janelas, compositor 32 bits, **transições suaves nativas**, fontes **Inter Tight** e ícones **Lucide**.
 - Assistente de primeiro boot, modo live, instalação em disco IDE compatível e login.
 - Terminal **lunaSH**, Files, Notes, Settings, navegador e Gerenciador de Tarefas.
+- **LunaSDK v1**: criar e executar programas JavaScript `.ljs` no guest, com API de arquivos, aplicativos e dispositivos virtuais `.ldrv` (não são módulos de hardware).
 - Pilha de rede IPv4 via **RTL8139**, HTTP e HTTPS/TLS 1.2.
 - Navegador com HTML, CSS, DOM/JavaScript **parciais** e decodificação de PNG externo.
 - Infraestrutura de drivers e desenvolvimento de Wi-Fi com scanner passivo experimental para **RTL8822BE**.
@@ -182,6 +183,24 @@ sync
 
 O app **Notes** oferece edição de textos e realce de sintaxe para alguns formatos. **Settings** controla aparência, teclado, mouse, monitor virtual, áudio, idioma e relógio. Nem todos os controles representam capacidades do hardware físico.
 
+### Criar seus próprios aplicativos e dispositivos virtuais
+
+O comando **`dev`** permite desenvolver dentro do LunaOS usando **Notes** e executar scripts `.ljs` com QuickJS e a API `luna`. Dispositivos virtuais `.ldrv` (tipos `register`, `upper`, `counter`) podem ser criados, editados, carregados e acessados por scripts, **sem acesso ao hardware**:
+
+```sh
+dev new hello
+dev run /home/luna/hello.ljs
+dev driver new lamp register
+dev driver load /home/luna/lamp.ldrv
+dev driver write lamp on
+dev driver read lamp
+dev list
+```
+
+Os caminhos acima usam o usuário live padrão `luna`; adapte-os ao diretório `/home/SEU_USUARIO` após a instalação. **Código de hardware em C ainda precisa ser compilado e vinculado ao kernel no host**: não existe compilador C, loader ELF ou suporte a drivers nativos carregados dinamicamente dentro do guest. Scripts QuickJS ainda rodam em um serviço confiável do kernel, portanto **não são um sandbox de segurança completo**.
+
+Contrato, exemplos, limites e teste: [API para desenvolvedores](docs/developer-api.md).
+
 ## Arquitetura
 
 ```text
@@ -231,6 +250,7 @@ Testes específicos de calendário, UEFI, instalação e drivers estão descrito
 | ISO/ATAPI e mídia inicializável | [ISO](docs/iso.md) |
 | Capacidades e limites do navegador | [Motor do navegador](docs/browser-engine.md) |
 | API de drivers DMA, PCI, MMIO e firmware | [Serviços de drivers](docs/driver-services.md) |
+| Criação de aplicativos e dispositivos virtuais dentro do sistema | [LunaSDK v1](docs/developer-api.md) |
 | Famílias e estratégia de drivers Wi-Fi | [Porte de Wi-Fi](docs/wireless-port.md) |
 | RTL8822BE experimental | [Port nativo RTL8822BE](docs/rtw8822be-native-port.md) |
 | Intel AX211 e WPA2/DHCP | [Intel AX211](docs/intel-ax211-wifi.md) |

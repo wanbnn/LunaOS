@@ -4,6 +4,7 @@
 #include "memory.h"
 #include "../drivers/rtw8822be_pcie.h"
 #include "driver.h"
+#include "devkit.h"
 #include "install.h"
 #include "luna.h"
 #include "settings.h"
@@ -22,7 +23,7 @@ static const char *commands[] = {
     "uname",  "free",  "uptime",  "date",     "pci",     "net",     "ifconfig", "ping",  "wget",
     "browse", "audio", "beep",    "sync",     "history", "source",  "set",      "env",   "true",
     "false",  "sleep", "reboot",  "poweroff", "about",   "ps",      "tasks",    "kill",  "ringtest",
-    "js",     "bench", "drvinfo", "whoami",   "setup",   "drvtest", "fwinfo",   "wifidiag", "memtest", 0};
+    "js",     "dev",   "bench", "drvinfo", "whoami",   "setup",   "drvtest", "fwinfo",   "wifidiag", "memtest", 0};
 #define CAP 8192
 static void emit(char *out, const char *s) {
     append(out, s, CAP);
@@ -592,6 +593,8 @@ static int execute(int argc, char **a, const char *input, char *out) {
             return 2;
         }
         return javascript_eval(a[1], out, CAP) == 0 ? 0 : 1;
+    } else if (!strcmp(c, "dev")) {
+        return developer_command(argc, a, out, CAP);
     } else if (!strcmp(c, "setup")) {
         if (fs_find("/etc/setup-complete")) {
             emit(out, "Already installed. Boot installation media to install on another disk.\n");

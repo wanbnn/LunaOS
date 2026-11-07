@@ -1,7 +1,5 @@
 #include "pmm.h"
-/* The freestanding kernel provides memset itself; do not pull glibc headers
- * into a -m32 kernel translation unit. Host PMM tests link libc as usual. */
-#include "luna.h"
+#include <string.h>
 #define EINVAL (-22)
 #define ENOMEM (-12)
 #define EBUSY (-16)

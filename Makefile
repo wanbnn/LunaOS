@@ -92,7 +92,7 @@ run-iso: all
 	LUNA_IMAGE=dist/LunaOS.iso tools/run-qemu.sh
 run: all
 	tools/run-qemu.sh
-test: all test-motion test-pmm test-heap test-wpa2 test-dhcp test-wifi-station test-iwl-firmware test-iwl-pcie test-wifi-intel test-wifi-scan test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
+test: all test-devkit test-motion test-pmm test-heap test-wpa2 test-dhcp test-wifi-station test-iwl-firmware test-iwl-pcie test-wifi-intel test-wifi-scan test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
 	$(PYTHON) tests/smoke.py
 	$(PYTHON) tests/multitask.py
 	$(PYTHON) tests/desktop.py
@@ -104,7 +104,7 @@ test: all test-motion test-pmm test-heap test-wpa2 test-dhcp test-wifi-station t
 	$(PYTHON) tests/iso.py
 test-iso-install: all
 	LUNA_SETUP_ISO=1 LUNA_TEST_DIR=build/test-iso-install $(PYTHON) tests/setup.py
-check: all test-motion test-pmm test-heap test-wpa2 test-dhcp test-wifi-station test-iwl-firmware test-iwl-pcie test-wifi-intel test-wifi-scan test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
+check: all test-devkit test-motion test-pmm test-heap test-wpa2 test-dhcp test-wifi-station test-iwl-firmware test-iwl-pcie test-wifi-intel test-wifi-scan test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
 	$(PYTHON) tools/check_image.py
 	$(PYTHON) tools/check_iso.py
 clean:
@@ -162,6 +162,12 @@ test-rtw8822be-rx-dma:
 build/ui/web_image.o: ui/web_image.c ui/webengine.h third_party/stb/stb_image.h third_party/musl/lib/libc.a
 	@mkdir -p build/ui
 	$(CC) $(NATIVEFLAGS) -c $< -o $@
+
+.PHONY: test-devkit
+test-devkit:
+	@mkdir -p build
+	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=address,undefined -Ikernel kernel/devkit.c tests/devkit.c -o build/devkit-test
+	./build/devkit-test
 
 .PHONY: test-motion
 test-motion:
