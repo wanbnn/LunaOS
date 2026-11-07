@@ -30,7 +30,7 @@ O LunaOS tem **bootloader próprio**, **kernel próprio em C**, **interface grá
 - **LunaSDK v2**: aplicativos JavaScript `.ljs`, Python limitado `.py` (prévia), API de descoberta **PCI real** e endpoints de hardware implementados por drivers C nativos; projetos C/CMake ainda são compilados no host.
 - Pilha de rede IPv4 via **RTL8139**, HTTP e HTTPS/TLS 1.2.
 - Navegador com HTML, CSS, DOM/JavaScript **parciais** e decodificação de PNG externo.
-- Infraestrutura de drivers e desenvolvimento de Wi-Fi com scanner passivo experimental para **RTL8822BE**.
+- Scanner passivo e conexão de estação WPA2 experimentais para **RTL8822BE**, ainda sem validação em hardware físico.
 - Gerenciamento dinâmico de memória física e contabilidade de RAM por processo.
 - Calendário mensal, configuração de data e hora offline e sincronização **SNTP/NTP**.
 
@@ -48,7 +48,7 @@ A geração atual produz `dist/LunaOS.img` (disco raw de **32 MiB**) e `dist/Lun
 | **Instalador** | IDE + drivers nativos experimentais | Seleção explícita de disco, confirmação destrutiva, cópia verificada, usuário e senha; controladores e limites em [storage](docs/storage.md) |
 | **Ethernet e HTTPS** | Parcial | RTL8139, IPv4, DNS, TCP, HTTP e BearSSL/TLS 1.2; não é uma stack de rede universal |
 | **Navegador nativo** | Experimental | HTML e CSS com layout/cascata parciais, bindings DOM/JS e PNG; **sem** compatibilidade moderna completa |
-| **Wi-Fi RTL8822BE** | **Scanner passivo experimental** | Inicialização PCIe, firmware, PHY e recebimento de beacons por DMA; **sem conexão**, ainda sem validação em placa física |
+| **Wi-Fi RTL8822BE** | **Estação TX/WPA2 experimental** | PCIe, firmware, PHY, scanner passivo, TX DMA, autenticação/associação, WPA2-PSK/CCMP e DHCP integrados; **sem prova de conexão em placa física** |
 | **Wi-Fi Intel AX211** | Infraestrutura | Identificação e diagnóstico PCI/firmware; **sem scan físico nem conexão** |
 | **Camadas Wi-Fi comuns** | Testadas em simulação | Interfaces de scan/connect, handshake WPA2-PSK, porta controlada e DHCP; dependem de um rádio físico funcional |
 | **Memória e Task Manager** | Implementado, com limites | Páginas físicas, heap/DMA sob demanda, RAM por PID; i386 sem PAE não aloca RAM acima de 4 GiB |
@@ -74,7 +74,8 @@ A API nativa de Wi-Fi permite que o setup consulte drivers registrados e apresen
 - Caminho experimental de inicialização PCIe, firmware, energia e PHY, com anéis DMA.
 - Scanner **passivo** para canais de 2,4 e 5 GHz, com leitura de beacons/probe responses e RSSI.
 - Diagnóstico de etapas e erros pelo setup e pelo comando `wifidiag`.
-- **Ainda não validado em hardware físico.** O backend não oferece autenticação, associação, WPA2 conectado ao rádio ou tráfego IP. O botão de conexão permanece indisponível.
+- Backend com **TX DMA experimental**, autenticação aberta 802.11, associação e WPA2-PSK/CCMP por software; após autorização, DHCP/ARP/IPv4 usa a pilha nativa.
+- O setup habilita **Conectar** para redes abertas e WPA2-PSK compatíveis. **Sem validação no RTL8822BE físico**: compilar e passar os testes simulados não demonstra RF TX, handshake ou tráfego IP. WPA3/SAE, Enterprise e PMF obrigatório permanecem sem suporte.
 
 **Intel AX211 (`8086:51f0`)**
 
@@ -232,6 +233,9 @@ make test                   # Testes adicionais com guest/QEMU
 make test-webengine         # Regressão HTML/CSS/layout/PNG no host
 make test-wifi-station      # WPA2 + DHCP integrados com rádio simulado
 make test-rtw8822be-rx-dma  # Modelo dos descritores RX do RTL8822BE
+make test-rtw8822be-tx-dma  # Modelo dos descritores TX e fila PCIe
+make test-wifi-client       # Autenticação/associação de estação simulada
+make test-wifi-ccmp         # AES-CCMP: MIC, PN, replay e vetores independentes
 make test-pmm test-heap     # Gerenciamento de memória
 ```
 
@@ -262,7 +266,7 @@ Testes específicos de calendário, UEFI, instalação e drivers estão descrito
 
 ## Próximos desafios
 
-O roadmap imediato continua sendo **validar os drivers em hardware físico**, completar autenticação/associação e tráfego IP Wi-Fi, ampliar suporte de armazenamento e periféricos, fortalecer isolamento e APIs de processos, e avançar na compatibilidade do navegador. Essas metas **não devem ser confundidas com funcionalidades já entregues**.
+O roadmap imediato inclui **validar TX, associação, handshake WPA2 e tráfego IP Wi-Fi em hardware físico**, corrigir eventuais diferenças de firmware/PHY e calibração, ampliar suporte de armazenamento e periféricos, fortalecer isolamento e APIs de processos, e avançar na compatibilidade do navegador. As integrações ainda experimentais **não devem ser confundidas com funcionalidades comprovadas em produção**.
 
 ## Licenças e créditos
 
