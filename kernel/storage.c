@@ -20,6 +20,13 @@ static const char *transport_name(unsigned t) {
     default: return "unknown";
     }
 }
+const char *storage_disk_type(unsigned index) {
+    if(index<4u)return "IDE";
+    if(index==4u)return "RAM/ISO";
+    if(index>=STORAGE_DEVICE_COUNT)return "unknown";
+    const Stored *e=&native[index-STORAGE_NATIVE_BASE];
+    return e->present?transport_name(e->dev.transport):"empty";
+}
 void storage_reset(void) {
     memset(native,0,sizeof(native));
     memset(controllers,0,sizeof(controllers));
@@ -27,10 +34,14 @@ void storage_reset(void) {
 }
 int storage_register(const StorageDevice *d) {
     if (!d || !d->transfer || d->logical_bytes != 512 || !d->sectors ||
-        !d->model[0] || !strchr(d->model,0) || d->sectors < 1 ||
+        !d->model[0] || d->sectors < 1 ||
         (d->installable && d->readonly) || d->transport < STORAGE_AHCI ||
         d->transport > STORAGE_RAID)
         return DRV_EINVAL;
+    bool terminated=false;
+    for(unsigned i=0;i<sizeof(d->model);i++)
+        if(!d->model[i]){terminated=true;break;}
+    if(!terminated)return DRV_EINVAL;
     /* The old installer and LunaFS address sectors via uint32_t. Exclude
      * unsafe unrepresentable targets instead of silently wrapping offsets. */
     for(unsigned i=0;i<STORAGE_NATIVE_SLOTS;i++)if(!native[i].present) {
