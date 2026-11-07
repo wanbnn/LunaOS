@@ -34,7 +34,7 @@ jobs:
           mkdir -p .tools/python build dist
           python3 -m pip install --target .tools/python -r requirements-dev.txt
       - name: Test block-device contracts and PCI dispatch
-        run: make test-storage
+        run: make test-storage test-storage-sdhci
       - name: Compile complete BIOS and UEFI distributions
         run: make -j2 all
       - name: Test non-destructive SATA/NVMe I/O inside LunaOS/QEMU

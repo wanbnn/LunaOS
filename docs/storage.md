@@ -136,3 +136,32 @@ Referências de protocolo e modelos usados para validação:
 [SD/eMMC/QEMU](https://github.com/qemu/qemu/blob/master/hw/sd/sd.c),
 [MegaRAID/QEMU](https://github.com/qemu/qemu/blob/master/hw/scsi/megasas.c),
 [MFI](https://github.com/qemu/qemu/blob/master/hw/scsi/mfi.h).
+
+### eMMC PCI em equipamentos reais (Intel / HP Stream)
+
+Os IDs Intel dedicados de Bay Trail, Braswell, Apollo Lake e Gemini Lake
+são tratados como eMMC soldado, inclusive quando a classe PCI não descreve
+SDHCI. Esses hosts não dependem do sinal de presença de cartão ou do pino WP
+usado por leitores SD removíveis. A proteção permanente/temporária CSD e os
+erros de comando continuam sendo respeitados.
+
+A inicialização solicita D0 pela capability PCI PM antes de mapear os
+registradores. Hosts SDHCI v3 usam o divisor de 10 bits: 200 MHz podem ser
+reduzidos a 400 kHz sem exceder o clock de identificação. A alimentação de
+1,8 V só é selecionada em hosts eMMC dedicados que a anunciam; não se emite
+CMD11 de SD nem se escreve em GPIO/reguladores sem descrição da plataforma.
+
+`make test-storage-sdhci` usa um modelo de registradores com eMMC de 64 GiB,
+sem CD/WP, alimentação de 1,8 V, clock de 200 MHz e estado inicial D3. Verifica
+leitura/escrita, flush do cache e diagnóstico de timeout. `tests/storage_emmc_iso.py`
+valida a ISO com 4 GiB de RAM e eMMC QEMU de 64 GiB, em BIOS e UEFI.
+Esses testes não substituem o reteste no HP Stream físico.
+
+Se o disco não aparecer, iniciar o modo live e executar `storage`: o comando
+agora mostra fase, CMD, status, present-state, capabilities, versão SDHCI e
+ID PCI da falha. Se não encontrar nenhum host PCI, avisa explicitamente que
+controladores expostos somente por ACPI ainda precisam de driver de plataforma.
+Não há varredura especulativa de endereços MMIO nem interpretação AML.
+
+Referências: [IDs e hosts eMMC Intel no Linux](https://github.com/torvalds/linux/blob/master/drivers/mmc/host/sdhci-pci-core.c),
+[divisores e sinalização SDHCI](https://github.com/torvalds/linux/blob/master/drivers/mmc/host/sdhci.c).

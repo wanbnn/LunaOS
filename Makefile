@@ -92,7 +92,7 @@ run-iso: all
 	LUNA_IMAGE=dist/LunaOS.iso tools/run-qemu.sh
 run: all
 	tools/run-qemu.sh
-test: all test-storage test-lunafs2 test-lunasdk-hardware test-lunapy test-devkit test-motion test-pmm test-heap test-wpa2 test-dhcp test-wifi-station test-iwl-firmware test-iwl-pcie test-wifi-intel test-wifi-scan test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
+test: all test-storage test-storage-sdhci test-lunafs2 test-lunasdk-hardware test-lunapy test-devkit test-motion test-pmm test-heap test-wpa2 test-dhcp test-wifi-station test-iwl-firmware test-iwl-pcie test-wifi-intel test-wifi-scan test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
 	$(PYTHON) tests/smoke.py
 	$(PYTHON) tests/multitask.py
 	$(PYTHON) tests/desktop.py
@@ -104,7 +104,7 @@ test: all test-storage test-lunafs2 test-lunasdk-hardware test-lunapy test-devki
 	$(PYTHON) tests/iso.py
 test-iso-install: all
 	LUNA_SETUP_ISO=1 LUNA_TEST_DIR=build/test-iso-install $(PYTHON) tests/setup.py
-check: all test-storage test-lunafs2 test-lunasdk-hardware test-lunapy test-devkit test-motion test-pmm test-heap test-wpa2 test-dhcp test-wifi-station test-iwl-firmware test-iwl-pcie test-wifi-intel test-wifi-scan test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
+check: all test-storage test-storage-sdhci test-lunafs2 test-lunasdk-hardware test-lunapy test-devkit test-motion test-pmm test-heap test-wpa2 test-dhcp test-wifi-station test-iwl-firmware test-iwl-pcie test-wifi-intel test-wifi-scan test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
 	$(PYTHON) tools/check_image.py
 	$(PYTHON) tools/check_iso.py
 clean:
@@ -262,3 +262,14 @@ test-storage-interfaces: all
 
 test-storage-install: all
 	$(PYTHON) tests/storage_install.py
+
+.PHONY: test-storage-sdhci
+test-storage-sdhci:
+	@mkdir -p build
+	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=address,undefined -Ikernel tests/storage_sdhci.c -o build/storage-sdhci-test
+	./build/storage-sdhci-test
+
+.PHONY: test-storage-emmc-iso
+test-storage-emmc-iso: all
+	LUNA_TEST_DIR=build/test-emmc-iso $(PYTHON) tests/storage_emmc_iso.py
+	LUNA_UEFI=1 LUNA_TEST_DIR=build/test-emmc-iso-uefi $(PYTHON) tests/storage_emmc_iso.py

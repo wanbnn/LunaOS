@@ -34,7 +34,8 @@ void append(char *out,const char *str,size_t cap) {
     out[n+len]=0;
 }
 static unsigned ctx0,ctx1;
-static bool extended_ready;
+void storage_sdhci_reason(char *out,size_t cap){out[0]=0;append(out,"unsupported interface",cap);}
+static bool extended_ready, intel_class_quirk;
 static unsigned extended_ctx[]={2,3,4};
 static int extended_probe(uint8_t b,uint8_t s,uint8_t f,unsigned kind) {
     assert(!b && s==kind-STORAGE_USB+3 && !f);
@@ -65,9 +66,10 @@ int storage_nvme_probe(uint8_t b,uint8_t s,uint8_t f){
 }
 uint32_t pci_read(uint8_t b,uint8_t s,uint8_t f,uint8_t off) {
     if(b || f || s<1 || s>5)return UINT32_MAX;
-    if(!off)return (uint32_t)(0x1000+s)<<16 | 0x8086u;
+    if(!off)return intel_class_quirk && s==4 ? 0x31cc8086u : (uint32_t)(0x1000+s)<<16 | 0x8086u;
     if(off==0xc)return 0;
     if(off==8) {
+        if(intel_class_quirk && s==4)return 0x08800000u;
         static const uint32_t c[]={0,0x010601,0x010802,0x0c0330,0x080500,0x010400};
         return c[s]<<8;
     }
@@ -129,5 +131,8 @@ int main(void) {
     ro.logical_bytes=4096;assert(storage_register(&ro)==DRV_EINVAL);
     ro.logical_bytes=512;memset(ro.model,'x',sizeof(ro.model));
     assert(storage_register(&ro)==DRV_EINVAL);
+    intel_class_quirk=true;storage_reset();storage_pci_init();
+    assert(storage_controller_count()==5 && storage_controller(3)->initialized);
+    assert(storage_controller(3)->device==0x31cc && storage_controller(3)->transport==STORAGE_EMMC);
     puts("PASS: block registry, read/write/flush, PCI dispatch, safe unsupported-controller inventory");
 }

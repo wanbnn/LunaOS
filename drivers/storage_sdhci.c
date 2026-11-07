@@ -1,4 +1,5 @@
 #include "storage.h"
+#include "storage_sdhci_policy.h"
 
 /* SDHCI v2/v3, 1-bit default-speed PIO. SDHC/SDXC and sector-addressed
  * MMC/eMMC user area only; never changes boot partitions or RPMB. */
@@ -6,11 +7,17 @@ typedef struct {
     DrvPci pci;
     DrvMmio io;
     uint32_t rca;
-    unsigned phase;
+    unsigned phase, last_cmd;
+    uint32_t last_status;
+    bool embedded;
     uint64_t sectors;
     bool used, ready, mmc, cache, write_protected;
 } SdHost;
-static SdHost hosts[2];
+static SdHost hosts[4];
+static char last_reason[160];
+void storage_sdhci_reason(char *out,size_t cap) {
+    if(out && cap){out[0]=0;append(out,last_reason,cap);}
+}
 static uint32_t rd(SdHost *h,unsigned off,unsigned width) {
     uint32_t v=0;drv_mmio_read(&h->io,off,width,&v);return v;
 }
@@ -42,6 +49,7 @@ static void recover(SdHost *h) {
     wr(h,0x30,4,UINT32_MAX);
 }
 static int command(SdHost *h,unsigned cmd,uint32_t arg,unsigned response,bool data) {
+    h->last_cmd=cmd;
     if(!wait_bits(h,0x24,4,data?3u:1u,0,1000))return DRV_ETIMEDOUT;
     wr(h,0x30,4,UINT32_MAX);
     wr(h,0x08,4,arg);
@@ -52,6 +60,7 @@ static int command(SdHost *h,unsigned cmd,uint32_t arg,unsigned response,bool da
     if(data)flags|=32u;
     wr(h,0x0e,2,(cmd<<8)|flags);
     int rc=status(h,1);
+    h->last_status=rd(h,0x30,4);
     if(!rc && response==3)rc=status(h,2);
     if(rc) {
         char text[16];serial_write("STORAGE SDHCI command ");number(text,cmd);
@@ -94,7 +103,7 @@ static int transfer(void *ctx,uint64_t lba,unsigned n,void *buffer,bool write) {
     SdHost *h=ctx;
     if(!h->ready || !n || n>STORAGE_MAX_TRANSFER || lba+n>h->sectors)
         return DRV_EINVAL;
-    if(write && (h->write_protected || !(rd(h,0x24,4)&(1u<<19))))return DRV_ENOTSUP;
+    if(write && (h->write_protected || (!h->mmc && !(rd(h,0x24,4)&(1u<<19)))))return DRV_ENOTSUP;
     for(unsigned i=0;i<n;i++) {
         int rc=block(h,write?24:17,(uint32_t)(lba+i),(uint8_t *)buffer+i*512,write);
         if(rc)return rc;
@@ -112,35 +121,50 @@ static int flush(void *ctx) {
     return ready(h);
 }
 static bool clock_set(SdHost *h,unsigned hz) {
-    unsigned base=(rd(h,0x40,4)>>8)&255u;
-    if(!base)return false;
-    unsigned div=1;
-    while(base*1000000u/div>hz && div<256)div*=2;
-    if(base*1000000u/div>hz)return false;
+    unsigned version=rd(h,0xfe,2)&255u;
+    unsigned base=(rd(h,0x40,4)>>8)&(version>=2?255u:63u);
+    uint16_t divider;
+    if(!sdhci_clock_divider(base*1000000u,hz,version,&divider))return false;
     wr(h,0x2c,2,0);
-    wr(h,0x2c,2,((div/2)<<8)|1u);
+    wr(h,0x2c,2,divider|1u);
     if(!wait_bits(h,0x2c,2,2,2,100))return false;
     wr(h,0x2c,2,rd(h,0x2c,2)|4u);
     return true;
 }
 static bool card_init(SdHost *h) {
     h->phase=1;
-    if(!wait_bits(h,0x24,4,1u<<16,1u<<16,100))return false;
+    uint32_t caps=rd(h,0x40,4);
+    h->embedded=sdhci_pci_embedded(h->pci.vendor,h->pci.device) ||
+        ((caps>>30)&3u)==1u;
+    /* Soldered eMMC has neither a card-detect switch nor a WP pin. */
+    if(!h->embedded && !wait_bits(h,0x24,4,1u<<16,1u<<16,100))return false;
+    h->mmc=h->embedded;
     wr(h,0x2f,1,1);
     if(!wait_bits(h,0x2f,1,1,0,100))return false;
     uint32_t cap=rd(h,0x40,4);
-    /* Use only advertised 3.3/3.0 V; no unimplemented 1.8 V switching. */
-    unsigned power=(cap&(1u<<24))?0x0e:(cap&(1u<<25))?0x0c:0;
+    /* SD requires its initial 3.3/3.0 V supply. Dedicated eMMC hosts can
+     * advertise only 1.8 V; this is not an SD CMD11/UHS voltage switch. */
+    h->phase=9;
+    bool low_voltage=h->embedded && (cap&(1u<<26));
+    unsigned power=low_voltage?0x0a:(cap&(1u<<24))?0x0e:(cap&(1u<<25))?0x0c:0;
     if(!power)return false;
-    wr(h,0x29,1,power|1u);wr(h,0x2e,1,0x0e);
+    wr(h,0x29,1,power);drv_sleep_ms(1);wr(h,0x29,1,power|1u);
+    if((rd(h,0xfe,2)&255u)>=2) {
+        uint32_t control=rd(h,0x3e,2)&~0x800fu; /* disable presets/UHS modes */
+        wr(h,0x3e,2,control|(low_voltage?8u:0u));
+        if((rd(h,0x3e,2)&8u)!=(low_voltage?8u:0u))return false;
+    }
+    drv_sleep_ms(5);wr(h,0x2e,1,0x0e);
     wr(h,0x34,4,0x03ff003bu);wr(h,0x38,4,0);
     wr(h,0x28,1,0);
+    h->phase=10;
     if(!clock_set(h,400000))return false;
     drv_sleep_ms(2);
     if(command(h,0,0,0,false))return false;
     h->phase=2;
-    bool sd=!command(h,8,0x1aa,2,false) && (rd(h,0x10,4)&0xfffu)==0x1aa;
+    bool sd=!h->embedded && !command(h,8,0x1aa,2,false) && (rd(h,0x10,4)&0xfffu)==0x1aa;
     uint32_t ocr=0,start=drv_now_ms();
+    uint32_t voltage=low_voltage?0x80u:0x00ff8000u;
     if(sd) {
         do {
             if(r1(h,55,0,2,false) || command(h,41,0x40ff8000u,2,false))return false;
@@ -152,11 +176,11 @@ static bool card_init(SdHost *h) {
         h->mmc=true;
         if(command(h,0,0,0,false))return false;
         do {
-            if(command(h,1,0x40ff8000u,2,false))return false;
+            if(command(h,1,0x40000000u|voltage,2,false))return false;
             ocr=rd(h,0x10,4);
             if(ocr&0x80000000u)break;
             drv_sleep_ms(10);
-        } while((uint32_t)(drv_now_ms()-start)<2000);
+        } while((uint32_t)(drv_now_ms()-start)<5000);
     }
     h->phase=3;
     if((ocr&0xc0000000u)!=0xc0000000u)return false;
@@ -185,29 +209,69 @@ static bool card_init(SdHost *h) {
     }
     return h->sectors!=0;
 }
+/* Firmware may leave a non-boot eMMC function in PCI D3. Accessing its
+ * SDHCI registers before requesting D0 can return all ones or time out. */
+static int pci_power_on(SdHost *h) {
+    if(!(pci_read(h->pci.bus,h->pci.slot,h->pci.function,4)&(1u<<20)))return 0;
+    unsigned cap=pci_read(h->pci.bus,h->pci.slot,h->pci.function,0x34)&255u;
+    for(unsigned n=0;cap && n<48;n++) {
+        if(cap<0x40 || cap>0xf8 || (cap&3))return DRV_EINVAL;
+        uint32_t v=pci_read(h->pci.bus,h->pci.slot,h->pci.function,cap);
+        if((v&255u)==1) {
+            uint32_t pm;
+            if(drv_pci_config_read(&h->pci,cap+4,2,&pm))return DRV_EIO;
+            if(pm&3u) {
+                if(drv_pci_config_write(&h->pci,cap+4,2,pm&~0x8003u))return DRV_EIO;
+                drv_sleep_ms(10);
+                if(drv_pci_config_read(&h->pci,cap+4,2,&pm) || (pm&3u))return DRV_EIO;
+            }
+            return 0;
+        }
+        cap=(v>>8)&255u;
+    }
+    return cap?DRV_EINVAL:0;
+}
 int storage_sdhci_probe(uint8_t bus,uint8_t slot,uint8_t fn) {
+    strcpy(last_reason,"SDHCI: no host slot available");
     SdHost *h=0;
-    for(unsigned i=0;i<2;i++)if(!hosts[i].used){h=&hosts[i];break;}
+    for(unsigned i=0;i<4;i++)if(!hosts[i].used){h=&hosts[i];break;}
     if(!h)return DRV_ENOSPC;
     *h=(SdHost){0};h->pci=(DrvPci){.bus=bus,.slot=slot,.function=fn,
         .vendor=(uint16_t)pci_read(bus,slot,fn,0),.device=pci_read(bus,slot,fn,0)>>16};
     /* Stop inherited firmware DMA; PIO itself needs no bus mastering. */
     uint32_t cmd=pci_read(bus,slot,fn,4);
     pci_write(bus,slot,fn,4,cmd&~4u);
-    if(drv_pci_claim(&h->pci))return DRV_EBUSY;
+    if(drv_pci_claim(&h->pci)) {
+        strcpy(last_reason,"SDHCI: PCI claim failed");return DRV_EBUSY;
+    }
+    h->phase=8;
+    if(pci_power_on(h))goto fail;
     if(drv_pci_map(&h->pci,0,&h->io) || h->io.size<0x100 ||
        drv_pci_enable(&h->pci,false,true) || !card_init(h))goto fail;
     h->ready=true;
-    bool ro=h->write_protected || !(rd(h,0x24,4)&(1u<<19));
+    bool ro=h->write_protected || (!h->mmc && !(rd(h,0x24,4)&(1u<<19)));
     StorageDevice d={.ctx=h,.transfer=transfer,.flush=flush,.sectors=h->sectors,
         .logical_bytes=512,.transport=STORAGE_EMMC,.removable=!h->mmc,
         .readonly=ro,.installable=!ro};
     strcpy(d.model,h->mmc?"MMC/eMMC user area":"SDHC/SDXC card");
+    h->phase=11;
     if(storage_register(&d)<0)goto fail;
     h->used=true;return 1;
 fail:
-    {char text[16];serial_write("STORAGE SDHCI initialization failed at phase ");
-    number(text,h->phase);serial_write(text);serial_write("\n");}
+    {char text[16];strcpy(last_reason,"SDHCI phase ");number(text,h->phase);
+    append(last_reason,text,sizeof(last_reason));append(last_reason," CMD",sizeof(last_reason));
+    number(text,h->last_cmd);append(last_reason,text,sizeof(last_reason));
+    append(last_reason," status=",sizeof(last_reason));hex(text,h->last_status);
+    append(last_reason,text,sizeof(last_reason));
+    if(h->io.base) {
+        append(last_reason," present=",sizeof(last_reason));hex(text,rd(h,0x24,4));
+        append(last_reason,text,sizeof(last_reason));
+        append(last_reason," caps=",sizeof(last_reason));hex(text,rd(h,0x40,4));
+        append(last_reason,text,sizeof(last_reason));
+        append(last_reason," ver=",sizeof(last_reason));hex(text,rd(h,0xfe,2));
+        append(last_reason,text,sizeof(last_reason));
+    }
+    serial_write(last_reason);serial_write("\n");}
     if(h->io.base){wr(h,0x2c,2,0);drv_mmio_unmap(&h->io);}
     drv_pci_release(&h->pci);memset(h,0,sizeof(*h));return DRV_ENOTSUP;
 }

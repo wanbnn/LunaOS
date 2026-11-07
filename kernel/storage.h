@@ -32,7 +32,7 @@ typedef struct {
     uint8_t bus, slot, function, transport;
     uint16_t vendor, device;
     bool initialized;
-    char reason[70];
+    char reason[160];
 } StorageController;
 
 void storage_reset(void);
@@ -52,6 +52,7 @@ const StorageController *storage_controller(unsigned index);
 /* Polled controller backends; no bus mastering before safe claim/validation. */
 int storage_ahci_probe(uint8_t bus, uint8_t slot, uint8_t function);
 int storage_usb_probe(uint8_t bus, uint8_t slot, uint8_t function);
+void storage_sdhci_reason(char *out, size_t cap);
 int storage_sdhci_probe(uint8_t bus, uint8_t slot, uint8_t function);
 int storage_raid_probe(uint8_t bus, uint8_t slot, uint8_t function);
 int storage_nvme_probe(uint8_t bus, uint8_t slot, uint8_t function);

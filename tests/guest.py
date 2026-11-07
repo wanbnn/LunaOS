@@ -76,7 +76,10 @@ class Guest:
             "pcspk-audiodev=a0",
         ]
         if cdrom:
-            i=args.index("-drive"); args[i:i+2]=["-cdrom",str(disk),"-boot","order=d"]
+            # UEFI prepends two pflash drives. Replace the OS drive, not
+            # the firmware image, when exercising the optical boot path.
+            i=args.index(f"file={disk},format=raw,if=ide")-1
+            args[i:i+2]=["-cdrom",str(disk),"-boot","order=d"]
         args += (
             ["-netdev", "user,id=n0", "-device", "rtl8139,netdev=n0,romfile="]
             if network

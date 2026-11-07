@@ -1,4 +1,5 @@
 #include "storage.h"
+#include "../drivers/storage_sdhci_policy.h"
 
 typedef struct {
     bool present, busy;
@@ -111,7 +112,7 @@ void storage_pci_init(void) {
             if(base==1 && sub==6 && pi==1)kind=STORAGE_AHCI;
             else if(base==1 && sub==8 && pi==2)kind=STORAGE_NVME;
             else if(base==0x0c && sub==3)kind=STORAGE_USB;
-            else if(base==8 && sub==5)kind=STORAGE_EMMC;
+            else if((base==8 && sub==5) || sdhci_pci_embedded((uint16_t)id,id>>16))kind=STORAGE_EMMC;
             else if(base==1 && sub==4)kind=STORAGE_RAID;
             if(!kind || controller_count==STORAGE_CONTROLLER_MAX)continue;
             StorageController *c=&controllers[controller_count++];
@@ -122,7 +123,7 @@ void storage_pci_init(void) {
             if(kind==STORAGE_AHCI)rc=storage_ahci_probe(bus,slot,fn);
             if(kind==STORAGE_NVME)rc=storage_nvme_probe(bus,slot,fn);
             if(kind==STORAGE_USB)rc=storage_usb_probe(bus,slot,fn);
-            if(kind==STORAGE_EMMC && pi<=1)rc=storage_sdhci_probe(bus,slot,fn);
+            if(kind==STORAGE_EMMC && (pi<=1 || sdhci_pci_embedded((uint16_t)id,id>>16)))rc=storage_sdhci_probe(bus,slot,fn);
             if(kind==STORAGE_RAID)rc=storage_raid_probe(bus,slot,fn);
             c->initialized=rc>0;
             const char *reason=rc>0?"driver ready":
@@ -130,6 +131,9 @@ void storage_pci_init(void) {
               "unsupported interface, media or controller initialization failed":
               "driver initialization failed; see serial diagnostics";
             strcpy(c->reason,reason);
+            if(kind==STORAGE_EMMC && rc<=0 &&
+               (pi<=1 || sdhci_pci_embedded((uint16_t)id,id>>16)))
+                storage_sdhci_reason(c->reason,sizeof(c->reason));
         }
     }
 }
@@ -155,14 +159,22 @@ void storage_status(char *out,size_t cap) {
         append(out," ",cap);append(out,d->model,cap);
         append(out,e->info.supported?" [installable]\n":" [read-only/unsupported]\n",cap);
     }
+    bool sdhci_found=false;
     for(unsigned i=0;i<controller_count;i++) {
         const StorageController *c=&controllers[i];
+        if(c->transport==STORAGE_EMMC)sdhci_found=true;
         append(out,transport_name(c->transport),cap);append(out," PCI ",cap);
         append_number(out,cap,c->bus);append(out,":",cap);
         append_number(out,cap,c->slot);append(out,".",cap);
         append_number(out,cap,c->function);append(out,": ",cap);
-        append(out,c->reason,cap);append(out,"\n",cap);
+        append(out,c->reason,cap);
+        if(c->transport==STORAGE_EMMC) {
+            char id[16];append(out," PCI-ID=",cap);
+            hex(id,((uint32_t)c->device<<16)|c->vendor);append(out,id,cap);
+        }
+        append(out,"\n",cap);
     }
+    if(!sdhci_found)append(out,"eMMC: no PCI SDHCI host found; ACPI-only hosts need a platform driver.\n",cap);
 }
 
 /* Non-destructive two-read check, never modifies the target's partition table. */
