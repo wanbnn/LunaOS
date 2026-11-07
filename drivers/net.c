@@ -1,0 +1,995 @@
+/* Native RTL8139 + Ethernet/ARP/IPv4/ICMP/UDP DNS/TCP HTTP.
+ * One synchronous TCP connection, static QEMU user-network profile. */
+#include "luna.h"
+#include "task.h"
+#include "web.h"
+bool net_ready;
+static uint16_t io;
+static uint8_t mac[6], gateway_mac[6];
+static bool gateway_known;
+static const uint8_t local_ip[4] = {10, 0, 2, 15}, gateway[4] = {10, 0, 2, 2},
+                     dns_ip[4] = {10, 0, 2, 3};
+static uint8_t rx[65536 + 2048] __attribute__((aligned(256))),
+    tx[4][1536] __attribute__((aligned(256)));
+static int txslot;
+static uint32_t rxpos, rxcount, txcount;
+static uint16_t ipid, dnsid = 0x1234;
+static bool ping_done, dns_done;
+/* The task that currently owns the network service; nobody else may poll it. */
+static uint32_t network_owner;
+static uint8_t resolved[4];
+static struct {
+    int state;
+    uint8_t ip[4];
+    uint16_t port, remote_port;
+    uint32_t seq, ack, remote_ack;
+    char data[65536];
+    unsigned used;
+    bool overflow;
+} tcp;
+static uint16_t be16(const void *p) {
+    const uint8_t *b = p;
+    return ((uint16_t)b[0] << 8) | b[1];
+}
+static uint32_t be32(const void *p) {
+    const uint8_t *b = p;
+    return ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16) | ((uint32_t)b[2] << 8) | b[3];
+}
+static void put16(void *p, uint16_t v) {
+    uint8_t *b = p;
+    b[0] = v >> 8;
+    b[1] = v;
+}
+static void put32(void *p, uint32_t v) {
+    uint8_t *b = p;
+    b[0] = v >> 24;
+    b[1] = v >> 16;
+    b[2] = v >> 8;
+    b[3] = v;
+}
+static bool equal(const uint8_t *a, const uint8_t *b, int n) {
+    while (n--)
+        if (*a++ != *b++)
+            return false;
+    return true;
+}
+static uint16_t sum(const uint8_t *b, unsigned n, uint32_t s) {
+    while (n > 1) {
+        s += be16(b);
+        b += 2;
+        n -= 2;
+    }
+    if (n)
+        s += *b << 8;
+    while (s >> 16)
+        s = (s & 65535) + (s >> 16);
+    return ~s;
+}
+static bool send_frame(const uint8_t *p, unsigned n) {
+    if (!net_ready || n > 1514)
+        return false;
+    int slot = txslot++ & 3;
+    uint32_t start = ticks;
+    while (!(inl(io + 0x10 + slot * 4) & (1 << 13)))
+        if (ticks - start > 100)
+            return false;
+    memcpy(tx[slot], p, n);
+    if (n < 60) {
+        memset(tx[slot] + n, 0, 60 - n);
+        n = 60;
+    }
+    outl(io + 0x20 + slot * 4, (uint32_t)tx[slot]);
+    outl(io + 0x10 + slot * 4, n);
+    txcount++;
+    return true;
+}
+static void arp_request(void) {
+    uint8_t p[60];
+    memset(p, 0, sizeof(p));
+    memset(p, 255, 6);
+    memcpy(p + 6, mac, 6);
+    put16(p + 12, 0x806);
+    put16(p + 14, 1);
+    put16(p + 16, 0x800);
+    p[18] = 6;
+    p[19] = 4;
+    put16(p + 20, 1);
+    memcpy(p + 22, mac, 6);
+    memcpy(p + 28, local_ip, 4);
+    memcpy(p + 38, gateway, 4);
+    send_frame(p, 42);
+}
+static bool ensure_gateway(void) {
+    if (gateway_known)
+        return true;
+    for (int attempt = 0; attempt < 3; attempt++) {
+        arp_request();
+        uint32_t start = ticks;
+        while (ticks - start < 100) {
+            net_poll();
+            if (gateway_known)
+                return true;
+            task_yield();
+        }
+    }
+    return false;
+}
+static void send_ip(const uint8_t *dest, int proto, const uint8_t *payload, unsigned n) {
+    if (n > 1480 || !gateway_known)
+        return;
+    uint8_t p[1514];
+    memcpy(p, gateway_mac, 6);
+    memcpy(p + 6, mac, 6);
+    put16(p + 12, 0x800);
+    uint8_t *h = p + 14;
+    memset(h, 0, 20);
+    h[0] = 0x45;
+    put16(h + 2, n + 20);
+    put16(h + 4, ++ipid);
+    put16(h + 6, 0x4000);
+    h[8] = 64;
+    h[9] = proto;
+    memcpy(h + 12, local_ip, 4);
+    memcpy(h + 16, dest, 4);
+    put16(h + 10, sum(h, 20, 0));
+    memcpy(h + 20, payload, n);
+    send_frame(p, n + 34);
+}
+static void send_tcp(int flags, const char *data, unsigned n) {
+    uint8_t p[1460];
+    memset(p, 0, 20);
+    put16(p, tcp.port);
+    put16(p + 2, tcp.remote_port);
+    put32(p + 4, tcp.seq);
+    put32(p + 8, tcp.ack);
+    p[12] = 0x50;
+    p[13] = flags;
+    put16(p + 14, sizeof(tcp.data) - tcp.used - 1);
+    if (n)
+        memcpy(p + 20, data, n);
+    uint32_t s = be16(local_ip) + be16(local_ip + 2) + be16(tcp.ip) + be16(tcp.ip + 2) + 6 + 20 + n;
+    put16(p + 16, sum(p, 20 + n, s));
+    send_ip(tcp.ip, 6, p, 20 + n);
+}
+static int skip_name(const uint8_t *p, int n, int pos) {
+    for (int k = 0; k < 128 && pos < n; k++) {
+        int c = p[pos++];
+        if (!c)
+            return pos;
+        if ((c & 0xc0) == 0xc0)
+            return pos < n ? pos + 1 : -1;
+        if (c > 63 || pos + c > n)
+            return -1;
+        pos += c;
+    }
+    return -1;
+}
+static void dns_receive(const uint8_t *p, int n) {
+    if (n < 12 || be16(p) != dnsid || !(p[2] & 0x80) || (p[3] & 15))
+        return;
+    int pos = 12;
+    int q = be16(p + 4), a = be16(p + 6);
+    if (q > 8 || a > 64)
+        return;
+    while (q--) {
+        pos = skip_name(p, n, pos);
+        if (pos < 0 || pos + 4 > n)
+            return;
+        pos += 4;
+    }
+    while (a--) {
+        pos = skip_name(p, n, pos);
+        if (pos < 0 || pos + 10 > n)
+            return;
+        int type = be16(p + pos), cls = be16(p + pos + 2), len = be16(p + pos + 8);
+        pos += 10;
+        if (pos + len > n)
+            return;
+        if (type == 1 && cls == 1 && len == 4) {
+            memcpy(resolved, p + pos, 4);
+            dns_done = true;
+            return;
+        }
+        pos += len;
+    }
+}
+static void receive(uint8_t *p, unsigned n) {
+    if (n < 14)
+        return;
+    int type = be16(p + 12);
+    if (type == 0x806 && n >= 42) {
+        uint8_t *a = p + 14;
+        if (be16(a) != 1 || be16(a + 2) != 0x800 || a[4] != 6 || a[5] != 4)
+            return;
+        if (equal(a + 14, gateway, 4)) {
+            memcpy(gateway_mac, a + 8, 6);
+            gateway_known = true;
+        }
+        if (be16(a + 6) == 1 && equal(a + 24, local_ip, 4)) {
+            uint8_t reply[42];
+            memcpy(reply, p, 42);
+            memcpy(reply, p + 6, 6);
+            memcpy(reply + 6, mac, 6);
+            put16(reply + 20, 2);
+            memcpy(reply + 32, p + 22, 6);
+            memcpy(reply + 38, p + 28, 4);
+            memcpy(reply + 22, mac, 6);
+            memcpy(reply + 28, local_ip, 4);
+            send_frame(reply, 42);
+        }
+        return;
+    }
+    if (type != 0x800 || n < 34)
+        return;
+    uint8_t *h = p + 14;
+    unsigned ih = (h[0] & 15) * 4, total = be16(h + 2);
+    if ((h[0] >> 4) != 4 || ih < 20 || total < ih || total > n - 14 || sum(h, ih, 0) ||
+        !equal(h + 16, local_ip, 4) || (be16(h + 6) & 0x3fff))
+        return;
+    uint8_t *d = h + ih;
+    unsigned len = total - ih;
+    if (h[9] == 1 && len >= 8 && !sum(d, len, 0) && d[0] == 0 && be16(d + 4) == 0x4c55)
+        ping_done = true;
+    if (h[9] == 1 && len >= 8 && d[0] == 8) {
+        d[0] = 0;
+        d[2] = d[3] = 0;
+        put16(d + 2, sum(d, len, 0));
+        send_ip(h + 12, 1, d, len);
+    }
+    if (h[9] == 17 && len >= 8 && be16(d) == 53 && be16(d + 2) == 53000 &&
+        equal(h + 12, dns_ip, 4)) {
+        unsigned u = be16(d + 4);
+        if (u >= 8 && u <= len)
+            dns_receive(d + 8, u - 8);
+    }
+    if (h[9] != 6 || len < 20 || !tcp.state || !equal(h + 12, tcp.ip, 4) ||
+        be16(d) != tcp.remote_port || be16(d + 2) != tcp.port)
+        return;
+    unsigned th = (d[12] >> 4) * 4;
+    if (th < 20 || th > len)
+        return;
+    uint32_t pseudo = be16(h + 12) + be16(h + 14) + be16(h + 16) + be16(h + 18) + 6 + len;
+    if (sum(d, len, pseudo))
+        return;
+    uint8_t flags = d[13];
+    if (flags & 0x10)
+        tcp.remote_ack = be32(d + 8);
+    if (flags & 4) {
+        tcp.state = -1;
+        return;
+    }
+    uint32_t seq = be32(d + 4);
+    if (tcp.state == 1 && (flags & 0x12) == 0x12 && be32(d + 8) == tcp.seq + 1) {
+        tcp.seq++;
+        tcp.ack = seq + 1;
+        tcp.state = 2;
+        send_tcp(0x10, 0, 0);
+        return;
+    }
+    if (tcp.state < 2)
+        return;
+    unsigned bytes = len - th;
+    if (bytes && seq == tcp.ack) {
+        unsigned copy = bytes;
+        if (copy > sizeof(tcp.data) - tcp.used - 1) {
+            send_tcp(0x10, 0, 0);
+            return;
+        }
+        memcpy(tcp.data + tcp.used, d + th, copy);
+        tcp.used += copy;
+        tcp.data[tcp.used] = 0;
+        tcp.ack += bytes;
+        send_tcp(0x10, 0, 0);
+    } else if (bytes)
+        send_tcp(0x10, 0, 0);
+    if ((flags & 1) && seq + bytes == tcp.ack) {
+        tcp.ack++;
+        send_tcp(0x11, 0, 0);
+        tcp.seq++;
+        tcp.state = 3;
+    }
+}
+void net_poll(void) {
+    if (!net_ready)
+        return;
+    for (int k = 0; k < 32 && !(inb(io + 0x37) & 1); k++) {
+        uint8_t *h = rx + rxpos;
+        uint16_t status = *(uint16_t *)h, len = *(uint16_t *)(h + 2);
+        if (len < 4 || len > 1522) {
+            outb(io + 0x37, 0);
+            outl(io + 0x30, (uint32_t)rx);
+            rxpos = 0;
+            outw(io + 0x38, 0xfff0);
+            outb(io + 0x37, 0x0c);
+            break;
+        }
+        if (status & 1) {
+            uint8_t packet[1536];
+            memcpy(packet, h + 4, len - 4);
+            receive(packet, len - 4);
+            rxcount++;
+        }
+        rxpos = (rxpos + len + 4 + 3) & ~3u;
+        rxpos %= 65536;
+        outw(io + 0x38, rxpos - 16);
+    }
+    outw(io + 0x3e, 0xffff);
+}
+void net_init(void) {
+    for (int b = 0; b < 256; b++)
+        for (int d = 0; d < 32; d++)
+            for (int f = 0; f < 8; f++)
+                if (pci_read(b, d, f, 0) == 0x813910ec) {
+                    uint32_t bar = pci_read(b, d, f, 0x10);
+                    if (!(bar & 1))
+                        continue;
+                    io = bar & ~3u;
+                    uint32_t c = pci_read(b, d, f, 4);
+                    pci_write(b, d, f, 4, (c & 65535) | 5);
+                    outb(io + 0x52, 0);
+                    outb(io + 0x37, 0x10);
+                    for (int k = 0; k < 1000000 && (inb(io + 0x37) & 0x10); k++)
+                        ;
+                    if (inb(io + 0x37) & 0x10)
+                        return;
+                    for (int k = 0; k < 6; k++)
+                        mac[k] = inb(io + k);
+                    outl(io + 0x30, (uint32_t)rx);
+                    outw(io + 0x3c, 0);
+                    outl(io + 0x44, 0x188a);
+                    outl(io + 0x40, 0x03000700);
+                    outw(io + 0x38, 0xfff0);
+                    outb(io + 0x37, 0x0c);
+                    net_ready = true;
+                    serial_write("RTL8139: initialized, static 10.0.2.15/24\n");
+                    return;
+                }
+}
+void net_status(char *out, size_t cap) {
+    out[0] = 0;
+    append(out,
+           net_ready ? "Ethernet: RTL8139 ready\nIPv4: 10.0.2.15/24 (static)\nGateway: 10.0.2.2 | "
+                       "DNS: 10.0.2.3\n"
+                     : "Ethernet: no supported RTL8139 found\n",
+           cap);
+    if (net_ready) {
+        append(out, "MAC: ", cap);
+        for (int i = 0; i < 6; i++) {
+            char b[4] = {"0123456789abcdef"[mac[i] >> 4], "0123456789abcdef"[mac[i] & 15],
+                         i == 5 ? '\n' : ':', 0};
+            append(out, b, cap);
+        }
+        char b[16];
+        append(out, "RX ", cap);
+        number(b, rxcount);
+        append(out, b, cap);
+        append(out, " | TX ", cap);
+        number(b, txcount);
+        append(out, b, cap);
+        append(out, "\n", cap);
+    }
+    append(out, "Wi-Fi: driver not implemented\nBluetooth: driver not implemented\n", cap);
+}
+static bool parse_ip(const char *s, uint8_t *out) {
+    for (int i = 0; i < 4; i++) {
+        if (*s < '0' || *s > '9')
+            return false;
+        int n = 0, k = 0;
+        while (*s >= '0' && *s <= '9') {
+            n = n * 10 + *s++ - '0';
+            if (++k > 3 || n > 255)
+                return false;
+        }
+        out[i] = n;
+        if (i < 3) {
+            if (*s++ != '.')
+                return false;
+        } else if (*s)
+            return false;
+    }
+    return true;
+}
+static bool resolve(const char *host, uint8_t *out) {
+    if (parse_ip(host, out))
+        return true;
+    File *hosts = fs_find("/etc/hosts");
+    if (hosts && !hosts->dir) {
+        const char *p = hosts->data;
+        while (*p) {
+            char address[32], name[224];
+            int n = 0;
+            while (*p == ' ' || *p == '\t')
+                p++;
+            while (*p && *p != ' ' && *p != '\t' && *p != '\n' && n < 31)
+                address[n++] = *p++;
+            address[n] = 0;
+            while (*p == ' ' || *p == '\t')
+                p++;
+            n = 0;
+            while (*p && *p != ' ' && *p != '\t' && *p != '\n' && n < 223)
+                name[n++] = *p++;
+            name[n] = 0;
+            while (*p && *p != '\n')
+                p++;
+            if (*p)
+                p++;
+            if (!strcmp(name, host) && parse_ip(address, out))
+                return true;
+        }
+    }
+    if (!*host || strlen(host) > 200)
+        return false;
+    uint8_t p[512];
+    memset(p, 0, sizeof(p));
+    put16(p, 53000);
+    put16(p + 2, 53);
+    put16(p + 8, ++dnsid);
+    p[10] = 1;
+    put16(p + 12, 1);
+    int pos = 20;
+    const char *s = host;
+    while (*s) {
+        const char *start = s;
+        int n = 0;
+        while (*s && *s != '.') {
+            s++;
+            n++;
+        }
+        if (!n || n > 63)
+            return false;
+        p[pos++] = n;
+        memcpy(p + pos, start, n);
+        pos += n;
+        if (*s)
+            s++;
+    }
+    p[pos++] = 0;
+    put16(p + pos, 1);
+    put16(p + pos + 2, 1);
+    pos += 4;
+    put16(p + 4, pos);
+    dns_done = false;
+    for (int a = 0; a < 3; a++) {
+        send_ip(dns_ip, 17, p, pos);
+        uint32_t t = ticks;
+        while (ticks - t < 100) {
+            net_poll();
+            if (dns_done) {
+                memcpy(out, resolved, 4);
+                return true;
+            }
+            task_yield();
+        }
+    }
+    return false;
+}
+static bool ping_impl(const char *host, char *out, size_t cap) {
+    out[0] = 0;
+    if (!net_ready || !ensure_gateway()) {
+        append(out, "ping: Ethernet/gateway unavailable\n", cap);
+        return false;
+    }
+    uint8_t ip[4];
+    if (!resolve(host, ip)) {
+        append(out, "ping: name resolution failed\n", cap);
+        return false;
+    }
+    uint8_t p[32];
+    memset(p, 0, sizeof(p));
+    p[0] = 8;
+    put16(p + 4, 0x4c55);
+    put16(p + 6, ++ipid);
+    memcpy(p + 8, "LunaOS native ICMP", 18);
+    put16(p + 2, sum(p, sizeof(p), 0));
+    ping_done = false;
+    uint32_t start = ticks;
+    send_ip(ip, 1, p, sizeof(p));
+    while (ticks - start < 300) {
+        net_poll();
+        if (ping_done) {
+            char b[16];
+            append(out, "Reply from ", cap);
+            append(out, host, cap);
+            append(out, ": time <= ", cap);
+            number(b, (ticks - start) * 10 + 10);
+            append(out, b, cap);
+            append(out, " ms\n", cap);
+            return true;
+        }
+        task_yield();
+    }
+    append(out, "ping: timed out (ICMP may be filtered)\n", cap);
+    return false;
+}
+int stream_connect(const char *host, unsigned port) {
+    if (!net_ready || !ensure_gateway())
+        return -1;
+    uint8_t ip[4];
+    if (!resolve(host, ip))
+        return -1;
+    memset(&tcp, 0, sizeof(tcp));
+    memcpy(tcp.ip, ip, 4);
+    tcp.port = 40000 + ticks % 20000;
+    tcp.remote_port = port;
+    tcp.seq = ticks * 7919 + 1000;
+    tcp.state = 1;
+    for (int attempt = 0; attempt < 3 && tcp.state == 1; attempt++) {
+        send_tcp(2, 0, 0);
+        uint32_t start = ticks;
+        while (tcp.state == 1 && ticks - start < 100) {
+            net_poll();
+            task_yield();
+        }
+    }
+    if (tcp.state != 2) {
+        tcp.state = 0;
+        return -1;
+    }
+    return 0;
+}
+int stream_write(const void *data, unsigned n) {
+    const char *p = data;
+    unsigned total = 0;
+    while (total < n) {
+        unsigned chunk = n - total;
+        if (chunk > 1200)
+            chunk = 1200;
+        uint32_t seq = tcp.seq, next = seq + chunk;
+        bool acked = false;
+        for (int attempt = 0; attempt < 5 && !acked; attempt++) {
+            if (tcp.state != 2)
+                return -1;
+            tcp.seq = seq;
+            send_tcp(0x18, p + total, chunk);
+            tcp.seq = next;
+            uint32_t start = ticks;
+            while (ticks - start < 80) {
+                net_poll();
+                if ((int32_t)(tcp.remote_ack - next) >= 0) {
+                    acked = true;
+                    break;
+                }
+                if (tcp.state < 0)
+                    return -1;
+                task_yield();
+            }
+        }
+        if (!acked)
+            return -1;
+        total += chunk;
+    }
+    return total;
+}
+int stream_read(void *out, unsigned n) {
+    uint32_t start = ticks;
+    while (!tcp.used) {
+        net_poll();
+        /* The peer may close the connection in the same packet that carries
+         * the last data: deliver what is buffered before honouring the close. */
+        if (tcp.used)
+            break;
+        if (tcp.state == 3)
+            return 0;
+        if (tcp.state < 2 || ticks - start > 1500)
+            return -1;
+        task_yield();
+    }
+    if (n > tcp.used)
+        n = tcp.used;
+    memcpy(out, tcp.data, n);
+    tcp.used -= n;
+    memmove(tcp.data, tcp.data + n, tcp.used);
+    send_tcp(0x10, 0, 0);
+    return n;
+}
+void stream_close(void) {
+    if (tcp.state == 2)
+        send_tcp(0x11, 0, 0);
+    tcp.state = 0;
+    tcp.used = 0;
+}
+static bool equals_ci(const char *a, const char *b, size_t n) {
+    while (n--) {
+        char x = *a++, y = *b++;
+        if (x >= 'A' && x <= 'Z')
+            x += 32;
+        if (y >= 'A' && y <= 'Z')
+            y += 32;
+        if (x != y)
+            return false;
+    }
+    return true;
+}
+static int http_once(const char *url, char *out, size_t cap, char *error, size_t ecap,
+                     int *status_out, char *location, size_t locap) {
+    out[0] = error[0] = 0;
+    if (status_out)
+        *status_out = 0;
+    if (location && locap)
+        location[0] = 0;
+    bool secure = !strncmp(url, "https://", 8);
+    if (!secure && strncmp(url, "http://", 7)) {
+        append(error, "Expected an http:// or https:// address.", ecap);
+        return -1;
+    }
+    char host[224], path[768];
+    const char *s = url + (secure ? 8 : 7);
+    unsigned k = 0;
+    while (*s && *s != '/' && *s != ':' && *s != '?' && *s != '#') {
+        if (k + 1 >= sizeof(host) || *s == '@' || (unsigned char)*s <= 32) {
+            append(error, "Invalid host.", ecap);
+            return -1;
+        }
+        host[k++] = *s++;
+    }
+    host[k] = 0;
+    if (!k)
+        return -1;
+    unsigned port = secure ? 443 : 80;
+    if (*s == ':') {
+        s++;
+        port = 0;
+        int digits = 0;
+        while (*s >= '0' && *s <= '9') {
+            port = port * 10 + *s++ - '0';
+            if (++digits > 5 || port > 65535)
+                break;
+        }
+        if (!digits || !port || port > 65535) {
+            append(error, "Invalid port.", ecap);
+            return -1;
+        }
+    }
+    if (strlen(s) > sizeof(path) - 3) {
+        append(error, "URL too long.", ecap);
+        return -1;
+    }
+    path[0] = 0;
+    if (*s != '/')
+        strcpy(path, "/");
+    strcat(path, s);
+    for (char *p = path; *p; p++) {
+        if ((unsigned char)*p <= 32) {
+            append(error, "Invalid URL characters.", ecap);
+            return -1;
+        }
+        if (*p == '#') {
+            *p = 0;
+            break;
+        }
+    }
+    if (stream_connect(host, port) < 0) {
+        append(error, "TCP or DNS connection failed.", ecap);
+        return -1;
+    }
+    if (secure && !tls_connect(host, error, ecap)) {
+        stream_close();
+        return -1;
+    }
+    char request[1200] = "GET ";
+    append(request, path, sizeof(request));
+    append(request, " HTTP/1.0\r\nHost: ", sizeof(request));
+    append(request, host, sizeof(request));
+    if (port != (secure ? 443u : 80u)) {
+        char p[16];
+        number(p, port);
+        append(request, ":", sizeof(request));
+        append(request, p, sizeof(request));
+    }
+    append(
+        request,
+        "\r\nUser-Agent: LunaBrowser/0.3\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
+        sizeof(request));
+    if ((secure ? tls_write(request, strlen(request)) : stream_write(request, strlen(request))) <
+        0) {
+        append(error,
+               secure ? "TLS handshake / certificate validation failed." : "HTTP request failed.",
+               ecap);
+        stream_close();
+        return -1;
+    }
+    static char response[WEB_CAP + 8192];
+    unsigned used = 0;
+    int n;
+    while (used + 1 < sizeof(response)) {
+        n = secure ? tls_read(response + used, sizeof(response) - used - 1)
+                   : stream_read(response + used, sizeof(response) - used - 1);
+        if (n <= 0)
+            break;
+        used += n;
+    }
+    response[used] = 0;
+    unsigned secure_error = secure ? tls_error() : 0;
+    stream_close();
+    if (used + 1 >= sizeof(response)) {
+        append(error, "Response exceeds the 128 KiB document limit.", ecap);
+        return -1;
+    }
+    char *body = 0;
+    for (unsigned i = 0; i + 3 < used; i++)
+        if (!strncmp(response + i, "\r\n\r\n", 4)) {
+            body = response + i + 4;
+            break;
+        }
+    if (!body || strncmp(response, "HTTP/1.", 7) || used < 12) {
+        append(error, "Invalid HTTP response.", ecap);
+        return -1;
+    }
+    unsigned code = (response[9] - '0') * 100 + (response[10] - '0') * 10 + response[11] - '0';
+    /* The redirect target is read from the headers before the status is judged. */
+    for (char *h = response; h < body;) {
+        char *end = h;
+        while (end < body && *end != '\r')
+            end++;
+        if (equals_ci(h, "Location:", 9)) {
+            char *p = h + 9;
+            while (p < end && (*p == ' ' || *p == '\t'))
+                p++;
+            size_t n = (size_t)(end - p);
+            while (n && (p[n - 1] == ' ' || p[n - 1] == '\t'))
+                n--;
+            if (location && n && n < locap) {
+                memcpy(location, p, n);
+                location[n] = 0;
+            }
+        }
+        h = end + 2;
+    }
+    if (status_out)
+        *status_out = (int)code;
+    if (code >= 300 && code < 400) {
+        if (!location || !location[0]) {
+            append(error, "The server sent a redirect without a target address.", ecap);
+            return -1;
+        }
+        /* The body of a redirect is not the document. */
+        unsigned redirect_body = used - (unsigned)(body - response);
+        if (redirect_body >= cap)
+            redirect_body = cap - 1;
+        memcpy(out, body, redirect_body);
+        out[redirect_body] = 0;
+        return (int)redirect_body;
+    }
+    if (code < 200 || code >= 300) {
+        append(error, "HTTP status ", ecap);
+        char b[16];
+        number(b, code);
+        append(error, b, ecap);
+        append(error, ".", ecap);
+        return -1;
+    }
+    bool chunked = false;
+    int content_length = -1;
+    for (char *h = response; h < body;) {
+        char *end = h;
+        while (end < body && *end != '\r')
+            end++;
+        if (equals_ci(h, "Transfer-Encoding:", 18)) {
+            for (char *p = h + 18; p + 7 <= end; p++)
+                if (equals_ci(p, "chunked", 7))
+                    chunked = true;
+        }
+        if (equals_ci(h, "Content-Length:", 15)) {
+            const char *p = h + 15;
+            while (*p == ' ')
+                p++;
+            content_length = atoi(p);
+        }
+        if (equals_ci(h, "Content-Encoding:", 17)) {
+            char *p = h + 17;
+            while (*p == ' ')
+                p++;
+            if (p < end && !equals_ci(p, "identity", 8)) {
+                append(error, "Compressed HTTP responses are not supported.", ecap);
+                return -1;
+            }
+        }
+        h = end + 2;
+    }
+    unsigned available = used - (body - response), written = 0;
+    /* Complete, authenticated HTTP framing can finish before TLS close_notify. */
+    if (secure && secure_error && secure_error != 31) {
+        append(error, "TLS response authentication failed (code ", ecap);
+        char b[16];
+        number(b, secure_error);
+        append(error, b, ecap);
+        append(error, ").", ecap);
+        return -1;
+    }
+    if ((secure && secure_error == 31) || (!secure && n < 0)) {
+        if (!chunked && (content_length < 0 || (unsigned)content_length > available)) {
+            append(error, "Transport interrupted; incomplete response rejected.", ecap);
+            return -1;
+        }
+    }
+
+    if (chunked) {
+        unsigned pos = 0;
+        for (;;) {
+            unsigned size = 0, digits = 0;
+            while (pos < available) {
+                char c = body[pos];
+                int v = c >= '0' && c <= '9'   ? c - '0'
+                        : c >= 'a' && c <= 'f' ? c - 'a' + 10
+                        : c >= 'A' && c <= 'F' ? c - 'A' + 10
+                                               : -1;
+                if (v < 0)
+                    break;
+                if (++digits > 7)
+                    return -1;
+                size = size * 16 + v;
+                pos++;
+            }
+            if (!digits)
+                return -1;
+            while (pos + 1 < available && !(body[pos] == '\r' && body[pos + 1] == '\n'))
+                pos++;
+            if (pos + 1 >= available)
+                return -1;
+            pos += 2;
+            if (!size)
+                break;
+            if (size > available - pos || size >= cap - written) {
+                append(error, "Chunked document is incomplete or too large.", ecap);
+                return -1;
+            }
+            memcpy(out + written, body + pos, size);
+            written += size;
+            pos += size;
+            if (pos + 1 >= available || body[pos] != '\r' || body[pos + 1] != '\n')
+                return -1;
+            pos += 2;
+        }
+    } else {
+        if (content_length >= 0 && (unsigned)content_length > available) {
+            append(error, "Incomplete HTTP document.", ecap);
+            return -1;
+        }
+        written = content_length >= 0 ? (unsigned)content_length : available;
+        if (written >= cap) {
+            append(error, "Document exceeds the destination size limit.", ecap);
+            return -1;
+        }
+        memcpy(out, body, written);
+    }
+    out[written] = 0;
+    return written;
+}
+
+/* Builds an absolute address from a base document and a reference that may
+ * be absolute, protocol relative, rooted or relative to the base directory. */
+static bool url_resolve(const char *base, const char *reference, char *out, size_t cap) {
+    char ref[512];
+    size_t n = strlen(reference);
+    if (n >= sizeof(ref))
+        return false;
+    memcpy(ref, reference, n + 1);
+    for (char *p = ref; *p; p++)
+        if (*p == '#') {
+            *p = 0;
+            break;
+        }
+    if (!ref[0]) {
+        n = strlen(base);
+        if (n >= cap)
+            return false;
+        memcpy(out, base, n + 1);
+        return true;
+    }
+    if (!strncmp(ref, "http://", 7) || !strncmp(ref, "https://", 8)) {
+        n = strlen(ref);
+        if (n >= cap)
+            return false;
+        memcpy(out, ref, n + 1);
+        return true;
+    }
+    const char *scheme = !strncmp(base, "https://", 8) ? "https://" : "http://";
+    char authority[256];
+    const char *p = base;
+    if (!strncmp(p, "https://", 8))
+        p += 8;
+    else if (!strncmp(p, "http://", 7))
+        p += 7;
+    size_t i = 0;
+    while (p[i] && p[i] != '/' && p[i] != '?' && i < sizeof(authority) - 1) {
+        authority[i] = p[i];
+        i++;
+    }
+    authority[i] = 0;
+    if (!authority[0])
+        return false;
+    if (ref[0] == '/' && ref[1] == '/') {
+        /* Protocol relative reference keeps the scheme of the base address. */
+        if (strlen(scheme) + strlen(ref) >= cap)
+            return false;
+        strcpy(out, scheme);
+        strcat(out, ref);
+        return true;
+    }
+    if (ref[0] == '/') {
+        if (strlen(scheme) + strlen(authority) + strlen(ref) >= cap)
+            return false;
+        strcpy(out, scheme);
+        strcat(out, authority);
+        strcat(out, ref);
+        return true;
+    }
+    /* Relative reference: replace the last segment of the base path. */
+    char directory[512];
+    n = strlen(base);
+    if (n >= sizeof(directory))
+        return false;
+    memcpy(directory, base, n + 1);
+    char *slash = 0;
+    for (char *q = directory; *q; q++)
+        if (*q == '/')
+            slash = q;
+    if (slash)
+        slash[1] = 0;
+    else
+        strcat(directory, "/");
+    if (strlen(directory) + strlen(ref) >= cap)
+        return false;
+    strcpy(out, directory);
+    strcat(out, ref);
+    return true;
+}
+
+static int http_impl(const char *url, char *out, size_t cap, char *error, size_t ecap) {
+    char current[512];
+    size_t n = strlen(url);
+    if (n >= sizeof(current)) {
+        out[0] = 0;
+        error[0] = 0;
+        append(error, "The address is too long.", ecap);
+        return -1;
+    }
+    memcpy(current, url, n + 1);
+    for (int hop = 0; hop < 8; hop++) {
+        int status = 0;
+        char location[512];
+        location[0] = 0;
+        int result = http_once(current, out, cap, error, ecap, &status, location, sizeof(location));
+        if (result < 0)
+            return -1;
+        if (status < 300 || status >= 400)
+            return result;
+        char next[512];
+        if (!url_resolve(current, location, next, sizeof(next))) {
+            append(error, "The redirect target could not be resolved.", ecap);
+            return -1;
+        }
+        memcpy(current, next, strlen(next) + 1);
+    }
+    append(error, "The server redirected too many times.", ecap);
+    return -1;
+}
+
+void net_cancel_owner(uint32_t pid) {
+    if (network_owner == pid) {
+        network_owner = 0;
+        tcp.state = 0;
+    }
+}
+bool net_ping(const char *host, char *out, size_t cap) {
+    if (network_owner) {
+        out[0] = 0;
+        append(out, "ping: network service busy\n", cap);
+        return false;
+    }
+    network_owner = task_current()->pid;
+    bool ok = ping_impl(host, out, cap);
+    network_owner = 0;
+    return ok;
+}
+int net_http(const char *url, char *out, size_t cap, char *error, size_t ecap) {
+    if (network_owner) {
+        out[0] = error[0] = 0;
+        append(error, "Network service busy; try again shortly.", ecap);
+        return -1;
+    }
+    network_owner = task_current()->pid;
+    int result = http_impl(url, out, cap, error, ecap);
+    network_owner = 0;
+    return result;
+}

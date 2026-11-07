@@ -1,0 +1,3 @@
+# Host build tools only. No Python packages are shipped as runtime dependencies.
+Pillow==13.0.0
+CairoSVG==2.9.1

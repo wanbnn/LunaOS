@@ -1,0 +1,8 @@
+{
+  "archives": {
+    "quickjs.tar.xz": "b376e839b322978313d929fd20663b11ba58b75df5a46c126dd19ea2fa70ad2a",
+    "bearssl.tar.gz": "6705bba1714961b41a728dfc5debbe348d2966c117649392f8c8139efc83ff14",
+    "musl.tar.gz": "a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4"
+  },
+  "quickjs_patch": "Disable Atomics OS-thread integration under LUNA_FREESTANDING"
+}

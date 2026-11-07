@@ -1,0 +1,99 @@
+{
+  "notice": "Identification targets only; no native Wi-Fi driver is operational. Not a market-share claim.",
+  "priority_device": {
+    "pci": "10ec:b723",
+    "subsystem": "103c:804c"
+  },
+  "devices": [
+    {
+      "name": "Realtek RTL8723BE",
+      "pci": "10ec:b723",
+      "state": "port_pending",
+      "source": "https://raw.githubusercontent.com/torvalds/linux/master/drivers/net/wireless/realtek/rtlwifi/rtl8723be/sw.c"
+    },
+    {
+      "name": "Realtek RTL8188EE",
+      "pci": "10ec:8179",
+      "state": "port_pending",
+      "source": "https://raw.githubusercontent.com/torvalds/linux/master/drivers/net/wireless/realtek/rtlwifi/rtl8188ee/sw.c"
+    },
+    {
+      "name": "Realtek RTL8723DE",
+      "pci": "10ec:d723",
+      "state": "port_pending",
+      "source": "https://raw.githubusercontent.com/torvalds/linux/master/drivers/net/wireless/realtek/rtw88/rtw8723de.c"
+    },
+    {
+      "name": "Realtek RTL8821CE",
+      "pci": "10ec:c821",
+      "state": "port_pending",
+      "source": "https://raw.githubusercontent.com/torvalds/linux/master/drivers/net/wireless/realtek/rtw88/rtw8821ce.c"
+    },
+    {
+      "name": "Realtek RTL8822CE",
+      "pci": "10ec:c822",
+      "state": "port_pending",
+      "source": "https://raw.githubusercontent.com/torvalds/linux/master/drivers/net/wireless/realtek/rtw88/rtw8822ce.c"
+    },
+    {
+      "name": "MediaTek MT7612",
+      "pci": "14c3:7612",
+      "state": "port_pending",
+      "source": "https://raw.githubusercontent.com/torvalds/linux/master/drivers/net/wireless/mediatek/mt76/mt76x2/pci.c"
+    },
+    {
+      "name": "MediaTek MT7615",
+      "pci": "14c3:7615",
+      "state": "port_pending",
+      "source": "https://raw.githubusercontent.com/torvalds/linux/master/drivers/net/wireless/mediatek/mt76/mt7615/pci.c"
+    },
+    {
+      "name": "MediaTek MT7663",
+      "pci": "14c3:7663",
+      "state": "port_pending",
+      "source": "https://raw.githubusercontent.com/torvalds/linux/master/drivers/net/wireless/mediatek/mt76/mt7615/pci.c"
+    },
+    {
+      "name": "MediaTek MT7921",
+      "pci": "14c3:7961",
+      "state": "port_pending",
+      "source": "https://raw.githubusercontent.com/torvalds/linux/master/drivers/net/wireless/mediatek/mt76/mt7921/pci.c"
+    },
+    {
+      "name": "MediaTek MT7922",
+      "pci": "14c3:7922",
+      "state": "port_pending",
+      "source": "https://raw.githubusercontent.com/torvalds/linux/master/drivers/net/wireless/mediatek/mt76/mt7921/pci.c"
+    },
+    {
+      "name": "Intel Wireless 7260",
+      "pci": "8086:08b1",
+      "state": "port_pending",
+      "source": "https://raw.githubusercontent.com/torvalds/linux/master/drivers/net/wireless/intel/iwlwifi/pcie/drv.c"
+    },
+    {
+      "name": "Intel Wireless 8265",
+      "pci": "8086:24fd",
+      "state": "port_pending",
+      "source": "https://raw.githubusercontent.com/torvalds/linux/master/drivers/net/wireless/intel/iwlwifi/pcie/drv.c"
+    },
+    {
+      "name": "Intel AX200",
+      "pci": "8086:2723",
+      "state": "port_pending",
+      "source": "https://raw.githubusercontent.com/torvalds/linux/master/drivers/net/wireless/intel/iwlwifi/pcie/drv.c"
+    },
+    {
+      "name": "Qualcomm QCA9377",
+      "pci": "168c:0042",
+      "state": "port_pending",
+      "source": "https://raw.githubusercontent.com/torvalds/linux/master/drivers/net/wireless/ath/ath10k/hw.h"
+    },
+    {
+      "name": "Broadcom BCM43602",
+      "pci": "14e4:43ba",
+      "state": "port_pending",
+      "source": "https://raw.githubusercontent.com/torvalds/linux/master/drivers/net/wireless/broadcom/brcm80211/include/brcm_hw_ids.h"
+    }
+  ]
+}

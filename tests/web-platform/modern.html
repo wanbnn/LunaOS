@@ -1,0 +1,42 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Luna modern engine acceptance — NOT RUN by the reader</title>
+<style>
+:root { --accent: #568bea; color-scheme: light dark; }
+body { font-family: "Inter Tight", sans-serif; margin: 2rem; }
+.grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1rem; }
+.card { display: flex; align-items: center; justify-content: center; min-height: 5rem;
+        border-radius: 1rem; background: color-mix(in srgb, var(--accent), transparent 65%); }
+.card:has(button:focus) { outline: 2px solid var(--accent); }
+@media (max-width: 600px) { .grid { grid-template-columns: 1fr; } }
+</style>
+<h1>Native web engine acceptance</h1>
+<div class="grid"><div class="card"><button id="action">Increment</button></div>
+<div class="card"><output id="count">0</output></div><div class="card" id="shadow"></div></div>
+<pre id="report">Pending: this file requires an integrated DOM/CSS/JS web engine.</pre>
+<script>
+(async () => {
+  const checks = [];
+  const check = (name, ok) => checks.push(`${ok ? 'PASS' : 'FAIL'} ${name}`);
+  check('DOM querySelector', document.querySelector('#count') instanceof HTMLOutputElement);
+  check('CSS Grid', CSS.supports('display', 'grid'));
+  check('CSS Flexbox', CSS.supports('display', 'flex'));
+  check('CSS variables', getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() !== '');
+  check('CSS :has', CSS.supports('selector(:has(button))'));
+  check('CSS color-mix', CSS.supports('color', 'color-mix(in srgb, red, blue)'));
+  const shadow = document.querySelector('#shadow').attachShadow({mode: 'open'});
+  shadow.innerHTML = '<strong>Shadow DOM</strong>';
+  check('Shadow DOM', shadow.querySelector('strong').textContent === 'Shadow DOM');
+  let count = 0;
+  document.querySelector('#action').addEventListener('click', () => {
+    document.querySelector('#count').value = String(++count);
+  });
+  document.querySelector('#action').click();
+  check('DOM events and mutations', document.querySelector('#count').value === '1');
+  await Promise.resolve();
+  check('microtasks', true);
+  await new Promise(resolve => requestAnimationFrame(resolve));
+  check('requestAnimationFrame', true);
+  document.querySelector('#report').textContent = checks.join('\n');
+})();
+</script>

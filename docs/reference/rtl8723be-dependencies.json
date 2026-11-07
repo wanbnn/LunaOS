@@ -1,0 +1,128 @@
+[
+  {
+    "path": "realtek/rtlwifi/rtl8723be/sw.c",
+    "lines": 394,
+    "includes": [
+      "#include \"../wifi.h\"",
+      "#include \"../core.h\"",
+      "#include \"../pci.h\"",
+      "#include \"reg.h\"",
+      "#include \"def.h\"",
+      "#include \"phy.h\"",
+      "#include \"../rtl8723com/phy_common.h\"",
+      "#include \"dm.h\"",
+      "#include \"../rtl8723com/dm_common.h\"",
+      "#include \"hw.h\"",
+      "#include \"fw.h\"",
+      "#include \"../rtl8723com/fw_common.h\"",
+      "#include \"trx.h\"",
+      "#include \"led.h\"",
+      "#include \"table.h\"",
+      "#include \"../btcoexist/rtl_btc.h\"",
+      "#include <linux/vmalloc.h>",
+      "#include <linux/module.h>"
+    ],
+    "source": "https://raw.githubusercontent.com/torvalds/linux/master/drivers/net/wireless/realtek/rtlwifi/rtl8723be/sw.c"
+  },
+  {
+    "path": "realtek/rtlwifi/rtl8723be/hw.c",
+    "lines": 2718,
+    "includes": [
+      "#include \"../wifi.h\"",
+      "#include \"../efuse.h\"",
+      "#include \"../base.h\"",
+      "#include \"../regd.h\"",
+      "#include \"../cam.h\"",
+      "#include \"../ps.h\"",
+      "#include \"../pci.h\"",
+      "#include \"reg.h\"",
+      "#include \"def.h\"",
+      "#include \"phy.h\"",
+      "#include \"../rtl8723com/phy_common.h\"",
+      "#include \"dm.h\"",
+      "#include \"../rtl8723com/dm_common.h\"",
+      "#include \"fw.h\"",
+      "#include \"../rtl8723com/fw_common.h\"",
+      "#include \"led.h\"",
+      "#include \"hw.h\"",
+      "#include \"../pwrseqcmd.h\"",
+      "#include \"pwrseq.h\"",
+      "#include \"../btcoexist/rtl_btc.h\"",
+      "#include <linux/kernel.h>"
+    ],
+    "source": "https://raw.githubusercontent.com/torvalds/linux/master/drivers/net/wireless/realtek/rtlwifi/rtl8723be/hw.c"
+  },
+  {
+    "path": "realtek/rtlwifi/rtl8723be/trx.c",
+    "lines": 743,
+    "includes": [
+      "#include \"../wifi.h\"",
+      "#include \"../pci.h\"",
+      "#include \"../base.h\"",
+      "#include \"../stats.h\"",
+      "#include \"reg.h\"",
+      "#include \"def.h\"",
+      "#include \"phy.h\"",
+      "#include \"trx.h\"",
+      "#include \"led.h\"",
+      "#include \"dm.h\"",
+      "#include \"fw.h\""
+    ],
+    "source": "https://raw.githubusercontent.com/torvalds/linux/master/drivers/net/wireless/realtek/rtlwifi/rtl8723be/trx.c"
+  },
+  {
+    "path": "realtek/rtlwifi/pci.c",
+    "lines": 2386,
+    "includes": [
+      "#include \"wifi.h\"",
+      "#include \"core.h\"",
+      "#include \"pci.h\"",
+      "#include \"base.h\"",
+      "#include \"ps.h\"",
+      "#include \"efuse.h\"",
+      "#include <linux/interrupt.h>",
+      "#include <linux/export.h>",
+      "#include <linux/module.h>"
+    ],
+    "source": "https://raw.githubusercontent.com/torvalds/linux/master/drivers/net/wireless/realtek/rtlwifi/pci.c"
+  },
+  {
+    "path": "realtek/rtlwifi/core.c",
+    "lines": 1958,
+    "includes": [
+      "#include \"wifi.h\"",
+      "#include \"core.h\"",
+      "#include \"cam.h\"",
+      "#include \"base.h\"",
+      "#include \"ps.h\"",
+      "#include \"pwrseqcmd.h\"",
+      "#include \"btcoexist/rtl_btc.h\"",
+      "#include <linux/firmware.h>",
+      "#include <linux/export.h>",
+      "#include <net/cfg80211.h>"
+    ],
+    "source": "https://raw.githubusercontent.com/torvalds/linux/master/drivers/net/wireless/realtek/rtlwifi/core.c"
+  },
+  {
+    "path": "realtek/rtlwifi/wifi.h",
+    "lines": 3038,
+    "includes": [
+      "#include <linux/sched.h>",
+      "#include <linux/firmware.h>",
+      "#include <linux/etherdevice.h>",
+      "#include <linux/vmalloc.h>",
+      "#include <linux/usb.h>",
+      "#include <net/mac80211.h>",
+      "#include <linux/completion.h>",
+      "#include <linux/bitfield.h>",
+      "#include \"debug.h\""
+    ],
+    "source": "https://raw.githubusercontent.com/torvalds/linux/master/drivers/net/wireless/realtek/rtlwifi/wifi.h"
+  },
+  {
+    "path": "realtek/rtlwifi/rtl8723be/Makefile",
+    "lines": 15,
+    "includes": [],
+    "source": "https://raw.githubusercontent.com/torvalds/linux/master/drivers/net/wireless/realtek/rtlwifi/rtl8723be/Makefile"
+  }
+]

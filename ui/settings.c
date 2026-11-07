@@ -1,0 +1,422 @@
+#include "settings.h"
+#include "window.h"
+#define WHITE 0xf2f7ff
+#define MUTED 0xb9cee5
+static int page, slider = -1;
+static bool path_edit, resolution_open;
+static char status[192] = "Changes apply immediately. Save to keep them after restart.";
+static const char *pages[] = {"Keyboard",   "Mouse",   "Displays", "Sound",
+                              "Appearance", "Network", "System"};
+static const char *pages_pt[] = {"Teclado",   "Mouse", "Monitores", "Som",
+                                 "Aparência", "Rede",  "Sistema"};
+static const char *page_name(int i) {
+    return system_text(pages[i], pages_pt[i]);
+}
+static const int page_icons[] = {ICON_COMMAND, ICON_CURSOR,   ICON_SUN,    ICON_VOLUME,
+                                 ICON_MOON,    ICON_ETHERNET, ICON_SLIDERS};
+static uint32_t accents[] = {0x518bea, 0x7e76e7, 0x359e99, 0xd279a5, 0xc58d51, 0x8296ab};
+uint32_t settings_accent(void) {
+    return accents[prefs.accent % 6];
+}
+static bool in(int x, int y, int a, int b, int w, int h) {
+    return x >= a && y >= b && x < a + w && y < b + h;
+}
+static void label(int x, int y, const char *s) {
+    text(x, y, s, 13, MUTED);
+}
+static void num(int x, int y, unsigned v) {
+    char b[24];
+    number(b, v);
+    text(x, y, b, 16, WHITE);
+}
+static void toggle(int x, int y, bool on) {
+    round_rect(x, y, 44, 25, 12, on ? settings_accent() : 0x9ab0c7, on ? 235 : 45);
+    circle(x + (on ? 31 : 13), y + 12, 9, WHITE);
+}
+static void range(int x, int y, int width, int value, int lo, int hi) {
+    round_rect(x, y + 9, width, 6, 3, 0xb6cae2, 35);
+    int fill = (value - lo) * width / (hi - lo);
+    if (fill < 0)
+        fill = 0;
+    if (fill > width)
+        fill = width;
+    round_rect(x, y + 9, fill, 6, 3, settings_accent(), 255);
+    circle(x + fill, y + 12, 8, WHITE);
+}
+static void row(int x, int y, int w, const char *name, const char *value) {
+    round_rect(x, y, w, 55, 12, 0xffffff, 16);
+    static const char *en[] = {"Resolution",
+                               "Compositor target",
+                               "Higher refresh modes",
+                               "Layout",
+                               "Repeat delay",
+                               "Repeat rate",
+                               "Pointer speed",
+                               "Left-handed buttons",
+                               "Pointer acceleration",
+                               "Output device",
+                               "Mute",
+                               "Dark glass",
+                               "Language / Idioma",
+                               0};
+    static const char *pt[] = {"Resolução",
+                               "Meta do compositor",
+                               "Taxas de atualização",
+                               "Layout",
+                               "Atraso de repetição",
+                               "Taxa de repetição",
+                               "Velocidade do cursor",
+                               "Botões para canhotos",
+                               "Aceleração do cursor",
+                               "Dispositivo de saída",
+                               "Silenciar",
+                               "Vidro escuro",
+                               "Idioma"};
+    if (prefs.language)
+        for (int i = 0; en[i]; i++)
+            if (!strcmp(name, en[i])) {
+                name = pt[i];
+                break;
+            }
+    text(x + 17, y + 16, name, 16, WHITE);
+    text(x + w - text_width(value, 13) - 18, y + 18, value, 13, MUTED);
+}
+static void button(int x, int y, int w, const char *s) {
+    round_rect(x, y, w, 32, 13, settings_accent(), 210);
+    text(x + (w - text_width(s, 13)) / 2, y + 7, s, 13, WHITE);
+}
+void settings_draw(int x, int y, int w, int h) {
+    round_rect(x, y, 176, h, 15, 0x13283e, 95);
+    text(x + 17, y + 14, system_text("Settings", "Configurações"), 20, WHITE);
+    for (int i = 0; i < 7; i++) {
+        int yy = y + 62 + i * 47;
+        round_rect(x + 8, yy, 160, 37, 11, 0xffffff, i == page ? 35 : 5);
+        icon(x + 17, yy + 9, page_icons[i], 20, WHITE);
+        text(x + 48, yy + 10, page_name(i), 13, WHITE);
+    }
+    button(x + 12, y + h - 46, 152, system_text("Save settings", "Salvar ajustes"));
+    int a = x + 198, b = y, width = w - 198;
+    text(a, b + 3, page_name(page), 28, WHITE);
+    label(a, b + 47, status);
+    if (page == 0) {
+        row(a, b + 83, width, "Layout",
+            prefs.keyboard_layout ? "Portuguese / ABNT2 basics" : "English / US QWERTY");
+        label(a + 16, b + 145, "Click the layout row to change mapping.");
+        row(a, b + 180, width, "Repeat delay",
+            prefs.repeat_delay == 250   ? "250 ms"
+            : prefs.repeat_delay == 500 ? "500 ms"
+            : prefs.repeat_delay == 750 ? "750 ms"
+                                        : "1000 ms");
+        row(a, b + 246, width, "Repeat rate",
+            prefs.repeat_rate == 30 ? "30 keys / second" : "15 keys / second");
+        row(a, b + 320, width, "Window shortcuts", "Alt+Tab / Alt+Shift+Tab / Alt+F4");
+        label(a + 16, b + 391, "Super: app search. Ctrl+Alt+T: terminal.");
+    } else if (page == 1) {
+        row(a, b + 83, width, "Pointer speed", "25% - 200% / linear");
+        range(a + 22, b + 150, width - 84, prefs.mouse_speed, 25, 200);
+        num(a + width - 50, b + 149, prefs.mouse_speed);
+        row(a, b + 207, width, "Left-handed buttons", "");
+        toggle(a + width - 67, b + 222, prefs.left_handed);
+        row(a, b + 286, width, "Pointer acceleration", "Disabled / direct PS/2 movement");
+        label(a + 16, b + 363, "The cursor updates independently of application rendering.");
+        label(a + 16, b + 387, "Hotspot follows the tip of the Lucide pointer.");
+    } else if (page == 2) {
+        row(a, b + 83, width, "Resolution", gfx_mode_name(display_mode));
+        row(a, b + 150, width, "Compositor target", "60 fps / 16.7 ms frame budget");
+        row(a, b + 217, width, "Higher refresh modes", "Unavailable with this scanout driver");
+        label(a + 15, b + 287, "QEMU: modes supplied by the virtual display adapter.");
+        label(a + 15, b + 311, "Rendering at native resolution / interface scale 100%.");
+        char buf[100] = "Last composition: ", n[16];
+        number(n, compositor_render_ms);
+        strcat(buf, n);
+        strcat(buf, " ms");
+        if (prefs.developer)
+            label(a + 15, b + 348, buf);
+        row(a, b + 377, width, "Scanout",
+            gfx_fast_scanout() ? "32-bit native framebuffer / cached windows"
+                               : "VBE fallback / no fixed-rate guarantee");
+    } else if (page == 3) {
+        row(a, b + 83, width, "Output device", audio_name());
+        text(a + 17, b + 156, "Output volume", 16, WHITE);
+        range(a + 22, b + 185, width - 90, prefs.volume, 0, 100);
+        num(a + width - 52, b + 184, prefs.volume);
+        text(a + 17, b + 237, "Balance", 16, WHITE);
+        range(a + 22, b + 265, width - 70, prefs.balance, -100, 100);
+        row(a, b + 318, width, "Mute", "");
+        toggle(a + width - 67, b + 333, prefs.muted);
+        button(a + 10, b + 391, 150, "Test sound");
+        label(a + 179, b + 400, "Microphone input is not implemented.");
+    } else if (page == 4) {
+        row(a, b + 83, width, "Dark glass", "");
+        toggle(a + width - 67, b + 98, prefs.dark);
+        text(a + 12, b + 156, "Accent color", 16, WHITE);
+        for (int i = 0; i < 6; i++) {
+            int xx = a + 24 + i * 51;
+            circle(xx, b + 204, 15, accents[i]);
+            if (i == prefs.accent)
+                icon(xx - 8, b + 196, ICON_CHEVRON_RIGHT, 16, WHITE);
+        }
+        text(a + 12, b + 239, "Wallpaper", 16, WHITE);
+        int tw = (width - 36) / 4;
+        for (int i = 0; i < 4; i++) {
+            int xx = a + 8 + i * (tw + 6);
+            gfx_draw_wall_preview(xx, b + 277, tw, 76, i);
+            if (prefs.wallpaper == i)
+                round_rect(xx, b + 354, tw, 4, 2, settings_accent(), 255);
+        }
+        button(a + 10, b + 376, 170, "Load PPM from file");
+        round_rect(a + 192, b + 375, width - 200, 35, 12, 0x102238, 80);
+        text(a + 204, b + 384, *prefs.wallpaper_path ? prefs.wallpaper_path : "/home/luna/wall.ppm",
+             13, MUTED);
+        label(a + 12, b + 426, "PPM P3: max 64 x 64, within the LunaFS 8 KiB file limit.");
+    } else if (page == 6) {
+        row(a, b + 83, width, "Language / Idioma",
+            prefs.language ? "Português (Brasil)" : "English");
+        row(a, b + 150, width, prefs.language ? "Modo de desenvolvedor" : "Developer mode", "");
+        toggle(a + width - 67, b + 165, prefs.developer);
+        label(a + 14, b + 230,
+              prefs.language ? "Idioma aplicado aos controles do sistema disponíveis."
+                             : "Language applies to available system controls.");
+        label(a + 14, b + 264,
+              prefs.developer ? "Diagnostics enabled: composition timing and system details."
+                              : "Enable developer mode to show rendering diagnostics.");
+    } else {
+        char buf[1024];
+        net_status(buf, sizeof(buf));
+        int yy = b + 86;
+        char *start = buf;
+        while (*start) {
+            char *end = start;
+            while (*end && *end != '\n')
+                end++;
+            char stop = *end;
+            *end = 0;
+            text(a + 14, yy, start, 16, WHITE);
+            yy += 29;
+            if (!stop)
+                break;
+            start = end + 1;
+        }
+        wireless_status(buf, sizeof(buf));
+        char *line_start = buf;
+        int line_y = b + 270;
+        while (*line_start) {
+            char *end = line_start;
+            while (*end && *end != '\n')
+                end++;
+            char stop = *end;
+            *end = 0;
+            label(a + 14, line_y, line_start);
+            line_y += 24;
+            if (!stop)
+                break;
+            line_start = end + 1;
+        }
+    }
+    if (page == 2 && resolution_open) {
+        int yy = b + 142;
+        round_rect(a, yy, width, gfx_mode_count() * 36 + 8, 12, 0x16283f, 255);
+        for (int i = 0; i < gfx_mode_count(); i++) {
+            if (i == display_mode)
+                round_rect(a + 4, yy + 4 + i * 36, width - 8, 34, 8, settings_accent(), 180);
+            text(a + 16, yy + 12 + i * 36, gfx_mode_name(i), 13, WHITE);
+        }
+    }
+}
+void settings_key(int key) {
+    int code = key & 0xfff;
+    if (!path_edit)
+        return;
+    int n = strlen(prefs.wallpaper_path);
+    if (code == 8 && n)
+        prefs.wallpaper_path[n - 1] = 0;
+    else if (code == 27)
+        path_edit = false;
+    else if (code == 10) {
+        bool ok = gfx_load_wallpaper(prefs.wallpaper_path);
+        strcpy(status, ok ? "Wallpaper loaded. Save to keep this choice."
+                          : "Cannot load wallpaper: expected a small valid PPM P3 file.");
+        if (ok) {
+            prefs.wallpaper = 4;
+            gfx_rebuild_wallpaper();
+            gui_invalidate_all();
+        }
+        path_edit = false;
+    } else if (code >= 32 && code < 127 && n < PATH_CAP - 1) {
+        prefs.wallpaper_path[n] = code;
+        prefs.wallpaper_path[n + 1] = 0;
+    }
+    gui_invalidate_app(APP_SETTINGS);
+}
+static void apply_slider(int x, int width) {
+    int v = x - 198 - 22, span = width - 198 - 84;
+    if (span < 1)
+        return;
+    if (v < 0)
+        v = 0;
+    if (v > span)
+        v = span;
+    if (slider == 0)
+        prefs.mouse_speed = 25 + v * 175 / span;
+    if (slider == 1)
+        prefs.volume = v * 100 / span;
+    if (slider == 2)
+        prefs.balance = v * 200 / span - 100;
+    settings_changed();
+}
+void settings_click(int x, int y, int width, int height) {
+    path_edit = false;
+    slider = -1;
+    if (page == 2 && resolution_open) {
+        resolution_open = false;
+        if (x >= 198 && y >= 146 && y < 146 + gfx_mode_count() * 36) {
+            bool ok = gfx_change_mode((y - 146) / 36);
+            strcpy(status,
+                   ok ? "Native resolution applied. Interface scale: 100%." : "Mode unavailable.");
+        }
+        gui_invalidate_app(APP_SETTINGS);
+        return;
+    }
+    if (page == 2 && x >= 198 && y >= 83 && y < 138) {
+        resolution_open = true;
+        gui_invalidate_app(APP_SETTINGS);
+        return;
+    }
+    if (x < 176) {
+        if (y >= 62 && y < 391)
+            page = (y - 62) / 47;
+        if (y >= height - 46) {
+            bool ok = settings_save();
+            strcpy(status, ok ? "Settings saved to disk."
+                              : "Save failed; preferences remain active in memory.");
+        }
+        gui_invalidate_app(APP_SETTINGS);
+        return;
+    }
+    int a = x - 198, w = width - 198;
+    if (page == 6) {
+        if (y >= 83 && y < 138)
+            prefs.language = !prefs.language;
+        if (y >= 150 && y < 205)
+            prefs.developer = !prefs.developer;
+    }
+    if (page == 0) {
+        if (y >= 83 && y < 138)
+            prefs.keyboard_layout = !prefs.keyboard_layout;
+        if (y >= 180 && y < 235)
+            prefs.repeat_delay = prefs.repeat_delay == 1000 ? 250 : prefs.repeat_delay + 250;
+        if (y >= 246 && y < 301)
+            prefs.repeat_rate = prefs.repeat_rate == 30 ? 15 : 30;
+    }
+    if (page == 1) {
+        if (y >= 140 && y < 180)
+            slider = 0;
+        if (y >= 207 && y < 262)
+            prefs.left_handed = !prefs.left_handed;
+    }
+    if (page == 3) {
+        if (y >= 175 && y < 220)
+            slider = 1;
+        if (y >= 255 && y < 299)
+            slider = 2;
+        if (y >= 318 && y < 373)
+            prefs.muted = !prefs.muted;
+        if (y >= 391 && y < 425)
+            audio_beep(660, 25);
+    }
+    if (page == 4) {
+        if (y >= 83 && y < 138)
+            prefs.dark = !prefs.dark;
+        if (y >= 184 && y < 224 && a >= 0 && a < 320)
+            prefs.accent = (a + 1) / 51 % 6;
+        if (y >= 277 && y < 359) {
+            int tw = (w - 36) / 4;
+            int choice = (a - 8) / (tw + 6);
+            if (choice >= 0 && choice < 4) {
+                prefs.wallpaper = choice;
+                gfx_rebuild_wallpaper();
+            }
+        }
+        if (y >= 375 && y < 412) {
+            if (a < 184) {
+                bool ok = gfx_load_wallpaper(prefs.wallpaper_path);
+                strcpy(status,
+                       ok ? "Wallpaper loaded." : "Enter a PPM path in the field and press Enter.");
+                if (ok) {
+                    prefs.wallpaper = 4;
+                    gfx_rebuild_wallpaper();
+                }
+            } else {
+                path_edit = true;
+                prefs.wallpaper_path[0] = 0;
+            }
+        }
+    }
+    if (slider >= 0)
+        apply_slider(x, width);
+    else
+        settings_changed();
+}
+void settings_drag(int x, int y, int width, int height) {
+    (void)y;
+    (void)height;
+    if (slider >= 0)
+        apply_slider(x, width);
+}
+void quick_draw(void) {
+    gfx_set_origin(W - GFX_BOOT_W, 0);
+    glass(688, 58, 316, 448, 25, 1);
+    text(710, 78, "Control Center", 20, WHITE);
+    row(706, 122, 278, "Ethernet", net_ready ? "Connected" : "Unavailable");
+    icon(716, 195, ICON_WIFI, 24, MUTED);
+    text(753, 199, "Wi-Fi: not implemented", 13, MUTED);
+    icon(716, 237, ICON_BLUETOOTH, 24, MUTED);
+    text(753, 241, "Bluetooth: not implemented", 13, MUTED);
+    text(710, 291, "Brightness", 16, WHITE);
+    range(711, 321, 261, prefs.brightness, 30, 100);
+    text(710, 366, "Volume", 16, WHITE);
+    range(711, 395, 261, prefs.volume, 0, 100);
+    button(710, 452, 269, "Open Settings");
+}
+bool quick_click(int x, int y) {
+    x -= W - GFX_BOOT_W;
+    if (!in(x, y, 688, 58, 316, 448))
+        return false;
+    if (y >= 452 && y < 486) {
+        controls_open = false;
+        gui_open(APP_SETTINGS);
+    }
+    return true;
+}
+void quick_pointer(int x, int y, bool pressed, bool released) {
+    x -= W - GFX_BOOT_W;
+    static int quick_slider = -1;
+    if (released) {
+        quick_slider = -1;
+        return;
+    }
+    if (pressed) {
+        if (!quick_click(x, y)) {
+            controls_open = false;
+            gui_damage_quick();
+            return;
+        }
+        quick_slider = y >= 310 && y < 348 ? 0 : y >= 384 && y < 425 ? 1 : -1;
+    }
+    if (quick_slider >= 0) {
+        int v = x - 711;
+        if (v < 0)
+            v = 0;
+        if (v > 261)
+            v = 261;
+        if (quick_slider == 0)
+            prefs.brightness = 30 + v * 70 / 261;
+        else
+            prefs.volume = v * 100 / 261;
+        settings_changed();
+        gui_damage_quick();
+    }
+}
+void quick_key(int key) {
+    (void)key;
+}

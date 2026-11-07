@@ -1,0 +1,10 @@
+{
+  "family": "Inter Tight",
+  "upstream": "https://github.com/google/fonts/tree/main/ofl/intertight",
+  "source": "https://raw.githubusercontent.com/google/fonts/main/ofl/intertight/InterTight%5Bwght%5D.ttf",
+  "license": "SIL Open Font License 1.1",
+  "files": {
+    "InterTight.ttf": "b81b73dcb64df3c230cabade7df6c5773bf863233f24c9ee51087519f1f88b6f",
+    "OFL.txt": "50240ab035cf1b6b3307940235481d515c4b6de3ab1fa843dbe59e7892cb9d58"
+  }
+}

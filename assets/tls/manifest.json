@@ -1,0 +1,9 @@
+{
+  "roots_source": "Ubuntu public Mozilla CA snapshot; /usr/share/ca-certificates/mozilla",
+  "date": "2026-11-06",
+  "anchors": 120,
+  "files": {
+    "roots.pem": "a9bdea6ecf3eea678a2a25ec45b6167abd5fe18c2caef26380186bceff2a5fdd",
+    "trust_anchors.h": "c2fe0f0abf9105a950af418b4cfa5d4fe02602393967d84ae00079d47e253309"
+  }
+}

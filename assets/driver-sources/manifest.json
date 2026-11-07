@@ -1,0 +1,10 @@
+{
+  "repository": "https://github.com/torvalds/linux",
+  "commit": "d48723711bae9b8cdc56719c448ba42fef28cbee",
+  "path": "drivers/net/wireless",
+  "source_only": true,
+  "runtime_driver": false,
+  "files": 2431,
+  "bytes": 11384964,
+  "sha256": "6fa688d16ccb91885f7fc9038155d2bbefecbbd4db175c0d3e0ddf7e552ec0fa"
+}

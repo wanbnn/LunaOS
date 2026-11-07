@@ -1,0 +1,23 @@
+ENTRY(_entry)
+PHDRS {
+ text PT_LOAD FLAGS(5);
+ data PT_LOAD FLAGS(6);
+}
+SECTIONS {
+ . = 0x100000;
+ .text : { *(.text.entry) *(.text*) } :text
+ .rodata : { *(.rodata*) } :text
+ .data : ALIGN(16) { *(.data*) } :data
+ /* Never allocate buffers in the VGA aperture or BIOS ROM (0xa0000..0xfffff). */
+ . = ALIGN(4096);
+ __bss_start = .;
+ .bss.low (NOLOAD) : { build/kernel/account.o(.bss) build/kernel/driver_services.o(.bss) build/kernel/fs.o(.bss) build/kernel/task.o(.bss) } :data
+ __bss_low_end = .;
+ /* Keep OVMF legacy ACPI NVS at 8 MiB intact across ExitBootServices. */
+ . = MAX(., 0x810000);
+ __bss_high_start = .;
+ .bss (NOLOAD) : { *(.bss*) *(COMMON) } :data
+ __bss_end = .;
+ /DISCARD/ : { *(.eh_frame*) *(.comment*) *(.note*) }
+ ASSERT(__bss_end < 0x3d00000, "Kernel BSS overlaps stack")
+}
