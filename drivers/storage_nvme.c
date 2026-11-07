@@ -136,6 +136,14 @@ int storage_nvme_probe(uint8_t bus,uint8_t slot,uint8_t fn) {
     *n=(Nvme){.pci={.bus=bus,.slot=slot,.function=fn,
                     .vendor=(uint16_t)id,.device=(uint16_t)(id>>16)}};
     int stage=1;
+    /* Firmware may leave the PCI command BME enabled after boot. The
+     * NVMe controller is now owned by LunaOS; turn it off before claim/reset. */
+    uint32_t cmdreg=pci_read(bus,slot,fn,4);
+    if(cmdreg&4u) {
+        serial_write("STORAGE NVMe: disabling inherited PCI bus master\n");
+        pci_write(bus,slot,fn,4,cmdreg&~4u);
+        if(pci_read(bus,slot,fn,4)&4u)goto fail;
+    }
     if(drv_pci_claim(&n->pci))goto fail;
     stage=2;
     if(drv_pci_map(&n->pci,0,&n->regs))goto fail;

@@ -168,6 +168,15 @@ int storage_ahci_probe(uint8_t bus,uint8_t slot,uint8_t fn) {
     h->pci=(DrvPci){.bus=bus,.slot=slot,.function=fn,
         .vendor=(uint16_t)id,.device=(uint16_t)(id>>16)};
     int stage=1;
+    /* SeaBIOS/UEFI commonly leaves PCI bus mastering set. We are past the
+     * firmware handoff; quiesce this specific AHCI controller before taking
+     * exclusive ownership (never seize an unrelated device). */
+    uint32_t cmdreg=pci_read(bus,slot,fn,4);
+    if(cmdreg&4u) {
+        serial_write("STORAGE AHCI: disabling inherited PCI bus master\n");
+        pci_write(bus,slot,fn,4,cmdreg&~4u);
+        if(pci_read(bus,slot,fn,4)&4u)goto fail;
+    }
     if(drv_pci_claim(&h->pci))goto fail;
     stage=2;
     if(drv_pci_map(&h->pci,5,&h->mmio))goto fail;

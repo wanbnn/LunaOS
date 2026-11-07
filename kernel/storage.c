@@ -122,9 +122,10 @@ void storage_pci_init(void) {
             if(kind==STORAGE_AHCI)rc=storage_ahci_probe(bus,slot,fn);
             if(kind==STORAGE_NVME)rc=storage_nvme_probe(bus,slot,fn);
             c->initialized=rc>0;
-            const char *reason=rc>0?"driver ready":rc==DRV_ENOTSUP?
-              "controller detected; data-path driver not yet available":
-              "controller found; initialization failed/unsupported";
+            const char *reason=rc>0?"driver ready":
+              (kind==STORAGE_AHCI || kind==STORAGE_NVME)?
+              "driver initialization failed; see serial diagnostics":
+              "controller detected; data-path driver not yet available";
             strcpy(c->reason,reason);
         }
     }
