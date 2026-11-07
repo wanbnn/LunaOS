@@ -243,7 +243,20 @@ static void browser_load_stylesheets(const char *base) {
         if (length > 0)
             web_add_stylesheet(css_body, (size_t)length);
     }
+    /* Bound both transfers and decoded memory for this small native engine. */
+    for (int i = 0; i < 8; i++) {
+        if (!web_image_link(i, href, sizeof(href)))
+            break;
+        char target[512], error[192] = {0};
+        resolve_link(base, href, target, sizeof(target));
+        if (strncmp(target, "http://", 7) && strncmp(target, "https://", 8))
+            continue;
+        int length = net_http(target, css_body, sizeof(css_body), error, sizeof(error));
+        if (length > 0)
+            web_set_image(i, (const unsigned char *)css_body, (size_t)length);
+    }
 }
+
 static void browser_load(const char *url) {
     char target[256];
     if (strlen(url) >= sizeof(target))

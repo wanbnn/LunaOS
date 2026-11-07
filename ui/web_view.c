@@ -10,6 +10,7 @@ static char document_error[256];
 static int scroll_offset;
 static int layout_width;
 static int viewport_height;
+static size_t decoded_image_bytes;
 
 /* The parsed stylesheet is kept in a growable buffer so that linked
  * stylesheets can be appended after the document was loaded. */
@@ -135,6 +136,46 @@ bool web_stylesheet_link(int index, char *out, size_t cap) {
     int wanted = index;
     return stylesheet_href(document_root, &wanted, out, cap);
 }
+static WebNode *image_node(WebNode *node, int *index) {
+    if (!node || (node->type == WEB_ELEMENT && node->style.display == WEB_DISPLAY_NONE))
+        return 0;
+    if (node->type == WEB_ELEMENT && !strcmp(node->tag, "img") && web_attr(node, "src")) {
+        if ((*index)-- == 0) return node;
+    }
+    for (WebNode *c = node->first_child; c; c = c->next) {
+        WebNode *found = image_node(c, index);
+        if (found) return found;
+    }
+    return 0;
+}
+bool web_image_link(int index, char *out, size_t cap) {
+    if (index < 0 || !out || !cap) return false;
+    WebNode *node = image_node(document_root, &index);
+    if (!node) return false;
+    const char *src = web_attr(node, "src");
+    size_t n = strlen(src);
+    if (n >= cap) return false;
+    memcpy(out, src, n + 1);
+    return true;
+}
+bool web_set_image(int index, const unsigned char *data, size_t len) {
+    if (index < 0) return false;
+    WebNode *node = image_node(document_root, &index);
+    if (!node || decoded_image_bytes >= 1024 * 1024) return false;
+    size_t old = (size_t)node->image_w * (size_t)node->image_h * 4;
+    if (!web_decode_image(node, data, len)) return false;
+    size_t bytes = (size_t)node->image_w * (size_t)node->image_h * 4;
+    if (decoded_image_bytes - old + bytes > 1024 * 1024) {
+        web_free(node->image);
+        node->image = 0;
+        node->image_w = node->image_h = 0;
+        decoded_image_bytes -= old;
+        return false;
+    }
+    decoded_image_bytes = decoded_image_bytes - old + bytes;
+    web_relayout();
+    return true;
+}
 void web_reset(void) {
     web_js_release();
     if (document_root)
@@ -143,6 +184,7 @@ void web_reset(void) {
     css_free_sheet(style_rules, style_rule_count);
     style_rules = 0;
     style_rule_count = 0;
+    decoded_image_bytes = 0;
     sheet_length = 0;
     if (sheet_text)
         sheet_text[0] = 0;
@@ -211,7 +253,8 @@ void web_render(int x, int y, int w, int h) {
     viewport_height = h;
     if (w != layout_width) {
         layout_width = w;
-        web_relayout();
+        css_set_viewport(w);
+        styles_rebuild();
     }
     if (web_js_dirty()) {
         web_js_clear_dirty();
@@ -234,10 +277,13 @@ void web_render(int x, int y, int w, int h) {
 }
 /* Finds the deepest element with a link at the given document position. */
 static WebNode *hit_link(WebNode *node, int x, int y) {
-    if (!node || node->type != WEB_ELEMENT)
+    if (!node || node->type != WEB_ELEMENT || node->style.display == WEB_DISPLAY_NONE ||
+        node->style.hidden || node->style.clip_empty)
         return 0;
     bool inside = node->w > 0 && x >= node->x && x < node->x + node->w && y >= node->y &&
                   y < node->y + node->h;
+    if (node->style.overflow_hidden && !inside)
+        return 0;
     WebNode *found = 0;
     for (WebNode *c = node->first_child; c; c = c->next) {
         WebNode *hit = hit_link(c, x, y);

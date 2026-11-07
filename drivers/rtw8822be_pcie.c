@@ -1,0 +1,315 @@
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2018-2019 Realtek Corporation
+ * Native polled RTL8822BE PCIe transport adapted from rtw88/pci.c, fw.c,
+ * tx.c and mac.c. No Linux runtime. Passive RX only after firmware bring-up.
+ */
+#include "driver.h"
+#include "rtw8822be_pcie.h"
+#include "rtw8822be_phy.h"
+#include "rtw8822b_firmware.h"
+#include "wifi_scan.h"
+#define RX_COUNT 16u
+#define RX_BYTES 11520u
+static struct {
+    bool present, master, powered, ready;
+    const char *stage;
+    int error;
+    DrvPci pci;
+    DrvMmio mmio;
+    DrvDma descriptors, payload, txbd, tx;
+    DrvFirmware firmware;
+    RtwRegisterIo io;
+    RtwFirmwareTransfer transfer;
+    struct rtw_dev phy;
+    WifiScanner scanner;
+    unsigned rp, tag, received, dropped;
+} dev;
+static int rd(void *ctx,uint32_t reg,unsigned width,uint32_t *out) {
+    (void)ctx; return drv_mmio_read(&dev.mmio,reg,width,out);
+}
+static int wr(void *ctx,uint32_t reg,unsigned width,uint32_t value) {
+    (void)ctx; return drv_mmio_write(&dev.mmio,reg,width,value);
+}
+static int us(void *ctx,unsigned delay) {
+    (void)ctx;
+    while(delay) {
+        unsigned chunk=delay>1000 ? 1000 : delay;
+        int rc=drv_udelay(chunk); if(rc) return rc;
+        delay-=chunk;
+    }
+    return 0;
+}
+static int read32(uint32_t reg,uint32_t *v) { return rd(NULL,reg,4,v); }
+static int write(uint32_t reg,unsigned width,uint32_t value) {
+    int rc=wr(NULL,reg,width,value);
+    if(rc) dev.io.failed_register=reg;
+    return rc;
+}
+static int bits(uint32_t reg,unsigned width,uint32_t clear,uint32_t set) {
+    uint32_t v; int rc=rd(NULL,reg,width,&v);
+    return rc ? rc : write(reg,width,(v&~clear)|set);
+}
+static int wait_reg(uint32_t reg,unsigned width,uint32_t mask,uint32_t value) {
+    for(unsigned i=0;i<1000;i++) {
+        uint32_t v; int rc=rd(NULL,reg,width,&v); if(rc) return rc;
+        if((v&mask)==value) return 0;
+        rc=us(NULL,10); if(rc) return rc;
+    }
+    dev.io.failed_register=reg; return DRV_ETIMEDOUT;
+}
+static void le16(uint8_t *p,uint16_t v) { p[0]=v; p[1]=v>>8; }
+static void le32(uint8_t *p,uint32_t v) { le16(p,v); le16(p+2,v>>16); }
+static void arm_rx(unsigned index) {
+    uint8_t *bd=(uint8_t *)dev.descriptors.cpu+index*8;
+    le16(bd,RX_BYTES); le16(bd+2,0);
+    le32(bd+4,dev.payload.bus+index*RX_BYTES);
+}
+static int allocate_rings(void) {
+    int rc=drv_dma_alloc(RX_COUNT*8,256,UINT32_MAX,0,&dev.descriptors);
+    if(!rc) rc=drv_dma_alloc(RX_COUNT*RX_BYTES,4096,UINT32_MAX,0,&dev.payload);
+    if(!rc) rc=drv_dma_alloc(8*32,256,UINT32_MAX,0,&dev.txbd);
+    if(!rc) rc=drv_dma_alloc(4096+48,256,UINT32_MAX,0,&dev.tx);
+    return rc;
+}
+static int rings(void) {
+    int rc=bits(0x303,1,0,0xf7);
+    if(rc) return rc;
+    dev.rp=dev.tag=0;
+    memset(dev.txbd.cpu,0,dev.txbd.size);
+    for(unsigned i=0;i<RX_COUNT;i++) arm_rx(i);
+    static const uint32_t bases[]={0x308,0x1320,0x310,0x330,0x328,0x320,0x318,0x340};
+    static const uint32_t counts[]={0,0x1328,0x380,0x38a,0x388,0x386,0x384,0x38c};
+    rc=bits(0x303,1,0,0xf7); /* Stop ordinary TX DMA queues. Beacon reserved page remains usable. */
+    for(unsigned i=0;i<8 && !rc;i++) {
+        rc=write(bases[i],4,dev.txbd.bus+i*32);
+        if(!rc && i) rc=write(counts[i],2,2);
+    }
+    if(!rc) rc=write(0x382,2,RX_COUNT);
+    if(!rc) rc=write(0x338,4,dev.descriptors.bus);
+    if(!rc) rc=write(0x39c,4,UINT32_MAX);
+    if(!rc) rc=bits(0x1330,4,0,(1u<<16)|(1u<<8));
+    if(!rc) rc=bits(0x300,4,0,(1u<<20)|(1u<<15));
+    drv_memory_barrier();
+    return rc;
+}
+static int reserved(void *ctx,const uint8_t *data,unsigned bytes) {
+    (void)ctx;
+    if(!bytes || bytes>4096) return DRV_EINVAL;
+    uint32_t cr,bcn,txq;
+    int rc=rd(NULL,0x101,1,&cr);
+    if(!rc) rc=rd(NULL,0x550,1,&bcn);
+    if(!rc) rc=rd(NULL,0x422,1,&txq);
+    if(rc) return rc;
+    rc=write(0x204,2,0x8000); /* page zero, clear old BCN_VALID */
+    if(!rc) rc=write(0x101,1,cr|1);
+    if(!rc) rc=write(0x550,1,(bcn&~8u)|16);
+    if(!rc) rc=write(0x422,1,txq&~64u);
+    if(!rc) {
+        uint8_t *packet=dev.tx.cpu, *bd=dev.txbd.cpu;
+        memset(packet,0,48); memcpy(packet+48,data,bytes);
+        le32(packet,bytes|(48u<<16)|(1u<<26)|(1u<<31));
+        le32(packet+4,16u<<8); /* beacon QSEL */
+        le32(packet+12,(1u<<8)|(1u<<10));
+        le32(packet+32,1u<<15); /* hardware sequence */
+        unsigned checksum=0;
+        for(unsigned i=0;i<32;i+=2) checksum^=packet[i]|((unsigned)packet[i+1]<<8);
+        le16(packet+28,checksum);
+        memset(bd,0,16); le16(bd,48);
+        le16(bd+2,((48+bytes+127)/128)|0x8000); le32(bd+4,dev.tx.bus);
+        le16(bd+8,bytes); le32(bd+12,dev.tx.bus+48);
+        drv_memory_barrier();
+        rc=bits(0x383,1,0,16); /* BCNQ kick */
+        if(!rc) rc=wait_reg(0x204,2,0x8000,0x8000);
+        drv_memory_barrier();
+    }
+    int cleanup=write(0x204,2,0x8000);
+    int r=write(0x550,1,bcn); if(!cleanup) cleanup=r;
+    r=write(0x422,1,txq); if(!cleanup) cleanup=r;
+    r=write(0x101,1,cr); if(!cleanup) cleanup=r;
+    return rc ? rc : cleanup;
+}
+static bool radio_ready(void *ctx) { (void)ctx; return dev.ready && !dev.error; }
+static uint32_t now(void *ctx) { (void)ctx; return drv_now_ms(); }
+static int stop(void *ctx) {
+    (void)ctx;
+    /* RF remains on the last channel; polling drains queued frames. */
+    return 0;
+}
+static int tune(void *ctx,uint8_t channel) {
+    (void)ctx;
+    int rc=bits(0x100,2,0x80,0); /* Stop MAC RX while RF settles. TX is always disabled. */
+    if(!rc) rc=rtw8822be_phy_channel(&dev.phy,channel);
+    /* Discard frames queued on the previous channel before accepting beacons. */
+    uint32_t index=0;
+    if(!rc) rc=read32(0x3b4,&index);
+    unsigned wp=(index>>16)&0xfff;
+    if(!rc && wp>=RX_COUNT) rc=DRV_EIO;
+    while(!rc && dev.rp!=wp) {
+        arm_rx(dev.rp); dev.rp=(dev.rp+1)%RX_COUNT; dev.tag=(dev.tag+1)%8192;
+    }
+    drv_memory_barrier();
+    if(!rc) rc=write(0x3b4,2,dev.rp);
+    if(!rc) rc=bits(0x100,2,0x40,0x80);
+    if(rc) { dev.error=rc; dev.ready=false; dev.stage="channel/RF"; }
+    return rc;
+}
+static int receive(void *ctx,uint8_t *out,unsigned capacity,unsigned *bytes,int16_t *rssi) {
+    (void)ctx; *bytes=0;
+    uint32_t index;
+    int rc=read32(0x3b4,&index);
+    if(rc) return rc;
+    unsigned wp=(index>>16)&0xfff;
+    if(wp>=RX_COUNT) return DRV_EIO;
+    if(wp==dev.rp) return 0;
+    drv_memory_barrier();
+    const volatile uint16_t *bd=(volatile uint16_t *)((uint8_t *)dev.descriptors.cpu+dev.rp*8);
+    unsigned tag=bd[1];
+    RtwRxPacket packet;
+    const uint8_t *payload=(const uint8_t *)dev.payload.cpu+dev.rp*RX_BYTES;
+    rc=tag==dev.tag ? rtw8822b_rx_parse(payload,RX_BYTES,&packet) : DRV_EIO;
+    int delivered=0;
+    if(!rc && !packet.c2h && packet.frame_bytes<=capacity) {
+        memcpy(out,packet.frame,packet.frame_bytes); *bytes=packet.frame_bytes;
+        *rssi=-110;
+        if(packet.phy && packet.phy_bytes>=4) {
+            unsigned page=packet.phy[0]&15;
+            if(page==0) *rssi=(int)packet.phy[1]-110;
+            else if(page==1) {
+                unsigned power=packet.phy[1]>packet.phy[2] ? packet.phy[1] : packet.phy[2];
+                *rssi=(int)power-110;
+            }
+        }
+        delivered=1; dev.received++;
+    } else dev.dropped++;
+    dev.tag=(dev.tag+1)%8192;
+    arm_rx(dev.rp); dev.rp=(dev.rp+1)%RX_COUNT;
+    drv_memory_barrier();
+    rc=write(0x3b4,2,dev.rp);
+    if(rc) { dev.error=rc; dev.ready=false; return rc; }
+    return delivered;
+}
+static void cleanup(void) {
+    dev.ready=false;
+    /* Never free a descriptor or payload while PCI bus mastering can continue. */
+    if(dev.master) {
+        int rc=drv_pci_master(&dev.pci,false);
+        uint32_t command=4;
+        if(!rc) rc=drv_pci_config_read(&dev.pci,4,2,&command);
+        if(rc || (command&4)) { dev.stage="DMA stop failed; reboot required"; return; }
+        dev.master=false;
+    }
+    if(dev.powered && dev.mmio.cookie) {
+        uint32_t id=0; rd(NULL,0xf0,4,&id);
+        (void)rtw8822b_mac_power_off(&dev.io,(id>>12)&15);
+        dev.powered=false;
+    }
+    if(dev.firmware.data) drv_firmware_release(&dev.firmware);
+    if(dev.payload.cpu) drv_dma_free(&dev.payload);
+    if(dev.descriptors.cpu) drv_dma_free(&dev.descriptors);
+    if(dev.tx.cpu) drv_dma_free(&dev.tx);
+    if(dev.txbd.cpu) drv_dma_free(&dev.txbd);
+    if(dev.mmio.cookie) drv_mmio_unmap(&dev.mmio);
+    if(dev.pci.cookie && !dev.mmio.cookie) drv_pci_release(&dev.pci);
+}
+void rtw8822be_init(void) {
+    dev.stage="PCI discovery";
+    int rc=drv_pci_find(0x10ec,0xb822,0,&dev.pci);
+    if(rc) { dev.error=rc; return; }
+    dev.present=true;
+    dev.io=(RtwRegisterIo){.read=rd,.write=wr,.delay_us=us};
+#define STEP(label,expr) do { dev.stage=label; rc=(expr); if(rc) goto fail; } while(0)
+    STEP("PCI claim",drv_pci_claim(&dev.pci));
+    STEP("PCI MMIO decode",drv_pci_enable(&dev.pci,false,true));
+    STEP("BAR2 map",drv_pci_map(&dev.pci,2,&dev.mmio));
+    STEP("interrupt mask",write(0xb0,4,0));
+    STEP("interrupt mask",write(0xb8,4,0));
+    STEP("interrupt mask",write(0x10b0,4,0));
+    STEP("interrupt mask",write(0x10b8,4,0));
+    STEP("DMA allocation",allocate_rings());
+    STEP("DMA rings",rings());
+    uint32_t id;
+    STEP("chip identity",read32(0xf0,&id));
+    if(!id || id==UINT32_MAX) { rc=DRV_EIO; goto fail; }
+    unsigned cut=(id>>12)&15;
+    dev.stage="MAC power"; dev.powered=true;
+    rc=rtw8822b_mac_power_on(&dev.io,cut);
+    if(rc==DRV_EALREADY) {
+        STEP("MAC reset",rtw8822b_mac_power_off(&dev.io,cut));
+        STEP("MAC power",rtw8822b_mac_power_on(&dev.io,cut));
+    } else if(rc) goto fail;
+    dev.powered=true;
+    STEP("firmware file",drv_firmware_request("rtw88/rtw8822b_fw.bin",&dev.firmware));
+    STEP("DMA rings after power",rings());
+    dev.master=true; STEP("bus mastering",drv_pci_master(&dev.pci,true));
+    dev.transfer=(RtwFirmwareTransfer){.io=&dev.io,.send_reserved=reserved};
+    STEP("firmware upload/MCU boot",rtw8822b_firmware_download(&dev.transfer,
+        dev.firmware.data,dev.firmware.size));
+    STEP("firmware release",drv_firmware_release(&dev.firmware));
+    STEP("DMA pause",drv_pci_master(&dev.pci,false)); dev.master=false;
+    STEP("DMA rings after firmware",rings());
+    STEP("efuse/PHY tables",rtw8822be_phy_prepare(&dev.phy,&dev.io));
+    /* Chip FIFO split from rtw88's PCIe page table (2048 TX pages,
+     * 52 reserved, four 64-page priority queues, one gap page). */
+    STEP("queue map",write(0x10c,2,(2u<<4)|(2u<<6)|(1u<<8)|(1u<<10)|(0u<<12)|(3u<<14)));
+    STEP("FIFO high",write(0x230,2,64));
+    STEP("FIFO low",write(0x234,2,64));
+    STEP("FIFO normal",write(0x238,2,64));
+    STEP("FIFO extra",write(0x23c,2,64));
+    STEP("FIFO public",write(0x240,2,1739));
+    STEP("FIFO load",bits(0x22c,4,0,1u<<31));
+    STEP("TX free tail",bits(0x422,1,0,16));
+    STEP("reserved boundary",write(0x204,2,1996));
+    STEP("beacon boundary",write(0x424,2,1996));
+    STEP("beacon1 boundary",write(0x456,2,1996));
+    STEP("reserved tail",write(0x206,2,1996));
+    STEP("LLT initialization",bits(0x208,1,0,1));
+    STEP("LLT ready",wait_reg(0x208,1,1,0));
+    STEP("MSR unassociated",write(0x102,1,0));
+    STEP("MAC option",write(0x7d8,4,0xb0810041));
+    STEP("MAC receive option",write(0x7d4,1,0x98));
+    STEP("RX length limit",write(0x60c,1,24));
+    /* Passive 20-MHz monitor receive path. No MAC TX, no probes or association. */
+    STEP("RX FIFO",write(0x11c,4,24576-256-1));
+    STEP("RX boundary",write(0x116,2,24576-128-1));
+    STEP("RX descriptor length",bits(0x115,1,15,15));
+    STEP("RX PHY status",write(0x60f,1,4));
+    STEP("RX management filter",write(0x6a0,2,0xffff));
+    STEP("RX control filter",write(0x6a2,2,0));
+    STEP("RX data filter",write(0x6a4,2,0));
+    STEP("RX RCR",write(0x608,4,(1u<<31)|(1u<<28)|(1u<<13)|0x0f));
+    STEP("interrupt mask",write(0xb0,4,0));
+    STEP("interrupt mask",write(0xb8,4,0));
+    STEP("interrupt mask",write(0x10b8,4,0));
+    dev.master=true; STEP("RX bus mastering",drv_pci_master(&dev.pci,true));
+    STEP("DMA resume",write(0x303,1,0));
+    STEP("MAC RX",bits(0x100,2,0x40,0xba));
+    dev.ready=true;
+    /* Receive-only channels; no active probes or transmit-power assumptions. */
+    static const uint8_t channels[]={1,2,3,4,5,6,7,8,9,10,11,36,40,44,48};
+    WifiScanRadio radio={.ready=radio_ready,.now_ms=now,.set_channel=tune,
+        .receive=receive,.stop=stop};
+    STEP("scanner attach",wifi_scan_attach(&dev.scanner,&radio,channels,sizeof(channels)));
+    dev.stage="experimental passive RX ready"; dev.error=0;
+    serial_write("RTL8822BE: firmware booted; native DMA/PHY passive scanner registered\n");
+#undef STEP
+    return;
+fail:
+    dev.error=rc;
+    serial_write("RTL8822BE: initialization failed at "); serial_write(dev.stage);
+    char n[20]; number(n,(uint32_t)-rc); serial_write(" error="); serial_write(n); serial_write("\n");
+    cleanup();
+}
+bool rtw8822be_present(void) { return dev.present; }
+void rtw8822be_status(char *out,size_t cap) {
+    out[0]=0;
+    append(out,"RTL8822BE: ",cap); append(out,dev.stage ? dev.stage : "not initialized",cap);
+    if(dev.error) {
+        char n[20]; append(out," error=",cap); number(n,(uint32_t)-dev.error); append(out,n,cap);
+    }
+    char n[20]; append(out,"\nRX frames=",cap); number(n,dev.received); append(out,n,cap);
+    append(out," dropped=",cap); number(n,dev.dropped); append(out,n,cap);
+    if(dev.scanner.error) {
+        append(out," scan error=",cap); number(n,(uint32_t)-dev.scanner.error); append(out,n,cap);
+    }
+    append(out,"\nPassive scan only; association is not implemented.\n",cap);
+}

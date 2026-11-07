@@ -181,6 +181,8 @@ typedef enum {
     ICON_COUNT
 } Icon;
 void gfx_clip(int, int, int, int);
+void gfx_get_clip(int out[4]);
+void gfx_rgba_image(int, int, int, int, const unsigned char *, int, int);
 void gfx_occlusion_clear(void);
 void gfx_occlusion_add(int, int, int, int);
 void gfx_unclip(void);

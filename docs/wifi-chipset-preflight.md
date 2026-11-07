@@ -1,6 +1,8 @@
 # LunaOS — chipset Wi-Fi porting preflight
 
-**STATUS: NOT OPERATIONAL.** This milestone does not implement any Wi-Fi
+**Historical preflight milestone. Current experimental RTL8822BE passive scan is
+documented in [the native port](rtw8822be-native-port.md). Association remains
+unimplemented.** This milestone does not implement any Wi-Fi
 radio driver, firmware boot, AP scan, authentication, association, WPA or IP
 traffic. Linux source files in `assets/driver-sources/` remain uncompiled
 reference material.
@@ -42,7 +44,9 @@ USB MT7612U and combo Bluetooth functions are separate transport stacks.
 4. Validate each physical chipset/revision for FW upload, actual network
    connectivity, interrupts, RF calibration, power and regulatory constraints.
 
-Firmware is **not distributed**. The native firmware loader permits at most
+RTL8822BE firmware `rtw88/rtw8822b_fw.bin` is distributed with its Realtek
+license and pinned provenance in `assets/firmware/provenance.json`. Other
+chipset firmware is not included. The native firmware loader permits at most
 16 entries, 512 KiB per blob, 2 MiB archive total; some images may exceed
 those limits. A readable blob does not establish correct revision/API.
 
@@ -59,6 +63,9 @@ full output, not just the process exit status.
 
 `kernel/wifi.h` defines a native driver interface with scan, network results,
 connect, state and poll. The setup screen consumes it and only shows SSIDs
-actually returned by a registered radio driver. **There is currently no driver
-registered**, so the setup cannot connect and will display that Wi-Fi is
-unavailable. Host tests inject a mock driver to check the API contract only.
+actually returned by a registered radio driver. The experimental RTL8822BE backend registers after firmware/PHY initialization
+and exposes passive scan results to setup. If initialization fails, it remains
+unregistered and reports the failed stage. It cannot authenticate or connect. Host tests inject a mock driver to check the API contract only.
+
+See [the native RTL8822BE port](rtw8822be-native-port.md) for the adapted
+upstream MAC power sequences, firmware/RX parsers, and remaining blockers.

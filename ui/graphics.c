@@ -136,6 +136,12 @@ void gfx_clip(int x, int y, int w, int h) {
     clip_w = w;
     clip_h = h;
 }
+void gfx_get_clip(int out[4]) {
+    out[0] = clip_x - origin_x;
+    out[1] = clip_y - origin_y;
+    out[2] = clip_w;
+    out[3] = clip_h;
+}
 void gfx_unclip(void) {
     clip_x = clip_y = 0;
     clip_w = target_w;
@@ -580,6 +586,17 @@ void line(int x0, int y0, int x1, int y1, uint32_t c) {
             y0 += sy;
         }
     }
+}
+/* RGBA PNG pixels, scaled into the current clipped window surface. */
+void gfx_rgba_image(int x, int y, int w, int h, const unsigned char *rgba, int sw, int sh) {
+    if (!rgba || w <= 0 || h <= 0 || sw <= 0 || sh <= 0) return;
+    int bx, by, bw, bh;
+    shape_box(x, y, w, h, &bx, &by, &bw, &bh);
+    for (int j = by; j < by + bh; j++)
+        for (int i = bx; i < bx + bw; i++) {
+            const unsigned char *p = rgba + (((j * sh / h) * sw + i * sw / w) * 4);
+            pixel(x + i, y + j, ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2], p[3]);
+        }
 }
 void circle(int x, int y, int r, uint32_t c) {
     round_rect(x - r, y - r, 2 * r, 2 * r, r, c, 255);

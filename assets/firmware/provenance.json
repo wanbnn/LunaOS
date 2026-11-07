@@ -1,0 +1,18 @@
+{
+  "repository": "https://kernel.googlesource.com/pub/scm/linux/kernel/git/firmware/linux-firmware/",
+  "commit": "6d6bffb1d85a1fe077f26853edce482f6c112f2b",
+  "files": [
+    {
+      "upstream_path": "rtw88/rtw8822b_fw.bin",
+      "path": "assets/firmware/rtw88/rtw8822b_fw.bin",
+      "bytes": 161240,
+      "sha256": "a72da690597bfa99d8eb6fc2ab090d18d8ad92ac2befd35db1c9e3662d8d8418"
+    },
+    {
+      "upstream_path": "LICENSES/LICENCE.rtlwifi_firmware.txt",
+      "path": "assets/licenses/Realtek-Firmware.txt",
+      "bytes": 2115,
+      "sha256": "a61351665b4f264f6c631364f85b907d8f8f41f8b369533ef4021765f9f3b62e"
+    }
+  ]
+}

@@ -4,6 +4,9 @@ from pathlib import Path
 
 pairs = {"font_license": "assets/fonts/OFL.txt", "icon_license": "assets/icons/lucide/LICENSE"}
 extra = {
+    "stb.txt": "third_party/stb/LICENSE",
+    "Realtek-rtw88-BSD.txt": "assets/licenses/Realtek-rtw88-BSD.txt",
+    "Realtek-Firmware.txt": "assets/licenses/Realtek-Firmware.txt",
     "QuickJS.txt": "third_party/quickjs/LICENSE",
     "BearSSL.txt": "third_party/bearssl/LICENSE.txt",
     "Musl.txt": "third_party/musl/COPYRIGHT",

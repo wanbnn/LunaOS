@@ -1,6 +1,10 @@
-Firmware binaries are not shipped yet. Approved .bin, .ucode and .fw files placed
-here are packed byte-for-byte into the disk firmware region by tools/firmwarepack.py.
-Preserve the original redistribution license alongside each added firmware.
-Relative names are preserved, e.g. rtlwifi/rtl8723befw_36.bin.
-Limits: 16 entries, 512 KiB per file, 2 MiB total archive. This is independent of
-LunaFS's text-file size limit. FNV detects corruption; it is not authentication.
+RTL8822BE firmware is shipped as rtw88/rtw8822b_fw.bin, unmodified from
+linux-firmware. See provenance.json for the pinned source and SHA-256, and
+../licenses/Realtek-Firmware.txt for redistribution terms. The license is also
+installed at /etc/licenses/Realtek-Firmware.txt in LunaOS.
+
+A packaged firmware is NOT a working radio driver: upload, initialization, scan,
+association and WPA2 are not implemented.
+
+.bin, .ucode and .fw files are packed byte-for-byte by tools/firmwarepack.py.
+Limits: 16 entries, 512 KiB per file, 2 MiB total.

@@ -7,6 +7,11 @@
 #include "../ui/webengine.h"
 
 int failures;
+void gfx_rgba_image(int x, int y, int w, int h, const unsigned char *rgba, int sw, int sh) {
+    (void)x; (void)y; (void)w; (void)h; (void)rgba; (void)sw; (void)sh;
+}
+void gfx_get_clip(int out[4]) { out[0] = out[1] = 0; out[2] = 1024; out[3] = 768; }
+void gfx_clip(int x, int y, int w, int h) { (void)x; (void)y; (void)w; (void)h; }
 
 static void check(bool condition, const char *what) {
     if (!condition) {
@@ -70,6 +75,62 @@ static const char *document_html =
     "<script>var x = 1;</script>"
     "</body></html>";
 
+static void layout_regressions(void) {
+    const char *html =
+        "<html><head></head><body>"
+        "<div id='row'><div id='one' class='col'>One</div>\n"
+        "<div id='two' class='col'>Two</div><div id='three' class='col'>Three</div></div>"
+        "<p id='after'>After</p><div id='reader'>Hidden label</div>"
+        "<pre id='code'>&gt;&gt;&gt; x\n    y</pre>"
+        "<div id='cascade' class='notice' style='color: red'>Cascade</div>"
+        "</body></html>";
+    const char *sheet =
+        "* {box-sizing: border-box;} body {margin:0;}"
+        "#row {overflow:hidden;} .col {float:left; width:33.333333%; padding:8px; border:1px solid #123456;}"
+        "#after {clear:both;} #reader {position:absolute; width:1px; height:1px; clip:rect(0 0 0 0);}"
+        "#absent, .notice {color:blue;} div.notice {color:green !important;}"
+        "#cascade {/* a comment inside a declaration block */ background-color:black;}"
+        "* html #row {height:1%;}";
+    WebNode *root = 0;
+    WebRule *rules = 0;
+    int count = 0;
+    char error[128] = {0};
+    check(web_parse(html, strlen(html), &root, error, sizeof(error)), "column fixture parses");
+    css_parse_sheet(sheet, &rules, &count);
+    css_apply(root, rules, count);
+    web_layout(root, 600, 400);
+    WebNode *one = web_find_by_id(root, "one"), *two = web_find_by_id(root, "two");
+    WebNode *three = web_find_by_id(root, "three"), *row = web_find_by_id(root, "row");
+    check(one->y == two->y && two->y == three->y && one->x < two->x && two->x < three->x,
+          "fractional percentage floats share one horizontal row");
+    check(one->w == 199 && one->content_w == 181, "border-box accounts for padding and borders");
+    check(row->h >= one->h && row->h > 6, "float container encloses columns and ignores the IE star-html hack");
+    check(web_find_by_id(root, "after")->y >= one->y + one->h, "clear places the next block below floats");
+    WebNode *reader = web_find_by_id(root, "reader");
+    check(reader->style.position == 2 && reader->style.clip_empty, "screen-reader label is positioned and clipped");
+    WebNode *code = web_find_by_id(root, "code");
+    char value[80];
+    web_node_text(code, value, sizeof(value));
+    check(!strcmp(value, ">>> x\n    y") && code->h >= 40, "pre preserves lines and indentation and decodes entities");
+    WebNode *cascade = web_find_by_id(root, "cascade");
+    check(cascade->style.color == 0x008000, "author important overrides normal inline color");
+    check(cascade->style.background_set && cascade->style.background == 0,
+          "comments in declarations are skipped and black is an opaque background");
+    check(css_match_selector(".col:first-child", one), "first-child ignores whitespace text siblings");
+    check(css_match_selector("div:not(.notice)", one) && !css_match_selector("div:not(.notice)", cascade),
+          "functional not selectors exclude the matching class");
+    css_free_sheet(rules, count);
+    css_parse_sheet("#absent, .notice {color:blue;} div.notice {color:green;}", &rules, &count);
+    css_apply(root, rules, count);
+    /* Remove inline red before checking selector-list specificity. */
+    web_set_attr(cascade, "style", "");
+    css_apply(root, rules, count);
+    check(cascade->style.color == 0x008000, "selector lists use the specificity of the selector that matched");
+    css_free_sheet(rules, count);
+    web_free_fragments();
+    web_free_tree(root);
+}
+
 int main(void) {
     WebNode *root = 0;
     char error[128];
@@ -128,18 +189,49 @@ int main(void) {
     check(list != 0 && list->style.padding[3] == 40, "list keeps its left padding");
 
     /* Selector matching used by querySelector. */
-    WebNode *by_class = 0;
-    for (WebNode *c = root->first_child; c; c = c->next)
-        if (c->type == WEB_ELEMENT)
-            by_class = c;
     check(css_match_selector("h1#title", title), "compound selector matches");
     check(!css_match_selector("h2#title", title), "wrong type does not match");
     check(css_match_selector("body h1", title), "descendant selector matches");
     check(css_match_selector("div p", nested), "descendant with two levels matches");
     check(css_match_selector("h1 > span", title) == false, "child selector does not match");
 
+    check(css_length("1.5em", 20, 0, 0) == 30, "fractional em uses the font size");
+    check(css_length(".75rem", 32, 0, 0) == 12, "rem uses the root font baseline");
+    check(css_length("-2.5px", 16, 0, 0) == -2, "negative fractional pixels parse");
+    check(css_length("12bogus", 16, 0, 0) == 0, "unsupported units are rejected");
+    css_free_sheet(rules, count);
+    rules = 0;
+    count = 0;
+    const char *responsive =
+        "h1 {color: red; width: auto; margin: 0 7px 0 19px; padding: .5em;}"
+        "@media print {h1 {color: black;}}"
+        "@media screen and (min-width: 600px) {h1 {color: blue;}}"
+        "@media screen and (max-width: 599px) {h1 {color: green;}}"
+        "p {color: purple;}";
+    css_set_viewport(800);
+    check(!css_media_matches("print"), "print media is excluded");
+    check(css_media_matches("only screen and (min-width: 40em)"), "relative media widths parse");
+    css_parse_sheet(responsive, &rules, &count);
+    css_apply(root, rules, count);
+    web_layout(root, 800, 600);
+    check(title->style.color == 0x0000ff, "desktop screen media applies without print styles");
+    check(title->style.width == -1 && title->w > 0, "auto width does not collapse to zero");
+    check(title->x == body->content_x + 19, "asymmetric left margin uses the left side");
+    check(title->style.padding[0] == title->style.font_size / 2, "padding supports fractional em");
+    check(note->style.color == 0x800080, "rules after media blocks are preserved");
+    css_free_sheet(rules, count);
+    css_set_viewport(400);
+    css_parse_sheet(responsive, &rules, &count);
+    css_apply(root, rules, count);
+    web_layout(root, 400, 300);
+    check(title->style.color == 0x008000, "narrow viewport selects the mobile media rule");
+    for (int i = 0; i < 10; i++)
+        web_layout(root, 400, 300);
+    web_free_fragments();
+
     css_free_sheet(rules, count);
     web_free_tree(root);
+    layout_regressions();
     printf(failures ? "\n%d check(s) failed\n" : "\nall checks passed\n", failures);
     return failures ? 1 : 0;
 }

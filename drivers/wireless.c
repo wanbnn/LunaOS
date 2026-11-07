@@ -1,5 +1,6 @@
 #include "luna.h"
 #include "wifi_port.h"
+#include "rtw8822be_pcie.h"
 /* Other devices remain discovery-only. */
 typedef struct { uint16_t vendor, device; const char *name; } WirelessTarget;
 static const WirelessTarget other_targets[] = {
@@ -22,8 +23,14 @@ void wireless_status(char *out, size_t cap) {
         scanned = true;
         report[0] = 0;
         unsigned devices = 0;
+        if (rtw8822be_present()) {
+            rtw8822be_status(report, sizeof(report));
+            devices++;
+        }
         for (unsigned i = 0; i < wifi_port_target_count(); i++) {
             const WifiPortTarget *t = wifi_port_target(i);
+            if (t->vendor == 0x10ec && t->device == 0xb822 && rtw8822be_present())
+                continue; /* Native owner: never BAR-size an active DMA device. */
             for (unsigned instance = 0; instance < 2; instance++) {
                 WifiPortProbe p;
                 int rc = wifi_port_preflight(t, instance, &p);

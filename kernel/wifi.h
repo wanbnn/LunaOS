@@ -22,6 +22,7 @@ typedef struct {
     int error;
     /* A driver must report true only with initialized real RF hardware. */
     bool radio_ready;
+    bool can_connect; /* False for a receive-only/passive scan backend. */
 } WifiState;
 typedef struct {
     int (*scan_start)(void *ctx);

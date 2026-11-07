@@ -120,7 +120,7 @@ int css_color(const char *value, uint32_t *out) {
 
 /* Parses a CSS length. Percentages are reported through is_percent. */
 int css_length(const char *value, int font_size, int percent_out, bool *is_percent) {
-    (void)percent_out;
+
     if (is_percent)
         *is_percent = false;
     while (*value == ' ')
@@ -132,7 +132,7 @@ int css_length(const char *value, int font_size, int percent_out, bool *is_perce
         negative = true;
         value++;
     }
-    int number = 0;
+    int number = 0, fraction = 0, scale = 1;
     bool digits = false;
     while (*value >= '0' && *value <= '9') {
         number = number * 10 + (*value++ - '0');
@@ -140,24 +140,38 @@ int css_length(const char *value, int font_size, int percent_out, bool *is_perce
         if (number > 100000)
             return 0;
     }
+    if (*value == '.') {
+        value++;
+        while (*value >= '0' && *value <= '9') {
+            digits = true;
+            if (scale < 1000) {
+                fraction = fraction * 10 + (*value - '0');
+                scale *= 10;
+            }
+            value++;
+        }
+    }
     if (!digits)
         return 0;
     const char *unit = value;
     while (*unit && *unit != ' ' && *unit != ';' && *unit != ')')
         unit++;
     size_t unit_len = (size_t)(unit - value);
+    int factor = 1, divisor = 1;
     if (unit_len == 1 && value[0] == '%') {
         if (is_percent)
             *is_percent = true;
-        return negative ? -number : number;
-    }
-    int result = number;
-    if (unit_len == 1 && (value[0] == 'e' || value[0] == 'E'))
-        result = number * font_size;
+        if (percent_out > 0) factor = percent_out;
+    } else if (unit_len == 2 && !strncmp(value, "em", 2))
+        factor = font_size;
     else if (unit_len == 3 && !strncmp(value, "rem", 3))
-        result = number * font_size;
-    else if (unit_len == 2 && value[0] == 'p' && value[1] == 't')
-        result = number * 4 / 3;
+        factor = 16;
+    else if (unit_len == 2 && !strncmp(value, "pt", 2)) {
+        factor = 4;
+        divisor = 3;
+    } else if (unit_len && !(unit_len == 2 && !strncmp(value, "px", 2)))
+        return 0;
+    int result = (int)(((long long)number * scale + fraction) * factor / (scale * divisor));
     return negative ? -result : result;
 }
 static void trim(char *s) {
@@ -297,6 +311,15 @@ static bool complex_parse(const char *text, WebComplex *sel) {
                 const char *start = p;
                 while (*p && ident_char(*p))
                     p++;
+                if (*p == '(') {
+                    int depth = 1;
+                    p++;
+                    while (*p && depth) {
+                        if (*p == '(') depth++;
+                        else if (*p == ')') depth--;
+                        p++;
+                    }
+                }
                 web_free(c->pseudo);
                 c->pseudo = copy_lower(start, (size_t)(p - start));
                 continue;
@@ -344,7 +367,7 @@ static bool complex_parse(const char *text, WebComplex *sel) {
     return true;
 }
 static bool compound_matches(const WebCompound *c, WebNode *el) {
-    if (!el || el->type != WEB_ELEMENT)
+    if (!el || el->type != WEB_ELEMENT || !el->tag || !strcmp(el->tag, "#document"))
         return false;
     if (c->tag && strcmp(c->tag, el->tag))
         return false;
@@ -381,15 +404,22 @@ static bool compound_matches(const WebCompound *c, WebNode *el) {
     }
     if (c->pseudo) {
         const char *p = c->pseudo;
-        if (!strcmp(p, "first-child")) {
-            if (el->prev)
-                return false;
+        if (!strncmp(p, "not(", 4)) {
+            size_t n = strlen(p);
+            if (n < 6 || p[n - 1] != ')') return false;
+            char *inner = web_strndup(p + 4, n - 5);
+            bool matches = css_match_selector(inner, el);
+            web_free(inner);
+            if (matches) return false;
+        } else if (!strcmp(p, "first-child")) {
+            for (WebNode *n = el->prev; n; n = n->prev)
+                if (n->type == WEB_ELEMENT) return false;
         } else if (!strcmp(p, "last-child")) {
-            if (el->next)
-                return false;
+            for (WebNode *n = el->next; n; n = n->next)
+                if (n->type == WEB_ELEMENT) return false;
         } else if (!strcmp(p, "only-child")) {
-            if (el->prev || el->next)
-                return false;
+            for (WebNode *n = el->parent ? el->parent->first_child : 0; n; n = n->next)
+                if (n != el && n->type == WEB_ELEMENT) return false;
         } else if (!strcmp(p, "first-of-type")) {
             for (WebNode *s = el->prev; s; s = s->prev)
                 if (s->type == WEB_ELEMENT && !strcmp(s->tag, el->tag))
@@ -552,6 +582,85 @@ static WebDecl *parse_declarations(const char *text) {
 
 /* ---------- stylesheet ---------- */
 
+static int css_viewport_width = 800;
+void css_set_viewport(int width) {
+    css_viewport_width = width > 0 ? width : 800;
+}
+
+/* Evaluate the screen/width queries supported by the native layout engine.
+ * Unknown features do not match; in particular print styles must stay out. */
+bool css_media_matches(const char *query) {
+    if (!query || !*query)
+        return true;
+    char *copy = web_strdup(query);
+    bool any = false;
+    char *part = copy;
+    while (part && !any) {
+        char *comma = strchr(part, ',');
+        if (comma)
+            *comma = 0;
+        trim(part);
+        char *p = part;
+        bool negate = false, match = true;
+        if (!strncmp(p, "not ", 4)) {
+            negate = true;
+            p += 4;
+        } else if (!strncmp(p, "only ", 5))
+            p += 5;
+        if (*p != '(') {
+            char *end = p;
+            while (*end && *end != ' ' && *end != '(')
+                end++;
+            size_t n = (size_t)(end - p);
+            match = (n == 6 && !strncmp(p, "screen", n)) ||
+                    (n == 3 && !strncmp(p, "all", n));
+            p = end;
+        }
+        while (*p) {
+            while (*p == ' ' || *p == '\t' || *p == '\n')
+                p++;
+            if (!strncmp(p, "and", 3)) {
+                p += 3;
+                continue;
+            }
+            if (!*p)
+                break;
+            if (*p++ != '(') {
+                match = false;
+                break;
+            }
+            char *end = strchr(p, ')');
+            if (!end) {
+                match = false;
+                break;
+            }
+            *end = 0;
+            trim(p);
+            char *colon = strchr(p, ':');
+            if (!colon)
+                match = false;
+            else {
+                *colon = 0;
+                trim(p);
+                int width = css_length(colon + 1, 16, 0, 0);
+                if (!strcmp(p, "min-width"))
+                    match = match && css_viewport_width >= width;
+                else if (!strcmp(p, "max-width"))
+                    match = match && css_viewport_width <= width;
+                else if (!strcmp(p, "width"))
+                    match = match && css_viewport_width == width;
+                else
+                    match = false;
+            }
+            p = end + 1;
+        }
+        any = negate ? !match : match;
+        part = comma ? comma + 1 : 0;
+    }
+    web_free(copy);
+    return any;
+}
+
 static bool parse_stylesheet(const char *text, WebRule **rules, int *count, int *order) {
     const char *p = text;
     while (*p) {
@@ -573,8 +682,10 @@ static bool parse_stylesheet(const char *text, WebRule **rules, int *count, int 
             while (*p && *p != ' ' && *p != '\t' && *p != '{' && *p != ';')
                 p++;
             char *name = web_strndup(name_start, (size_t)(p - name_start));
-            while (*p == ' ' || *p == '\t')
+            const char *query_start = p;
+            while (*p && *p != '{' && *p != ';')
                 p++;
+            char *query = web_strndup(query_start, (size_t)(p - query_start));
             if (*p == '{') {
                 const char *block_start = p + 1;
                 int depth = 1;
@@ -587,9 +698,7 @@ static bool parse_stylesheet(const char *text, WebRule **rules, int *count, int 
                     q++;
                 }
                 const char *block_end = q > block_start ? q - 1 : block_start;
-                /* Media and support queries are applied unconditionally: the
-                 * engine has no media evaluation yet. */
-                if (!web_strcasecmp(name, "media") || !web_strcasecmp(name, "supports")) {
+                if (!web_strcasecmp(name, "media") && css_media_matches(query)) {
                     char *inner = web_strndup(block_start, (size_t)(block_end - block_start));
                     parse_stylesheet(inner, rules, count, order);
                     web_free(inner);
@@ -598,6 +707,7 @@ static bool parse_stylesheet(const char *text, WebRule **rules, int *count, int 
             } else if (*p == ';') {
                 p++;
             }
+            web_free(query);
             web_free(name);
             continue;
         }
@@ -655,6 +765,7 @@ static bool parse_stylesheet(const char *text, WebRule **rules, int *count, int 
                 if (*count)
                     memcpy(grown, *rules, sizeof(WebRule) * (size_t)*count);
                 grown[*count] = *rule;
+                web_free(rule);
                 web_free(*rules);
                 *rules = grown;
                 (*count)++;
@@ -675,7 +786,30 @@ bool css_parse_sheet(const char *text, WebRule **rules, int *count) {
     int order = 0;
     if (!text)
         return true;
-    return parse_stylesheet(text, rules, count, &order);
+    char *clean = web_strdup(text);
+    char quote = 0;
+    for (char *p = clean; *p; p++) {
+        if (quote) {
+            if (*p == '\\' && p[1])
+                p++;
+            else if (*p == quote)
+                quote = 0;
+        } else if (*p == '\'' || *p == '"')
+            quote = *p;
+        else if (p[0] == '/' && p[1] == '*') {
+            *p++ = ' ';
+            *p = ' ';
+            while (p[1] && !(p[1] == '*' && p[2] == '/'))
+                *++p = ' ';
+            if (p[1]) {
+                *++p = ' ';
+                *++p = ' ';
+            }
+        }
+    }
+    bool ok = parse_stylesheet(clean, rules, count, &order);
+    web_free(clean);
+    return ok;
 }
 void css_free_sheet(WebRule *rules, int count) {
     for (int i = 0; i < count; i++) {
@@ -704,7 +838,7 @@ static bool in_list(const char *const *list, const char *tag) {
     return false;
 }
 /* Parses one to four box values such as "8px 0 auto". */
-static int box_values(const char *value, int out[4]) {
+static int box_values(const char *value, int out[4], int font_size) {
     char buf[256];
     size_t n = strlen(value);
     if (n >= sizeof(buf))
@@ -728,17 +862,7 @@ static int box_values(const char *value, int out[4]) {
         else if (strchr(start, '%'))
             out[count++] = 0;
         else {
-            int parsed = 0;
-            bool negative = false;
-            if (*start == '-') {
-                negative = true;
-                start++;
-            }
-            while (*start >= '0' && *start <= '9')
-                parsed = parsed * 10 + (*start++ - '0');
-            if (*start == 'p' && start[1] == 't')
-                parsed = parsed * 4 / 3;
-            out[count++] = negative ? -parsed : parsed;
+            out[count++] = css_length(start, font_size, 0, 0);
         }
         *token = saved;
     }
@@ -778,6 +902,10 @@ static void ua_defaults(WebNode *el, WebStyle *s) {
     s->width_pct = -1;
     s->height_pct = -1;
     s->list_marker = WEB_MARKER_NONE;
+    s->max_width = s->max_height = -1;
+    s->min_width_pct = s->max_width_pct = -1;
+    for (int i = 0; i < 4; i++)
+        s->inset[i] = WEB_AUTO;
     const char *tag = el->tag;
     if (!tag)
         return;
@@ -790,7 +918,7 @@ static void ua_defaults(WebNode *el, WebStyle *s) {
         s->display = WEB_DISPLAY_NONE;
         return;
     }
-    if (!strcmp(tag, "html") || !strcmp(tag, "body")) {
+    if (!strcmp(tag, "body")) {
         s->margin[0] = s->margin[1] = s->margin[2] = s->margin[3] = 8;
     } else if (!strcmp(tag, "p")) {
         s->margin[0] = s->margin[2] = 16;
@@ -839,6 +967,7 @@ static void ua_defaults(WebNode *el, WebStyle *s) {
     } else if (!strcmp(tag, "code") || !strcmp(tag, "kbd") || !strcmp(tag, "samp")) {
         s->color = 0x9c2b2b;
     } else if (!strcmp(tag, "pre")) {
+        s->white_space = 1;
         s->margin[0] = s->margin[2] = 13;
     } else if (!strcmp(tag, "img") || !strcmp(tag, "input") || !strcmp(tag, "button") ||
                !strcmp(tag, "select") || !strcmp(tag, "textarea")) {
@@ -859,6 +988,8 @@ static void inherit_style(const WebStyle *parent, WebStyle *s) {
     s->line_height = parent->line_height;
     s->text_align = parent->text_align;
     s->list_marker = parent->list_marker;
+    s->white_space = parent->white_space;
+    s->hidden = parent->hidden;
 }
 static void apply_declaration(WebStyle *s, const char *name, const char *value) {
     if (!strcmp(name, "color")) {
@@ -867,14 +998,40 @@ static void apply_declaration(WebStyle *s, const char *name, const char *value) 
             s->color = color;
     } else if (!strcmp(name, "background-color")) {
         uint32_t color;
-        if (css_color(value, &color))
+        if (css_color(value, &color)) {
             s->background = color;
+            s->background_set = true;
+        }
     } else if (!strcmp(name, "background")) {
         uint32_t color;
-        if (css_color(value, &color))
+        if (css_color(value, &color)) {
             s->background = color;
-        else if (!web_strcasecmp(value, "transparent"))
+            s->background_set = true;
+        }
+        else if (!web_strcasecmp(value, "transparent")) {
             s->background = 0;
+            s->background_set = false;
+        }
+    } else if (!strcmp(name, "font")) {
+        char *copy = web_strdup(value), *p = copy;
+        while (*p) {
+            while (*p == ' ') p++;
+            if (!*p) break;
+            char *token = p;
+            while (*p && *p != ' ') p++;
+            if (*p) *p++ = 0;
+            if ((*token >= '0' && *token <= '9') || *token == '.') {
+                char *slash = strchr(token, '/');
+                if (slash) *slash = 0;
+                bool percent = false;
+                int size = css_length(token, s->font_size, 0, &percent);
+                if (percent) size = s->font_size * size / 100;
+                if (size > 0) s->font_size = size;
+                if (slash) apply_declaration(s, "line-height", slash + 1);
+                break;
+            }
+        }
+        web_free(copy);
     } else if (!strcmp(name, "font-size")) {
         bool percent = false;
         int parsed = css_length(value, s->font_size, 0, &percent);
@@ -893,9 +1050,22 @@ static void apply_declaration(WebStyle *s, const char *name, const char *value) 
                 s->font_weight = parsed;
         }
     } else if (!strcmp(name, "line-height")) {
-        int parsed = atoi(value);
-        if (parsed)
-            s->line_height = parsed;
+        if (!strcmp(value, "normal")) s->line_height = 0;
+        else {
+            bool percent = false;
+            int parsed = css_length(value, s->font_size, 0, &percent);
+            bool unitless = true;
+            for (const char *p = value; *p; p++)
+                if ((*p < '0' || *p > '9') && *p != '.' && *p != ' ') unitless = false;
+            if (unitless) {
+                char relative[64] = {0};
+                append(relative, value, sizeof(relative));
+                append(relative, "em", sizeof(relative));
+                parsed = css_length(relative, s->font_size, 0, 0);
+            }
+            if (percent) parsed = s->font_size * parsed / 100;
+            if (parsed > 0) s->line_height = parsed;
+        }
     } else if (!strcmp(name, "display")) {
         if (!web_strcasecmp(value, "none"))
             s->display = WEB_DISPLAY_NONE;
@@ -914,59 +1084,62 @@ static void apply_declaration(WebStyle *s, const char *name, const char *value) 
             s->text_align = WEB_ALIGN_LEFT;
     } else if (!strcmp(name, "margin")) {
         int parts[4] = {0, 0, 0, 0};
-        int count = box_values(value, parts);
+        int count = box_values(value, parts, s->font_size);
         expand_box(parts, count, s->margin);
     } else if (!strcmp(name, "padding")) {
         int parts[4] = {0, 0, 0, 0};
-        int count = box_values(value, parts);
+        int count = box_values(value, parts, s->font_size);
         expand_box(parts, count, s->padding);
-    } else if (!strcmp(name, "border")) {
-        char buf[128];
-        size_t n = strlen(value);
-        if (n >= sizeof(buf))
-            n = sizeof(buf) - 1;
-        memcpy(buf, value, n);
-        buf[n] = 0;
-        char *token = buf;
-        int width = 1;
-        uint32_t color = s->border_color[0];
-        bool found_color = false;
-        while (*token) {
-            while (*token == ' ')
-                token++;
-            if (!*token)
-                break;
-            char *start = token;
-            while (*token && *token != ' ')
-                token++;
-            char saved = *token;
-            *token = 0;
-            if (saved)
-                token++;
-            if (saved && *start >= '0' && *start <= '9') {
-                width = atoi(start);
-            } else if (!web_strcasecmp(start, "none") || !web_strcasecmp(start, "hidden")) {
-                width = 0;
-            } else if (css_color(start, &color)) {
-                found_color = true;
+    } else if (!strncmp(name, "border", 6)) {
+        int first = 0, last = 3;
+        const char *part = name + 6;
+        if (!strncmp(part, "-top", 4)) { first = last = 0; part += 4; }
+        else if (!strncmp(part, "-right", 6)) { first = last = 1; part += 6; }
+        else if (!strncmp(part, "-bottom", 7)) { first = last = 2; part += 7; }
+        else if (!strncmp(part, "-left", 5)) { first = last = 3; part += 5; }
+        if (!*part) {
+            int width = 3;
+            bool shown = false;
+            uint32_t color = s->color;
+            char *copy = web_strdup(value), *p = copy;
+            while (*p) {
+                while (*p == ' ') p++;
+                if (!*p) break;
+                char *start = p;
+                while (*p && *p != ' ') p++;
+                if (*p) *p++ = 0;
+                if ((*start >= '0' && *start <= '9') || *start == '.')
+                    width = css_length(start, s->font_size, 0, 0);
+                else if (!strcmp(start, "solid") || !strcmp(start, "dashed") ||
+                         !strcmp(start, "dotted") || !strcmp(start, "double"))
+                    shown = true;
+                else if (!strcmp(start, "none") || !strcmp(start, "hidden"))
+                    shown = false;
+                else
+                    css_color(start, &color);
             }
-            *start = saved;
-        }
-        (void)found_color;
-        for (int i = 0; i < 4; i++) {
-            s->border[i] = width;
-            s->border_color[i] = color;
-            s->border_shown[i] = width > 0;
-        }
-    } else if (!strcmp(name, "border-width")) {
-        int parsed = atoi(value);
-        for (int i = 0; i < 4; i++)
-            s->border[i] = parsed;
-    } else if (!strcmp(name, "border-color")) {
-        uint32_t color;
-        if (css_color(value, &color))
-            for (int i = 0; i < 4; i++)
+            for (int i = first; i <= last; i++) {
+                s->border[i] = shown ? width : 0;
+                s->border_shown[i] = shown && width > 0;
                 s->border_color[i] = color;
+            }
+            web_free(copy);
+        } else if (!strcmp(part, "-color")) {
+            uint32_t color;
+            if (css_color(value, &color))
+                for (int i = first; i <= last; i++) s->border_color[i] = color;
+        } else if (!strcmp(part, "-width")) {
+            int parts[4] = {0}, expanded[4];
+            int count = box_values(value, parts, s->font_size);
+            expand_box(parts, count, expanded);
+            for (int i = first; i <= last; i++) s->border[i] = expanded[first == last ? 0 : i];
+        } else if (!strcmp(part, "-style")) {
+            bool shown = strcmp(value, "none") && strcmp(value, "hidden");
+            for (int i = first; i <= last; i++) {
+                s->border_shown[i] = shown;
+                if (!shown) s->border[i] = 0;
+            }
+        }
     } else if (!strcmp(name, "text-decoration") || !strcmp(name, "text-decoration-line")) {
         s->underline = false;
         for (const char *p = value; *p; p++)
@@ -975,8 +1148,12 @@ static void apply_declaration(WebStyle *s, const char *name, const char *value) 
                 break;
             }
     } else if (!strcmp(name, "width")) {
+        if (!web_strcasecmp(value, "auto")) {
+            s->width = s->width_pct = -1;
+            return;
+        }
         bool percent = false;
-        int parsed = css_length(value, s->font_size, 0, &percent);
+        int parsed = css_length(value, s->font_size, 1000, &percent);
         if (percent) {
             s->width_pct = parsed;
             s->width = -1;
@@ -985,8 +1162,12 @@ static void apply_declaration(WebStyle *s, const char *name, const char *value) 
             s->width_pct = -1;
         }
     } else if (!strcmp(name, "height")) {
+        if (!web_strcasecmp(value, "auto")) {
+            s->height = s->height_pct = -1;
+            return;
+        }
         bool percent = false;
-        int parsed = css_length(value, s->font_size, 0, &percent);
+        int parsed = css_length(value, s->font_size, 1000, &percent);
         if (percent) {
             s->height_pct = parsed;
             s->height = -1;
@@ -994,6 +1175,56 @@ static void apply_declaration(WebStyle *s, const char *name, const char *value) 
             s->height = parsed;
             s->height_pct = -1;
         }
+    } else if (!strncmp(name, "margin-", 7) || !strncmp(name, "padding-", 8)) {
+        bool margin = !strncmp(name, "margin-", 7);
+        const char *side = name + (margin ? 7 : 8);
+        int index = !strcmp(side, "top") ? 0 : !strcmp(side, "right") ? 1 :
+                    !strcmp(side, "bottom") ? 2 : !strcmp(side, "left") ? 3 : -1;
+        if (index >= 0) {
+            int v = margin && !strcmp(value, "auto") ? WEB_AUTO :
+                    css_length(value, s->font_size, 0, 0);
+            if (!margin && v < 0) v = 0;
+            (margin ? s->margin : s->padding)[index] = v;
+        }
+    } else if (!strcmp(name, "float")) {
+        s->floating = !strcmp(value, "left") ? 1 : !strcmp(value, "right") ? 2 : 0;
+    } else if (!strcmp(name, "clear")) {
+        s->clear = !strcmp(value, "left") ? 1 : !strcmp(value, "right") ? 2 :
+                   !strcmp(value, "both") ? 3 : 0;
+    } else if (!strcmp(name, "position")) {
+        s->position = !strcmp(value, "relative") ? 1 : !strcmp(value, "absolute") ? 2 :
+                      !strcmp(value, "fixed") ? 3 : 0;
+    } else if (!strcmp(name, "top") || !strcmp(name, "right") ||
+               !strcmp(name, "bottom") || !strcmp(name, "left")) {
+        int side = !strcmp(name, "top") ? 0 : !strcmp(name, "right") ? 1 :
+                   !strcmp(name, "bottom") ? 2 : 3;
+        s->inset[side] = !strcmp(value, "auto") ? WEB_AUTO : css_length(value, s->font_size, 0, 0);
+    } else if (!strcmp(name, "box-sizing")) {
+        s->border_box = !strcmp(value, "border-box");
+    } else if (!strcmp(name, "min-width") || !strcmp(name, "max-width")) {
+        bool percent = false;
+        int v = css_length(value, s->font_size, 1000, &percent);
+        bool min = !strcmp(name, "min-width");
+        if (min) {
+            s->min_width_pct = percent ? v : -1;
+            s->min_width = percent ? 0 : v;
+        } else {
+            s->max_width_pct = percent ? v : -1;
+            s->max_width = percent || !strcmp(value, "none") ? -1 : v;
+        }
+    } else if (!strcmp(name, "min-height")) {
+        s->min_height = css_length(value, s->font_size, 0, 0);
+    } else if (!strcmp(name, "max-height")) {
+        s->max_height = !strcmp(value, "none") ? -1 : css_length(value, s->font_size, 0, 0);
+    } else if (!strcmp(name, "overflow") || !strcmp(name, "overflow-x") || !strcmp(name, "overflow-y")) {
+        s->overflow_hidden = strcmp(value, "visible") != 0;
+    } else if (!strcmp(name, "clip")) {
+        s->clip_empty = !strcmp(value, "rect(0 0 0 0)") || !strcmp(value, "rect(0, 0, 0, 0)");
+    } else if (!strcmp(name, "white-space")) {
+        s->white_space = !strcmp(value, "pre") ? 1 : !strcmp(value, "pre-wrap") ? 2 :
+                         !strcmp(value, "nowrap") ? 3 : 0;
+    } else if (!strcmp(name, "list-style")) {
+        if (!strcmp(value, "none")) s->list_marker = WEB_MARKER_NONE;
     } else if (!strcmp(name, "visibility")) {
         s->hidden = !web_strcasecmp(value, "hidden");
     } else if (!strcmp(name, "list-style-type")) {
@@ -1017,27 +1248,29 @@ typedef struct {
 static void style_element(WebNode *el, WebRule *rules, int count, const WebStyle *parent_style) {
     ua_defaults(el, &el->style);
     inherit_style(parent_style, &el->style);
-    WebCandidate *candidates = web_malloc(sizeof(WebCandidate) * 256);
-    int candidate_count = 0;
-    for (int i = 0; i < count && candidate_count < 256; i++) {
-        bool matched = false;
-        for (int c = 0; c < rules[i].complex_count && !matched; c++)
-            matched = complex_matches(&rules[i].complexes[c], el);
-        if (!matched)
-            continue;
-        for (WebDecl *d = rules[i].decls; d; d = d->next) {
-            if (candidate_count >= 256)
-                break;
-            candidates[candidate_count].decl = d;
-            candidates[candidate_count].specificity = rules[i].complexes[0].specificity;
-            for (int c = 1; c < rules[i].complex_count; c++)
-                if (rules[i].complexes[c].specificity > candidates[candidate_count].specificity)
-                    candidates[candidate_count].specificity = rules[i].complexes[c].specificity;
-            candidates[candidate_count].order = i;
-            candidate_count++;
+    if (el->tag && !strcmp(el->tag, "pre")) el->style.white_space = 1;
+    int capacity = 64, candidate_count = 0;
+    WebCandidate *candidates = web_malloc(sizeof(WebCandidate) * (size_t)capacity);
+    WebDecl *inline_decls = parse_declarations(web_attr(el, "style") ? web_attr(el, "style") : "");
+    for (int i = 0; i <= count; i++) {
+        int specificity = i == count ? 1000 : -1;
+        if (i < count)
+            for (int c = 0; c < rules[i].complex_count; c++)
+                if (complex_matches(&rules[i].complexes[c], el) &&
+                    rules[i].complexes[c].specificity > specificity)
+                    specificity = rules[i].complexes[c].specificity;
+        if (specificity < 0) continue;
+        for (WebDecl *d = i == count ? inline_decls : rules[i].decls; d; d = d->next) {
+            if (candidate_count == capacity) {
+                capacity *= 2;
+                WebCandidate *grown = web_malloc(sizeof(WebCandidate) * (size_t)capacity);
+                memcpy(grown, candidates, sizeof(WebCandidate) * (size_t)candidate_count);
+                web_free(candidates);
+                candidates = grown;
+            }
+            candidates[candidate_count++] = (WebCandidate){d, specificity, i};
         }
     }
-    /* Stable insertion sort by specificity keeps the source order for ties. */
     for (int i = 1; i < candidate_count; i++) {
         WebCandidate item = candidates[i];
         int j = i - 1;
@@ -1047,24 +1280,16 @@ static void style_element(WebNode *el, WebRule *rules, int count, const WebStyle
         }
         candidates[j + 1] = item;
     }
-    for (int i = 0; i < candidate_count; i++)
-        if (!candidates[i].decl->important)
-            apply_declaration(&el->style, candidates[i].decl->name, candidates[i].decl->value);
-    for (int i = 0; i < candidate_count; i++)
-        if (candidates[i].decl->important)
-            apply_declaration(&el->style, candidates[i].decl->name, candidates[i].decl->value);
+    for (int important = 0; important < 2; important++)
+        for (int i = 0; i < candidate_count; i++) {
+            WebDecl *d = candidates[i].decl;
+            if (d->important != (bool)important) continue;
+            if (!strcmp(d->name, "font-size"))
+                el->style.font_size = parent_style ? parent_style->font_size : 16;
+            apply_declaration(&el->style, d->name, d->value);
+        }
     web_free(candidates);
-    const char *inline_style = web_attr(el, "style");
-    if (inline_style) {
-        WebDecl *decls = parse_declarations(inline_style);
-        for (WebDecl *d = decls; d; d = d->next)
-            if (!d->important)
-                apply_declaration(&el->style, d->name, d->value);
-        for (WebDecl *d = decls; d; d = d->next)
-            if (d->important)
-                apply_declaration(&el->style, d->name, d->value);
-        decl_free_list(decls);
-    }
+    decl_free_list(inline_decls);
     el->styled = true;
 }
 static void css_apply_node(WebNode *el, WebRule *rules, int count, const WebStyle *parent) {

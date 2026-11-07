@@ -80,3 +80,38 @@ portar/reimplementar essa integração, ou escolher outro port WebKit e integrar
 UI Luna às suas APIs. Portanto o caminho sem GTK continua sendo um port WebKit
 nativo; copiar `main.c` não disponibiliza o motor DOM/CSS no guest. Nenhum motor
 WebKit ou binário do HueBrowser foi integrado nesta imagem.
+
+## Correções incrementais do motor nativo (novembro de 2026)
+
+O código em `ui/web_*.c` já contém um parser HTML, cascata CSS, layout básico e
+bindings DOM parciais. Isso não equivale à integração WebKit descrita acima.
+Foram corrigidos comprimentos fracionários px/em/rem/pt, margens assimétricas,
+`width/height: auto`, seleção de blocos `@media` por screen/print e largura,
+reavaliação dessas regras ao redimensionar, e vazamentos durante relayout e parsing.
+Blocos `@supports` são ignorados enquanto não há avaliação de capacidades.
+
+O motor nativo também recebeu floats diretos (left/right), clear, posicionamento
+básico, border-box, limites de largura, clipping de overflow, alinhamento de texto
+e preservação de whitespace em pre. A cascata usa a especificidade do seletor que
+realmente casou e respeita !important frente a estilo inline normal. Comentários
+CSS dentro de declarações e irmãos de texto em :first-child são tratados.
+O documento sintético não corresponde ao seletor universal, evitando ativar hacks
+antigos como `* html`. Esses recursos são parciais, não conformidade CSS completa.
+
+Imagens PNG externas são baixadas e decodificadas pelo stb_image, com limite de
+transferência, dimensões e memória decodificada por documento. O compositor pinta
+RGBA com transparência, respeitando o recorte da janela. JPEG, SVG, WebP e imagens
+de background ainda não são implementados.
+
+O python.org foi aberto por HTTPS dentro do LunaOS no QEMU e o menu horizontal e
+o logotipo PNG foram observados numa captura real do guest. Isso não garante a
+aparência de um navegador completo: faltam Flexbox/Grid, um modelo completo de
+posicionamento/floats e APIs DOM/JavaScript. Scripts externos ainda não são
+executados; o aviso vermelho do site e a navegação condicionada ao Modernizr podem
+permanecer. Não se injeta uma classe `js` nem se oculta o aviso artificialmente.
+
+Teste de regressão no host (inclui verificação de memória):
+
+```sh
+make test-webengine
+```

@@ -335,9 +335,9 @@ void setup_draw(void) {
         paragraph(493,
                   source_bytes
                       ? tr("Fontes Wi-Fi Linux incluídos na mídia.\nFontes não são drivers "
-                           "executáveis; o porte do rádio está pendente.",
+                           "executáveis. RTL8822BE: busca passiva experimental.",
                            "Linux Wi-Fi sources included on this media.\nSources are not "
-                           "executable drivers; radio port remains pending.")
+                           "executable drivers. RTL8822BE: experimental passive scan.")
                       : tr("Pacote de fontes indisponível.", "Source archive unavailable."),
                   SECONDARY);
     } else if (setup_page == 3) {
@@ -376,6 +376,9 @@ void setup_draw(void) {
         } else if (wifi_scan_rc) {
             text(160, 518, tr("Driver Wi-Fi não operacional. Não existem redes simuladas.",
                               "Wi-Fi driver unavailable; no fabricated networks."), 13, RED);
+        } else if (wifi_state_rc == 0 && !wifi_link.can_connect) {
+            text(160, 518, tr("Busca passiva experimental. Conexão ainda indisponível.",
+                              "Experimental passive scan. Connection unavailable."), 13, SECONDARY);
         } else if (!wifi_count) {
             text(160, 518, tr("Aguardando resultados reais de varredura...",
                               "Waiting for actual scan results..."), 13, SECONDARY);
@@ -391,7 +394,7 @@ void setup_draw(void) {
                 text(160, 565, tr("Esta rede não exige senha.", "This network requires no password."),
                      13, SECONDARY);
             button(650, 558, 216, tr("Conectar", "Connect"),
-                   chosen->security != WIFI_OTHER, false);
+                   chosen->security != WIFI_OTHER && wifi_link.can_connect, false);
         }
     } else if (setup_page == 4) {
         heading("Sua região", "Your region", "Selecione o país e a zona de horário preferida.",

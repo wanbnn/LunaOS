@@ -6,11 +6,11 @@ on:
   pull_request:
     paths:
       - 'drivers/wifi*'
-      - 'drivers/rtw8822be_diag.*'
+      - 'drivers/rtw8822b*'
       - 'ui/setup.c'
       - 'kernel/wifi.h'
       - 'tests/wifi*'
-      - 'tests/rtw8822be_diag.c'
+      - 'tests/rtw8822b*'
       - 'net/wireless/**'
       - 'Makefile'
       - '.github/workflows/wireless-smoke.yml'
@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Unit tests (simulated PCI, firmware, scan and connect)
-        run: make test-wifi-port test-wireless-frames test-wifi-runtime test-rtw8822be-diag
+        run: make test-wifi-port test-wireless-frames test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware test-wifi-scan test-rtw8822be-rx-dma
       - name: Build native sources in freestanding i386 mode
         run: |
           sudo apt-get update

@@ -34,6 +34,12 @@ typedef struct {
     int width_pct, height_pct;
     bool underline, hidden;
     int list_marker;
+    int floating, clear, position; /* 0=normal; floats/clear: 1=left,2=right,3=both */
+    int inset[4];
+    int min_width, max_width, min_height, max_height;
+    int min_width_pct, max_width_pct;
+    bool border_box, overflow_hidden, clip_empty, background_set;
+    int white_space; /* 0=normal,1=pre,2=pre-wrap,3=nowrap */
 } WebStyle;
 
 typedef struct WebNode {
@@ -47,6 +53,8 @@ typedef struct WebNode {
     int x, y, w, h;
     int content_x, content_y, content_w, content_h;
     void *js;
+    unsigned char *image;
+    int image_w, image_h;
 } WebNode;
 
 typedef struct WebFragment {
@@ -55,6 +63,7 @@ typedef struct WebFragment {
     int size;
     uint32_t color;
     bool underline;
+    WebNode *owner;
 } WebFragment;
 
 /* dom */
@@ -72,6 +81,8 @@ bool web_is_void_tag(const char *tag);
 
 /* css */
 typedef struct WebRule WebRule;
+void css_set_viewport(int width);
+bool css_media_matches(const char *query);
 bool css_parse_sheet(const char *text, WebRule **rules, int *count);
 void css_free_sheet(WebRule *rules, int count);
 void css_apply(WebNode *root, WebRule *rules, int count);
@@ -101,6 +112,9 @@ void web_js_release(void);
 void web_reset(void);
 void web_relayout(void);
 bool web_load_document(const char *url, const char *html, size_t len, char *error, size_t ecap);
+bool web_decode_image(WebNode *node, const unsigned char *data, size_t len);
+bool web_image_link(int index, char *out, size_t cap);
+bool web_set_image(int index, const unsigned char *data, size_t len);
 void web_add_stylesheet(const char *css, size_t len);
 bool web_stylesheet_link(int index, char *out, size_t cap);
 void web_render(int x, int y, int w, int h);

@@ -10,7 +10,7 @@ void append(char *d, const char *s, size_t cap) {
     if (n + m < cap) memcpy(d + n, s, m + 1);
 }
 void number(char *d, uint32_t v) { sprintf(d, "%u", v); }
-void hex(char *d, uint32_t v) { sprintf(d, "%08x", v); }
+void hex(char *d, uint32_t v) { sprintf(d, "0x%08x", v); }
 int drv_pci_find(uint16_t v, uint16_t d, unsigned idx, DrvPci *out) {
     assert(v == 0x10ec && d == 0xb822 && idx == 0);
     if (unavailable) return DRV_ENOENT;
@@ -41,6 +41,13 @@ int drv_mmio_read(DrvMmio *m, uint32_t off, unsigned w, uint32_t *out) {
     assert(m->cookie && off == 0xf0 && w == 4);
     *out = bad_mmio ? 0xffffffffu : 0x12345678u; return 0;
 }
+int drv_mmio_write(DrvMmio *m, uint32_t off, unsigned w, uint32_t value) {
+    (void)m; (void)off; (void)w; (void)value;
+    assert(!"read-only diagnostic must never write MMIO"); return DRV_EIO;
+}
+int drv_udelay(unsigned us) {
+    (void)us; assert(!"read-only diagnostic must not run power sequence"); return 0;
+}
 int drv_mmio_unmap(DrvMmio *m) {
     assert(m->cookie && maps == 1);
     maps--; m->cookie = 0; return 0;
@@ -52,7 +59,7 @@ int drv_pci_release(DrvPci *p) {
 int drv_firmware_request(const char *name, DrvFirmware *out) {
     assert(!strcmp(name, "rtw88/rtw8822b_fw.bin"));
     if (missing_fw) return DRV_ENOENT;
-    static uint8_t bin[80];
+    static uint8_t bin[82] = { [0]=0x22, [1]=0x88, [4]=30, [28]=14, [36]=1, [48]=1 };
     out->size = sizeof(bin); out->data = bin; fwrefs++; return 0;
 }
 int drv_firmware_release(DrvFirmware *fw) {
@@ -62,6 +69,7 @@ int drv_firmware_release(DrvFirmware *fw) {
 int main(void) {
     char s[512];
     assert(rtw8822be_diag(s, sizeof(s)) == 0);
+    assert(strstr(s, "REG_SYS_CFG1 = 0x12345678") && !strstr(s, "0x0x"));
     assert(strstr(s, "NOT initialized") && !claims && !maps && !fwrefs);
     missing_fw = 1;
     assert(rtw8822be_diag(s, sizeof(s)) == DRV_ENOENT);

@@ -1,6 +1,7 @@
 #include "boot.h"
 #include "driver.h"
 #include "wifi.h"
+#include "../drivers/rtw8822be_pcie.h"
 #include "install.h"
 #include "luna.h"
 #include "settings.h"
@@ -21,6 +22,7 @@ void kmain(void) {
     audio_init();
     task_init();
     driver_services_init();
+    rtw8822be_init();
     gui_init();
     gui_draw();
     serial_write("READY\n");

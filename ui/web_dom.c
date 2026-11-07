@@ -96,6 +96,7 @@ void web_free_tree(WebNode *node) {
         web_free(a);
         a = next;
     }
+    web_free(node->image);
     web_free(node->tag);
     web_free(node->text);
     web_free(node);
@@ -308,34 +309,10 @@ static void add_text(WebParser *ps, const char *text, size_t len) {
     WebNode *parent = current(ps);
     if (!parent)
         return;
-    char *value;
     size_t value_len;
-    if (ps->preformatted) {
-        value = web_strndup(text, len);
-        value_len = len;
-    } else {
-        value = decode_entities(text, len, &value_len);
-        /* Collapse whitespace runs the way HTML does. */
-        size_t o = 0;
-        bool space = false;
-        for (size_t i = 0; i < value_len; i++) {
-            char c = value[i];
-            if (is_space(c)) {
-                space = true;
-                continue;
-            }
-            if (space && o)
-                value[o++] = ' ';
-            space = false;
-            value[o++] = c;
-        }
-        value[o] = 0;
-        value_len = o;
-        if (!value_len) {
-            web_free(value);
-            return;
-        }
-    }
+    /* Whitespace belongs to the DOM. CSS white-space decides how it is
+     * painted, including text nodes between inline elements. */
+    char *value = decode_entities(text, len, &value_len);
     WebNode *node = web_node_new(WEB_TEXT);
     node->text = value;
     web_node_append(parent, node);

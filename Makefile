@@ -14,12 +14,12 @@ BEAR_OBJECTS := $(patsubst third_party/bearssl/%.c,build/bearssl/%.o,$(BEAR_SOUR
 JS_OBJECTS := $(addprefix build/quickjs/,$(addsuffix .o,quickjs libregexp libunicode cutils dtoa))
 OBJECTS := $(patsubst %.c,build/%.o,$(SOURCES)) build/kernel/entry.o build/apps/user.o $(JS_OBJECTS)
 $(OBJECTS) $(BEAR_OBJECTS): Makefile
-$(patsubst %.c,build/%.o,$(SOURCES)): $(wildcard kernel/*.h ui/*.h include/net/*.h)
-.PHONY: all clean run run-iso iso test test-iso-install check test-wifi-port test-wireless-frames test-wifi-runtime test-rtw8822be-diag
+$(patsubst %.c,build/%.o,$(SOURCES)): $(wildcard kernel/*.h ui/*.h drivers/*.h include/net/*.h)
+.PHONY: test-rtw8822be-rx-dma test-wifi-scan all clean run run-iso iso test test-iso-install check test-wifi-port test-wireless-frames test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
 all: dist/LunaOS.img dist/LunaOS.iso
 build/font.h: tools/fontgen.py assets/fonts/InterTight.ttf
 	$(PYTHON) tools/fontgen.py
-build/notices.h: tools/notices.py assets/fonts/OFL.txt assets/icons/lucide/LICENSE $(wildcard assets/licenses/*) third_party/quickjs/LICENSE third_party/musl/COPYRIGHT third_party/bearssl/LICENSE.txt
+build/notices.h: tools/notices.py assets/fonts/OFL.txt assets/icons/lucide/LICENSE $(wildcard assets/licenses/*) third_party/quickjs/LICENSE third_party/musl/COPYRIGHT third_party/bearssl/LICENSE.txt third_party/stb/LICENSE
 	$(PYTHON) tools/notices.py
 build/kernel/fs.o: build/notices.h
 build/icons.h: tools/icongen.py $(wildcard assets/icons/lucide/*)
@@ -92,7 +92,7 @@ run-iso: all
 	LUNA_IMAGE=dist/LunaOS.iso tools/run-qemu.sh
 run: all
 	tools/run-qemu.sh
-test: all test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-diag
+test: all test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
 	$(PYTHON) tests/smoke.py
 	$(PYTHON) tests/multitask.py
 	$(PYTHON) tests/desktop.py
@@ -104,7 +104,7 @@ test: all test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-d
 	$(PYTHON) tests/iso.py
 test-iso-install: all
 	LUNA_SETUP_ISO=1 LUNA_TEST_DIR=build/test-iso-install $(PYTHON) tests/setup.py
-check: all test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-diag
+check: all test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
 	$(PYTHON) tools/check_image.py
 	$(PYTHON) tools/check_iso.py
 clean:
@@ -129,5 +129,42 @@ test-wifi-runtime:
 	./build/wifi-runtime-test
 test-rtw8822be-diag:
 	@mkdir -p build
-	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -Ikernel drivers/rtw8822be_diag.c tests/rtw8822be_diag.c -o build/rtw8822be-diag-test
+	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -Ikernel drivers/rtw8822be_diag.c drivers/rtw8822b_native.c tests/rtw8822be_diag.c -o build/rtw8822be-diag-test
 	./build/rtw8822be-diag-test
+
+# Real firmware parsing and upstream PCIe power flow; register I/O is simulated.
+test-rtw8822b-native:
+	@mkdir -p build
+	$(CC) -std=c11 -O2 -Wall -Wextra -Werror drivers/rtw8822b_native.c tests/rtw8822b_native.c -o build/rtw8822b-native-test
+	./build/rtw8822b-native-test
+
+# Firmware loader device-memory model (not a physical radio test).
+test-rtw8822b-firmware:
+	@mkdir -p build
+	$(CC) -std=c11 -O2 -Wall -Wextra -Werror drivers/rtw8822b_native.c drivers/rtw8822b_firmware.c tests/rtw8822b_firmware.c -o build/rtw8822b-firmware-test
+	./build/rtw8822b-firmware-test
+
+# Focused passive-scanner test with a simulated radio; not part of release runtime.
+test-wifi-scan:
+	@mkdir -p build
+	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -Ikernel drivers/wifi.c drivers/wifi_scan.c drivers/rtw8822b_native.c net/wireless/frames.c tests/wifi_scan.c -o build/wifi-scan-test
+	./build/wifi-scan-test
+
+build/drivers/rtw8822be_phy.o: $(wildcard drivers/rtw8822b/*.h)
+
+# Focused model of the production RX DMA consumer, not radio validation.
+test-rtw8822be-rx-dma:
+	@mkdir -p build
+	$(CC) -std=c11 -O2 -ffunction-sections -fdata-sections -Wall -Wextra -Werror -Ikernel drivers/rtw8822b_native.c tests/rtw8822be_rx_dma.c -Wl,--gc-sections -o build/rtw8822be-rx-dma-test
+	./build/rtw8822be-rx-dma-test
+
+# PNG decoder uses freestanding musl declarations; all I/O remains in Luna.
+build/ui/web_image.o: ui/web_image.c ui/webengine.h third_party/stb/stb_image.h third_party/musl/lib/libc.a
+	@mkdir -p build/ui
+	$(CC) $(NATIVEFLAGS) -c $< -o $@
+
+.PHONY: test-webengine
+test-webengine:
+	@mkdir -p build
+	$(CC) -std=c11 -g -Wall -Wextra -Werror -fsanitize=address,undefined -Ikernel -Ibuild tests/webengine_test.c ui/web_dom.c ui/web_css.c ui/web_layout.c ui/web_image.c -o build/webengine-test
+	./build/webengine-test

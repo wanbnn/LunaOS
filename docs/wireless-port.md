@@ -1,9 +1,10 @@
 # Porte de drivers Wi-Fi Linux para LunaOS
 
 É possível reutilizar os drivers sem usar o kernel Linux como kernel do LunaOS.
-O porte funcional ainda não foi implementado. `drivers/wireless.c` é somente
-identificação PCI: não inicializa o rádio, não carrega firmware, não procura redes
-nem autentica. Nenhuma placa Wi-Fi é anunciada como funcional na imagem atual.
+O RTL8822BE possui agora um [scanner passivo nativo experimental](rtw8822be-native-port.md),
+com transporte PCIe/DMA e controle PHY/canal adaptados de rtw88. Ainda não houve
+validação em hardware e não há autenticação, associação ou tráfego IP Wi-Fi.
+Os demais chips continuam apenas com identificação/preflight.
 
 O alvo prioritário fornecido pelo usuário é RTL8723BE PCI `10ec:b723`, subsistema
 HP `103c:804c`. O Bluetooth requer identificação USB separada.

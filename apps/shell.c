@@ -1,4 +1,5 @@
 #include "../drivers/rtw8822be_diag.h"
+#include "../drivers/rtw8822be_pcie.h"
 #include "driver.h"
 #include "install.h"
 #include "luna.h"
@@ -548,7 +549,12 @@ static int execute(int argc, char **a, const char *input, char *out) {
         emit(out, "\n");
         return 0;
     } else if (!strcmp(c, "wifidiag")) {
-        return rtw8822be_diag(out, CAP) ? 1 : 0;
+        if (rtw8822be_present()) { rtw8822be_status(out, CAP); return 0; }
+        if (argc == 1) return rtw8822be_diag(out, CAP) ? 1 : 0;
+        if (argc == 2 && !strcmp(a[1], "power"))
+            return rtw8822be_power_test(out, CAP) ? 1 : 0;
+        emit(out, "usage: wifidiag [power] (MAC power cycle only; no scan/connect)\n");
+        return 2;
     } else if (!strcmp(c, "drvinfo")) {
         driver_services_status(out, CAP);
         return 0;
