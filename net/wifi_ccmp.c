@@ -53,7 +53,7 @@ static void crypt(const br_aes_ct_cbcenc_keys *k,const uint8_t *f,
     zero(n,sizeof(n));zero(b,sizeof(b));
 }
 static int header(const uint8_t *f,size_t len,bool protected,bool from_ds) {
-    if(!f || len<24 || f[0]!=0x08 || (f[1]&0x03)!=0x01 ||
+    if(!f || len<24 || f[0]!=0x08 || (f[1]&0x03)!=(from_ds ? 0x02 : 0x01) ||
        (f[1]&0x80) || (f[22]&15) || (f[1]&0x0c) ||
        !!(f[1]&0x40)!=protected) return ERR_INVAL;
     return 0;
