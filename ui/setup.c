@@ -233,7 +233,7 @@ static void erase_token(char *out) {
     strcat(out, n);
 }
 static bool confirmed(void) {
-    if (selected_disk < 0 || selected_disk >= STORAGE_DEVICE_COUNT || !eligible[selected_disk])
+    if (selected_disk < 0 || (unsigned)selected_disk >= STORAGE_DEVICE_COUNT || !eligible[selected_disk])
         return false;
     char token[32];
     erase_token(token);
@@ -684,11 +684,11 @@ void setup_key(int key) {
         ui_dirty=true;return;
     }
     if (setup_page == 6 && (c == KEY_DOWN || c == KEY_UP)) {
-        int i = selected_disk < 0 ? (c==KEY_UP ? 0 : STORAGE_DEVICE_COUNT-1)
+        int i = selected_disk < 0 ? (c==KEY_UP ? 0 : (int)STORAGE_DEVICE_COUNT-1)
                                   : selected_disk;
         for (unsigned n = 0; n < STORAGE_DEVICE_COUNT; n++) {
-            i = (i + (c == KEY_UP ? STORAGE_DEVICE_COUNT-1 : 1))
-                % STORAGE_DEVICE_COUNT;
+            i = (i + (c == KEY_UP ? (int)STORAGE_DEVICE_COUNT-1 : 1))
+                % (int)STORAGE_DEVICE_COUNT;
             if (eligible[i]) {
                 selected_disk = i;
                 storage_page=storage_page_for((unsigned)i);
