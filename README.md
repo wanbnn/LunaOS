@@ -1,302 +1,253 @@
-# LunaOS 0.3 — sistema independente em desenvolvimento
+<div align="center">
 
-Bootloader próprio em assembly x86, kernel próprio em C, interface nativa com Inter
-Tight e ícones exclusivamente Lucide. A imagem não usa kernel Linux, GRUB ou Bun.
-Há bibliotecas incorporadas de criptografia, JavaScript e funções ISO-C; seus avisos
-estão em `third_party/README.md` e em `/etc/licenses` dentro do guest.
+# LunaOS
 
-**Imagens:** `dist/LunaOS.img`, disco BIOS raw de **32 MiB**, e
-`dist/LunaOS.iso`, CD BIOS inicializável de **32,125 MiB**. O limite de 120 MB continua
-sendo uma exigência do projeto. **DOM/CSS modernos ainda não estão integrados.**
+**Um sistema operacional independente, desenvolvido do zero em C e Assembly para x86.**
 
-![Área de trabalho](dist/desktop-v03.png)
+![Status](https://img.shields.io/badge/status-experimental-F59E0B?style=flat-square)
+![Versão](https://img.shields.io/badge/vers%C3%A3o-0.3-6366F1?style=flat-square)
+![Kernel](https://img.shields.io/badge/kernel-i386-334155?style=flat-square)
+![Boot](https://img.shields.io/badge/boot-BIOS%20%7C%20UEFI-0F766E?style=flat-square)
+![Linguagens](https://img.shields.io/badge/c%C3%B3digo-C%20%2B%20Assembly-2563EB?style=flat-square)
 
-## Abrir no QEMU
+**[Visão geral](#visão-geral) · [Funcionalidades](#funcionalidades-e-limitações) · [Executar](#começando) · [Arquitetura](#arquitetura) · [Testes](#testes-e-validação) · [Documentação](#documentação)**
+
+</div>
+
+> [!IMPORTANT]
+> **O LunaOS está em desenvolvimento.** Este repositório contém implementações reais e recursos experimentais, não um sistema pronto para substituir Linux ou Windows. Testes em QEMU, simulações de rádio e compilação bem-sucedida **não** comprovam compatibilidade com hardware físico. A situação descrita abaixo corresponde ao código da branch `main` em **7 de novembro de 2026**.
+
+## Visão geral
+
+O LunaOS tem **bootloader próprio**, **kernel próprio em C**, **interface gráfica nativa** e **aplicativos e serviços integrados**. O projeto não usa o kernel Linux, GRUB ou Bun para executar o sistema. Código de bibliotecas e fontes de drivers de terceiros é incorporado ou usado como referência com suas respectivas licenças — isso **não** oferece compatibilidade binária com módulos Linux.
+
+**O que existe hoje:**
+
+- Boot BIOS x86 e caminho **UEFI x64 experimental** que transfere o controle ao kernel i386.
+- Desktop com dock, pesquisa, janelas, compositor 32 bits, fontes **Inter Tight** e ícones **Lucide**.
+- Assistente de primeiro boot, modo live, instalação em disco IDE compatível e login.
+- Terminal **lunaSH**, Files, Notes, Settings, navegador e Gerenciador de Tarefas.
+- Pilha de rede IPv4 via **RTL8139**, HTTP e HTTPS/TLS 1.2.
+- Navegador com HTML, CSS, DOM/JavaScript **parciais** e decodificação de PNG externo.
+- Infraestrutura de drivers e desenvolvimento de Wi-Fi com scanner passivo experimental para **RTL8822BE**.
+- Gerenciamento dinâmico de memória física e contabilidade de RAM por processo.
+- Calendário mensal, configuração de data e hora offline e sincronização **SNTP/NTP**.
+
+A geração atual produz `dist/LunaOS.img` (disco raw de **32 MiB**) e `dist/LunaOS.iso` (CD inicializável BIOS de aproximadamente **32,125 MiB**). O limite de **120 MB** continua sendo um objetivo do projeto, não uma garantia para futuras integrações.
+
+## Funcionalidades e limitações
+
+| Componente | Estado | Detalhes |
+| --- | --- | --- |
+| **Kernel e processos** | Implementado, com limites | Kernel i386, separação de privilégios, PIDs, tarefas em ring 3 e serviços centrais em ring 0; sem loader ELF de uso geral nem isolamento completo dos serviços |
+| **Boot BIOS** | Implementado | Bootloader próprio; carregamento do kernel acima de 1 MiB |
+| **Boot UEFI** | Experimental | Loader UEFI x64 com transição para kernel i386; caminho testável com OVMF/QEMU |
+| **Desktop** | Implementado | Janelas, minimização, maximização, busca, atalhos, compositor com meta de 60 fps e resoluções do adaptador virtual até 1920×1080 |
+| **Sistema de arquivos** | Limitado | LunaFS com snapshots, até 64 entradas e arquivos de até 8191 bytes |
+| **Instalador** | Implementado para IDE | Seleção explícita de disco, confirmação destrutiva, cópia verificada, usuário e senha; sem AHCI, NVMe ou USB mass storage |
+| **Ethernet e HTTPS** | Parcial | RTL8139, IPv4, DNS, TCP, HTTP e BearSSL/TLS 1.2; não é uma stack de rede universal |
+| **Navegador nativo** | Experimental | HTML e CSS com layout/cascata parciais, bindings DOM/JS e PNG; **sem** compatibilidade moderna completa |
+| **Wi-Fi RTL8822BE** | **Scanner passivo experimental** | Inicialização PCIe, firmware, PHY e recebimento de beacons por DMA; **sem conexão**, ainda sem validação em placa física |
+| **Wi-Fi Intel AX211** | Infraestrutura | Identificação e diagnóstico PCI/firmware; **sem scan físico nem conexão** |
+| **Camadas Wi-Fi comuns** | Testadas em simulação | Interfaces de scan/connect, handshake WPA2-PSK, porta controlada e DHCP; dependem de um rádio físico funcional |
+| **Memória e Task Manager** | Implementado, com limites | Páginas físicas, heap/DMA sob demanda, RAM por PID; i386 sem PAE não aloca RAM acima de 4 GiB |
+| **Calendário e relógio** | Implementado | Ajuste manual, offset UTC, RTC, persistência e SNTP assíncrono; sem base IANA de fusos/DST |
+| **Bluetooth e hardware geral** | Pendente | Sem pilha Bluetooth, USB geral e drivers universais de GPU, armazenamento ou Wi-Fi |
+
+### Navegador: evolução real, sem prometer um Chrome
+
+O navegador deixou de ser apenas um leitor de texto HTML. O código nativo em `ui/web_*.c` implementa parsing HTML, CSS com cascata e layout parciais, alguns bindings DOM/JavaScript e renderização de imagens **PNG externas** com limites de memória e dimensões.
+
+Entre os avanços recentes estão margens e dimensões CSS, regras `@media`, floats, posicionamento básico, `overflow`/clipping, `box-sizing`, especificidade da cascata e `!important`. Há testes de regressão do motor no host.
+
+**O que isso não significa:** WebKit não foi integrado; Flexbox/Grid completos, Web APIs modernas, scripts externos de sites e compatibilidade geral com a web atual **não estão concluídos**. A execução isolada de QuickJS também não equivale a um browser completo.
+
+Detalhes técnicos: [Motor do navegador](docs/browser-engine.md).
+
+### Wi-Fi: o que está funcionando no código
+
+A API nativa de Wi-Fi permite que o setup consulte drivers registrados e apresente **apenas SSIDs realmente recebidos**, sem redes falsas. O código inclui frames IEEE 802.11, diagnóstico PCI/firmware e componentes compartilhados de **WPA2-PSK/CCMP** e **DHCP** validados em testes controlados.
+
+**RTL8822BE (`10ec:b822`)**
+
+- Caminho experimental de inicialização PCIe, firmware, energia e PHY, com anéis DMA.
+- Scanner **passivo** para canais de 2,4 e 5 GHz, com leitura de beacons/probe responses e RSSI.
+- Diagnóstico de etapas e erros pelo setup e pelo comando `wifidiag`.
+- **Ainda não validado em hardware físico.** O backend não oferece autenticação, associação, WPA2 conectado ao rádio ou tráfego IP. O botão de conexão permanece indisponível.
+
+**Intel AX211 (`8086:51f0`)**
+
+- Inventário do controlador, preparação de PCI/MMIO e parser/validação de firmware Intel.
+- Integração compartilhada de WPA2, DHCP e interface de rede **testada com rádio simulado**.
+- **Ainda sem boot do firmware no dispositivo, scan físico ou conexão.**
+
+A identificação de outros chipsets Realtek, MediaTek, Qualcomm e Broadcom é **inventário/preflight**, não uma coleção de drivers prontos. As fontes Linux arquivadas no projeto não são executadas como drivers Linux dentro do LunaOS.
+
+Leia [RTL8822BE nativo](docs/rtw8822be-native-port.md), [Intel AX211](docs/intel-ax211-wifi.md), [Porte de Wi-Fi](docs/wireless-port.md) e [Serviços para drivers](docs/driver-services.md).
+
+### Memória, processos e relógio
+
+- O alocador físico usa o mapa de memória recebido via BIOS E820 ou pela tradução UEFI. Heap e buffers DMA crescem conforme páginas disponíveis, substituindo pools fixos anteriores.
+- O comando `free` mostra reservas, páginas alocadas e livres; `memtest` verifica alocação e liberação. O kernel continua **i386 sem PAE**, com o limite de endereçamento correspondente.
+- `ps` e o Gerenciador de Tarefas mostram **RAM por PID**, incluindo arenas, pilhas e estruturas de paginação. A contabilização não transforma os backends de aplicativos em processos completamente isolados.
+- O relógio da barra superior abre um **calendário mensal**. Em **Settings > Date & time** é possível definir data/hora sem internet, ajustar offset UTC e configurar sincronização SNTP assíncrona (servidor padrão: `time.cloudflare.com`). Não há banco de fusos IANA nem autenticação NTS.
+
+Saiba mais: [Memória física](docs/physical-memory.md), [RAM por processo](docs/process-memory.md) e [Calendário e horário](docs/calendar.md).
+
+## Começando
+
+### Requisitos de desenvolvimento
+
+Host Linux x86 com ferramentas GCC/binutils e **suporte de compilação de 32 bits**, Make, Python 3, Clang/LLD (loader UEFI) e QEMU x86. Os utilitários Python para a **build**, como Pillow e CairoSVG, estão em `requirements-dev.txt`. O script `tools/bootstrap.sh` pode instalá-los localmente em `.tools/python`.
+
+Exemplo no Ubuntu (nomes de pacotes sujeitos à versão da distribuição):
 
 ```bash
-cd /home/wanderson/Projetos/LunaOS
+sudo apt update
+sudo apt install -y build-essential gcc-multilib binutils clang lld \
+  make python3 python3-pip qemu-system-x86 ovmf
+```
+
+```bash
+git clone https://github.com/wanbnn/LunaOS.git
+cd LunaOS
+bash tools/bootstrap.sh
+make -j2 all
+```
+
+A build gera as imagens em `dist/`. As fontes incorporadas de musl, QuickJS e BearSSL já estão fixadas no repositório; o processo normal de compilação não depende de baixar esses códigos novamente.
+
+### Executar em QEMU
+
+**BIOS / imagem de disco (padrão):**
+
+```bash
 make run
-# Ou iniciar pelo CD:
+```
+
+**Boot pelo CD ISO (BIOS/El Torito):**
+
+```bash
 make run-iso
 ```
 
-Feche uma instância antiga para iniciar a imagem nova. O launcher usa 64 MiB de RAM por padrão de teste (configure, por exemplo, `LUNA_RAM=4096 make run`),
-VGA padrão com modo nativo de 32 bits, IDE, RTL8139 e AC97. Usa KVM e CPU host quando
-`/dev/kvm` está acessível; caso contrário usa TCG e CPU max. O guest desta versão
-requer **64 MiB**, por causa dos caches gráficos e reservas do runtime.
-
-O QEMU continua aparecendo como um único processo no computador hospedeiro. Os PIDs
-dos aplicativos são administrados dentro do LunaOS.
+**UEFI experimental com OVMF:**
 
 ```bash
-tools/run-qemu.sh -display none           # logs seriais; setup requer GUI/QMP
-LUNA_AUDIO=driver=alsa,id=audio0 make run  # host com backend ALSA disponível
+LUNA_UEFI=1 make run
 ```
 
-`Ctrl esquerdo + Alt esquerdo` libera a captura de mouse do QEMU.
+O launcher inicia, por padrão, com **64 MiB de RAM em BIOS** e **256 MiB em UEFI**. Para alterar a RAM da VM:
 
-## Atalhos e terminal
+```bash
+LUNA_RAM=256 make run
+```
 
-- **Super / Windows:** busca de aplicativos no topo da tela. Digite, use setas e Enter.
-- **Alt+Tab / Alt+Shift+Tab:** alternar entre janelas, inclusive minimizadas.
-- **Alt+F4:** fechar a janela em foco.
-- **Ctrl+Alt+T:** abrir o terminal.
-- **Ctrl+Shift+Esc:** abrir o Gerenciador de Tarefas.
-- **Esc:** fechar busca ou painel rápido; não minimiza o aplicativo automaticamente.
-- Os atalhos globais **F1–F6 foram removidos**.
+O QEMU usa KVM se estiver disponível, caso contrário usa emulação TCG. O launcher configura o adaptador gráfico virtual, Ethernet RTL8139, áudio AC97 e mídia IDE. O modo UEFI exige OVMF instalado/configurado. Para detalhes sobre boot e mídia, consulte [Arquitetura](docs/architecture.md) e [ISO](docs/iso.md).
 
-No lunaSH, Tab completa comandos e caminhos. Em uma correspondência única, insere
-um espaço ou `/` para diretórios. Duas pressões de Tab exibem alternativas quando
-não há mais prefixo comum. Há edição com setas, Home, End e Delete, histórico com
-setas, Ctrl+A/E, Ctrl+C e Ctrl+L. Não existe job control Unix: Ctrl+C cancela a linha
-em edição, sem ser uma implementação geral de sinais para programas externos.
+> [!CAUTION]
+> **Não use um disco físico com o instalador experimental.** A instalação formata e substitui o conteúdo do destino selecionado. Para testes, crie uma **imagem de disco descartável** e siga o procedimento documentado em [Primeiro boot e instalação](docs/setup.md). A mídia live também permite explorar o desktop sem instalar.
+
+## Uso básico
+
+**Atalhos:**
+
+| Atalho | Ação |
+| --- | --- |
+| `Super` / tecla Windows | Abrir a busca de aplicativos |
+| `Alt+Tab` e `Alt+Shift+Tab` | Alternar entre janelas |
+| `Alt+F4` | Fechar a janela ativa |
+| `Ctrl+Alt+T` | Abrir o lunaSH |
+| `Ctrl+Shift+Esc` | Abrir o Gerenciador de Tarefas |
+
+O terminal **lunaSH** oferece histórico, autocompletar, pipes de texto, redirecionamentos e scripts `.lsh`. Ele **não** é um shell POSIX completo e não executa binários Linux externos.
+
+Comandos úteis no guest:
 
 ```sh
 help
-mkdir projetos
-cd projetos
-echo "ola Luna" > notas.txt
-cat notas.txt | grep Luna | wc
 ps
-tasks
-ringtest
+free
+net
+wifidiag
+wifidiag intel
+date
+date zone -03:00
+date sync
+memtest 4
 sync
 ```
 
-Aspas, variáveis, pipes de texto sequenciais, redirecionamentos e scripts `.lsh`
-continuam disponíveis. Não há execução de binários externos, globbing, expressões
-regulares ou compatibilidade POSIX completa. A conclusão inicial cobre nomes simples;
-nomes com espaços/escapes complexos ainda têm limitações.
+O app **Notes** oferece edição de textos e realce de sintaxe para alguns formatos. **Settings** controla aparência, teclado, mouse, monitor virtual, áudio, idioma e relógio. Nem todos os controles representam capacidades do hardware físico.
 
-## Janelas e configurações
+## Arquitetura
 
-Arraste a barra de título para mover. Vermelho fecha, amarelo minimiza e verde
-maximiza/restaura; duplo clique na barra alterna maximização. Minimizar mantém o PID;
-fechar termina o cliente; reabrir cria um novo PID.
-
-O ícone de sliders na barra superior abre o **painel rápido**, mantido separado do
-aplicativo **Settings** disponível pelo dock ou busca Super.
-
-Settings inclui:
-
-- Teclado: layout US e mapeamento ABNT2 básico, atraso e taxa de repetição PS/2.
-- Mouse: velocidade linear e botões para mão esquerda. A aceleração PS/2 é desativada.
-- Monitores: modo atual, meta do compositor e limites reais do driver.
-- Som: volume, balanço, mute e teste no AC97. Não há entrada de microfone/USB audio.
-- Aparência: vidro escuro, seis acentos, quatro fundos e carregamento de PPM P3.
-- Rede: estado real do RTL8139; Wi-Fi e Bluetooth continuam não implementados.
-
-As alterações são imediatas. **Save settings** salva `/etc/luna-settings` e faz sync
-do LunaFS. O botão também persiste arquivos pendentes, pois o snapshot é do volume.
-
-Para fundo próprio, o formato inicial é **PPM P3 de texto**, até 64×64 e dentro do
-limite de 8191 bytes por arquivo. A imagem é ampliada com interpolação bilinear.
-Não existe ainda importação PNG/JPEG ou seletor de arquivos gráfico completo.
-
-## Renderização e 60 fps
-
-O compositor tem meta de **60 fps**, com pacing fracionário sobre timer de 1 kHz;
-não usa o arredondamento fixo de 17 ms que limitaria a cadência a 58,8 fps.
-As janelas têm superfícies em cache. O cursor restaura/desenha somente sua região,
-sem redesenhar todo o desktop. Scanout de 32 bits usa cópias em bloco.
-
-`bench` mede a capacidade de composição de 120 frames com as janelas abertas. Isso
-é throughput, não uma promessa de que qualquer rotina do kernel, máquina hospedeira
-ou futuro conteúdo web sempre cumpra o orçamento de frame.
-
-**A frequência física do monitor não é programável por este driver.** A resolução
-do framebuffer pode variar de 1024×768 a 1920×1080. O painel não oferece 120/144 Hz fictícios: taxas superiores dependem de
-um driver que consulte e programe timings reais do display. O QEMU/host controla a
-saída física. Em TCG ou no fallback VBE, 60 fps não é garantido.
-
-## Navegador: estado explícito
-
-O navegador atual é um **leitor nativo de texto HTML e HTTPS**. Não executa scripts
-de páginas e não tem DOM, CSSOM, layout CSS moderno ou APIs completas de navegador.
-O requisito de navegar na web moderna foi aceito, mas **não foi concluído**.
-
-A avaliação do porte de WebKit, dependências e critérios de aceitação está em
-[docs/browser-engine.md](docs/browser-engine.md). O fixture
-`tests/web-platform/modern.html` ainda não foi aprovado pelo guest. Rodar JavaScript
-no terminal ou abrir essa página em um browser do host não comprova DOM/CSS no LunaOS.
-
-Funciona nesta versão:
-
-- HTTPS TLS 1.2 com BearSSL, cifras AEAD/ECDHE, cadeia, nome e data verificados.
-- Entropia de RDRAND: se indisponível, TLS falha; não há fallback inseguro de entropy.
-- 120 âncoras públicas Mozilla, registradas em `assets/tls/manifest.json`.
-- CA adicional opcional em `/etc/tls/custom.pem`, instalada explicitamente pelo usuário.
-- Transferência chunked e validação do tamanho da resposta; limite de documento de 128 KiB.
-- Perfil IPv4 estático QEMU: `10.0.2.15/24`, gateway `.2`, DNS `.3`; `/etc/hosts` é consultado.
-
-Ainda faltam TLS 1.3, HTTP/2, redirecionamentos, compressão, cookies/storage, um motor
-web completo e um sandbox de conteúdo de produção. O driver TCP ainda é restrito;
-não se trata de uma pilha de rede pronta para todos os ambientes físicos.
-
-```sh
-net
-ping 10.0.2.2
-wget https://servidor/caminho /home/luna/documento.html
-browse file:///home/luna/documento.html
-js '[1,2,3].map(x => x * 2).join(",")'
+```text
+LunaOS/
+├── boot/          # Bootloaders BIOS e UEFI
+├── kernel/        # Kernel, tarefas, memória, serviços e relógio
+├── drivers/       # PCI, IDE, vídeo/entrada, áudio, Ethernet e Wi-Fi experimental
+├── net/           # Protocolos de rede e componentes 802.11/WPA2/DHCP/NTP
+├── ui/            # Desktop, janelas, setup e motor web nativo
+├── apps/          # Shell, JavaScript e aplicativos
+├── lib/           # Runtime e utilitários nativos
+├── assets/        # Fontes, ícones, firmware e materiais licenciados
+├── third_party/   # Fontes de bibliotecas de terceiros com licenças
+├── tools/         # Geração de imagens, build e execução
+├── tests/         # Testes unitários, host e integração em guest/QEMU
+├── docs/          # Documentação técnica
+└── Makefile
 ```
 
-O comando `js` usa **QuickJS 2026-06-04** com sintaxe moderna/BigInt, limite de memória
-e interrupção por orçamento de execução. Ele não é uma camada DOM/CSS nem está
-anunciado como o motor final do navegador; WebKit inclui seu próprio JavaScriptCore.
+O kernel utiliza contextos de tarefas e proteção de páginas para clientes ring 3, mas diversos backends continuam executando como serviços do kernel. **Não** há ABI genérica para aplicativos Linux, loader ELF geral, threads POSIX completas ou isolamento de segurança equivalente ao de um sistema operacional de produção.
 
-## Privilégios e limites do sistema
-
-| Componente | Estado |
-| --- | --- |
-| Ring 0 | Kernel, drivers, compositor e serviços essenciais; tarefa protegida |
-| Rings 1 e 2 | Contextos e seletores testados, reservados a serviços confiáveis |
-| Ring 3 | Clientes dos seis aplicativos, com PID, CR3 e pilhas privados |
-| Backends de aplicativos | Lógica de terminal, rede e desenho ainda em serviços do kernel |
-| Arquivos | LunaFS, 64 entradas, arquivos de texto de até 8191 bytes, sync explícito |
-| Entrada | PS/2 com filas, deltas de mouse de nove bits e hotspot corrigido |
-| Dispositivos | IDE ATA, RTL8139, AC97/PIT e VBE/Bochs framebuffer |
-| Ausências | UEFI, USB, NVMe/AHCI, Wi-Fi/Bluetooth e suporte geral a hardware |
-
-Não há loader ELF de aplicações gerais, threads POSIX, heap de processo sob demanda
-ou IPC completo. `reboot` e `poweroff` requerem capacidade de sistema do ring 0.
-O runtime de JS é um serviço confiável do kernel; não execute conteúdo não confiável
-como se já houvesse um sandbox de navegador completo.
-
-## Construir e verificar
-
-Host: GCC/binutils com runtime de 32 bits (`gcc-multilib`), Make, Python/Pillow/CairoSVG,
-OpenSSL para os testes de TLS, QEMU x86/SeaBIOS e GUI GTK. `tools/bootstrap.sh` instala
-apenas ferramentas Python locais. Os fontes de musl, QuickJS e BearSSL são vendorizados;
-a compilação normal não acessa a rede.
+## Testes e validação
 
 ```bash
-make -j4
-make check
-make test
-make run
+make check                  # Imagem, ISO e testes host previstos no target
+make test                   # Testes adicionais com guest/QEMU
+make test-webengine         # Regressão HTML/CSS/layout/PNG no host
+make test-wifi-station      # WPA2 + DHCP integrados com rádio simulado
+make test-rtw8822be-rx-dma  # Modelo dos descritores RX do RTL8822BE
+make test-pmm test-heap     # Gerenciamento de memória
 ```
 
-O loader agora lê o kernel em blocos, usando bounce buffer BIOS e cópia para RAM acima
-de 1 MiB; não está mais limitado ao espaço abaixo de 640 KiB. A imagem segue raw de
-32 MiB. Compilar novamente recria a imagem de distribuição; use cópias para guardar
-trabalho importante do guest.
+Testes específicos de calendário, UEFI, instalação e drivers estão descritos nas páginas técnicas. A pipeline [Wireless portability smoke tests](.github/workflows/wireless-smoke.yml) faz verificações de portas Wi-Fi e build da imagem, mas **não testa um adaptador Wi-Fi físico**.
 
-Os relatórios em `dist/test-report.json`, `multitask-report.json`, `desktop-report.json`
-e `web-foundation-report.json` identificam o hash exato testado. São separados testes
-de infraestrutura TLS/JS e a ausência de um motor DOM/CSS moderno. As capturas PNG
-em `dist` vêm do framebuffer real do guest.
+**Interpretação correta dos testes:**
+- Compilar código freestanding ou passar testes com PCI/rádio simulado **não** comprova que o firmware inicializou em uma placa real.
+- Detectar um SSID via scan passivo **não** comprova associação, autenticação WPA2, DHCP ou conectividade.
+- Renderizar uma página de exemplo **não** comprova conformidade com a web moderna.
+- Testes no QEMU **não** comprovam suporte a controladores reais não implementados.
 
-### Atualização de desktop e hardware
+## Documentação
 
-- Mouse absoluto VMMouse no QEMU, com fallback PS/2 relativo em hardware real.
-- Cabeçalho de janela reduzido de 45 para 33 pixels, com hitboxes correspondentes.
-- Configurações → Displays: dropdown de modos do adaptador virtual Bochs/QEMU,
-  até 1920×1080. A saída e o desktop são redesenhados na resolução escolhida, em escala 100%.
-  O modo pode ser salvo. Não há enumeração/troca de modos de monitores físicos
-  para GPUs reais; o fallback VBE conserva seu modo de boot.
-- Configurações → System: idioma inglês/português para os controles traduzidos e
-  modo de desenvolvedor que exibe o tempo de composição. Tradução parcial;
-  o shell e vários textos de aplicativos continuam em inglês.
-- Notes: app separado no dock, edição de arquivos, cursor, navegação, indentação,
-  autoindentação e destaque lexical para Python, Markdown, C/C++, JS e JSON.
-  `Ctrl+L` edita o caminho; Enter abre; `Ctrl+S` salva no disco. Arquivos até 8 KiB,
-  sem LSP, verificação de tipos ou execução de Python. A escolha de sintaxe fica
-  no lado direito da barra. Abrir arquivo substitui o buffer: salve antes.
-- Wi-Fi: descoberta PCI de 15 alvos; **nenhum driver Wi-Fi funcional ainda**.
-  O porte Linux foi avaliado em [wireless-port.md](docs/wireless-port.md).
-  Bluetooth e WebKit continuam pendentes.
+| Tema | Referência |
+| --- | --- |
+| Organização interna e proteções | [Arquitetura](docs/architecture.md) |
+| Primeiro boot, login e instalação | [Setup](docs/setup.md) |
+| ISO/ATAPI e mídia inicializável | [ISO](docs/iso.md) |
+| Capacidades e limites do navegador | [Motor do navegador](docs/browser-engine.md) |
+| API de drivers DMA, PCI, MMIO e firmware | [Serviços de drivers](docs/driver-services.md) |
+| Famílias e estratégia de drivers Wi-Fi | [Porte de Wi-Fi](docs/wireless-port.md) |
+| RTL8822BE experimental | [Port nativo RTL8822BE](docs/rtw8822be-native-port.md) |
+| Intel AX211 e WPA2/DHCP | [Intel AX211](docs/intel-ax211-wifi.md) |
+| Alocação física e limites de RAM | [Memória física](docs/physical-memory.md) |
+| Contabilidade por processo | [Memória por processo](docs/process-memory.md) |
+| RTC, calendário e NTP | [Calendário](docs/calendar.md) |
 
-`tests/desktop_next.py` verifica dentro do guest os quatro cantos do mouse,
-a troca real de scanout, a aba System e criação de arquivo pelo Notes.
+## Próximos desafios
 
+O roadmap imediato continua sendo **validar os drivers em hardware físico**, completar autenticação/associação e tráfego IP Wi-Fi, ampliar suporte de armazenamento e periféricos, fortalecer isolamento e APIs de processos, e avançar na compatibilidade do navegador. Essas metas **não devem ser confundidas com funcionalidades já entregues**.
 
-### Serviços nativos para portes Wi-Fi
+## Licenças e créditos
 
-Implementada a [API de serviços de drivers v1](docs/driver-services.md), em
-[kernel/driver.h](kernel/driver.h): DMA contíguo com máscara/alinhamento,
-PCI/MMIO sem cache, INTx compartilhado via PIC, locks IRQ-save, completions,
-work/timers limitados, buffers/filas de pacotes e arquivo binário de firmware
-independente do LunaFS. `drvinfo` mostra capacidades; `drvtest` executa diagnóstico.
+O LunaOS utiliza componentes de terceiros, incluindo **musl**, **QuickJS**, **BearSSL**, **stb_image**, **Inter Tight**, **Lucide** e materiais upstream de drivers/firmware. Cada componente mantém seus avisos e condições de redistribuição. Consulte [third_party/README.md](third_party/README.md), os avisos em `assets/licenses/` e `/etc/licenses` no sistema.
 
-`tests/driver_services.py` valida no guest DMA bidirecional e interrupções de um
-PCI EDU real do QEMU, firmware binário de 70 KB, corrupção e liberação de recursos.
-MSI/APIC, IOMMU, compatibilidade mac80211 e rádio Wi-Fi funcional ainda não estão
-implementados. Essa camada permite iniciar a adaptação dos drivers; não é a pilha
-Wi-Fi completa nem um adaptador binário para módulos Linux.
+---
 
+<div align="center">
 
-### Assistente de primeiro boot
+**LunaOS · Construindo um sistema operacional, um componente de cada vez.**
 
-A imagem agora tem **32 MiB** e abre um setup nativo com boas-vindas em seis
-idiomas, seleção inglês/português e teclado, estado do hardware/rede, região,
-usuário/senha, seleção/confirmacão do disco e instalação com verificação e reinício.
-A senha é um hash PBKDF2 com salt e é exigida no boot instalado. “Experimentar
-LunaOS” abre o desktop live; `setup` no lunaSH reabre o assistente.
-
-Inclui um snapshot completo dos fontes Linux `drivers/net/wireless` com licenças,
-SHA e commit fixados. **Esses fontes não são drivers executáveis do LunaOS:** scan,
-associação e configuração automática de Wi-Fi ainda não estão implementados.
-O assistente permite seguir offline e não simula a conexão.
-
-O instalador usa somente ATA/IDE legado de 512 bytes e LBA28; AHCI/NVMe/USB e
-UEFI continuam pendentes. Instalação física geral ainda não é suportada. Consulte
-[setup.md](docs/setup.md) para limites, formato do disco, credenciais e comandos de
-QEMU com disco virtual descartável.
-
-
-### Resolução nativa
-
-Corrigida a troca de resolução: o compositor, wallpaper, caches e cursor
-usam as dimensões reais do modo; o desktop inteiro não é mais ampliado de 1024×768.
-Em escala 100%, fontes e ícones mantêm seu tamanho em pixels, com mais área de
-trabalho nas resoluções maiores. Barra superior, dock, busca e painel rápido são
-reposicionados; janelas maximizadas seguem a nova área útil. O setup/login continua
-centralizado. `tests/native_resolution.py` confere medidas de texto e controles
-nas capturas, limites do mouse e persistência até 1920×1080, com 64 MiB de RAM.
-
-
-### ISO e mídia óptica
-
-`make` gera `.img` e `.iso`, com SHA-256 para ambos. A ISO inicia pelo bootloader
-próprio com El Torito e continua lendo a origem pelo driver ATAPI nativo. A mídia
-óptica é somente leitura, e o instalador pode copiar para um disco IDE separado.
-Veja [iso.md](docs/iso.md) para comandos, testes e limites BIOS/ATAPI.
-
-### Base compartilhada de Wi-Fi e Intel AX211
-
-A API preserva BSSID, canal e segurança de até 32 redes e a configuração exibe
-2,4 ou 5 GHz. O inventário Intel reconhece o AX211 desta máquina
-(`8086:51f0`, subsistema `8086:4090`), mas **scan e conexão no AX211 ainda
-dependem de um backend Intel nativo**. A conexão Wi-Fi continua indisponível.
-Há agora parser e firmware Intel licenciado, preparação PCI/MMIO (`wifidiag intel`),
-handshake WPA2-PSK/CCMP compartilhado, porta de dados e integração DHCP/IPv4.
-Essas camadas passam por testes com rádio simulado; o boot do firmware e o rádio
-Intel ainda não estão implementados. Arquitetura, limites e etapas restantes:
-[Intel AX211](docs/intel-ax211-wifi.md).
-
-### Memória física e heap sob demanda
-
-O kernel agora aloca páginas nas regiões utilizáveis do mapa E820/UEFI, sem teto
-de 64 MiB e sem os antigos pools fixos de 2 MiB para DMA e 8 MiB para o runtime.
-Heap, JavaScript e drivers passam a crescer conforme a RAM física disponível.
-`free` mostra memória descoberta, endereçável, reservada, alocada e livre;
-`memtest 96` verifica 96 MiB de heap + DMA e a devolução das páginas.
-
-O kernel permanece i386 sem PAE: RAM remapeada acima de 4 GiB é informada, mas
-ainda não pode ser alocada. Isso inclui parte dos 4 GiB instalados em máquinas
-que remapeiam RAM por causa de MMIO. Detalhes e testes: [memória física](docs/physical-memory.md).
-
-### Consumo de RAM por processo
-
-O Task Manager mostra **RAM** por PID (páginas de heap + pilhas + tabelas de
-páginas), com arenas físicas exclusivas por processo e liberação no encerramento.
-O kernel mantém sua própria conta de drivers e buffers compartilhados, sem contar
-novamente o heap dos apps. `ps` detalha RAM, heap e pilha. Não há quota fixa por
-PID; os backends continuam sendo serviços do kernel, sem isolamento completo de
-heaps de usuário. [Implementação e testes](docs/process-memory.md).
-
-O relógio da barra superior abre um calendário mensal. Em **Configurações > Data e hora**,
-é possível ajustar data/hora offline, escolher o fuso UTC e sincronizar por NTP
-com `time.cloudflare.com` (servidor configurável). Veja [calendário e horário](docs/calendar.md)
-para comandos, persistência, limites e testes.
+</div>
