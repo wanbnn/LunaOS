@@ -64,8 +64,8 @@ static void one(const WifiPortTarget *t, unsigned aux) {
     assert(!p.pci_present);
 }
 int main(void) {
-    assert(wifi_port_target_count() == 7);
-    assert(!wifi_port_target(7) && !wifi_port_match(0xffff, 0xffff));
+    assert(wifi_port_target_count() == 8);
+    assert(!wifi_port_target(8) && !wifi_port_match(0xffff, 0xffff));
     for (unsigned i = 0; i < wifi_port_target_count(); i++) {
         const WifiPortTarget *t = wifi_port_target(i);
         assert(t && wifi_port_match(t->vendor, t->device) == t);
