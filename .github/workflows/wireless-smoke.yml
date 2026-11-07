@@ -25,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Unit tests (simulated PCI, firmware, scan and connect)
-        run: make test-wifi-port test-wireless-frames test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware test-wifi-scan test-rtw8822be-rx-dma test-wpa2 test-wifi-ccmp test-wifi-station
+        run: make test-wifi-port test-wireless-frames test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware test-wifi-scan test-rtw8822be-rx-dma test-rtw8822be-tx-dma test-wifi-client test-wpa2 test-wifi-ccmp test-wifi-station
       - name: Build native sources in freestanding i386 mode
         run: |
           sudo apt-get update
