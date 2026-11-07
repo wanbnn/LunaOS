@@ -30,6 +30,12 @@
       "source": "https://raw.githubusercontent.com/torvalds/linux/master/drivers/net/wireless/realtek/rtw88/rtw8821ce.c"
     },
     {
+      "name": "Realtek RTL8822BE",
+      "pci": "10ec:b822",
+      "state": "port_pending",
+      "source": "https://raw.githubusercontent.com/torvalds/linux/master/drivers/net/wireless/realtek/rtw88/rtw8822be.c"
+    },
+    {
       "name": "Realtek RTL8822CE",
       "pci": "10ec:c822",
       "state": "port_pending",

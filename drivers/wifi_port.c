@@ -12,6 +12,8 @@ static const WifiPortTarget targets[] = {
      "rtw88/rtw8821c_fw.bin", 0},
     {0x10ec, 0xb821, "Realtek RTL8821CE (alt PCI ID)", "rtw88", WIFI_RTW88,
      "rtw88/rtw8821c_fw.bin", 0},
+    {0x10ec, 0xb822, "Realtek RTL8822BE", "rtw88", WIFI_RTW88,
+     "rtw88/rtw8822b_fw.bin", 0},
     {0x14c3, 0x7612, "MediaTek MT7612E", "mt76x2e", WIFI_MT76,
      "mt7662.bin", "mt7662_rom_patch.bin"},
     {0x168c, 0x0042, "Qualcomm QCA9377", "ath10k", WIFI_ATH10K,

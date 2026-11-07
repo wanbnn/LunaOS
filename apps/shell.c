@@ -1,3 +1,4 @@
+#include "../drivers/rtw8822be_diag.h"
 #include "driver.h"
 #include "install.h"
 #include "luna.h"
@@ -17,7 +18,7 @@ static const char *commands[] = {
     "uname",  "free",  "uptime",  "date",     "pci",     "net",     "ifconfig", "ping",  "wget",
     "browse", "audio", "beep",    "sync",     "history", "source",  "set",      "env",   "true",
     "false",  "sleep", "reboot",  "poweroff", "about",   "ps",      "tasks",    "kill",  "ringtest",
-    "js",     "bench", "drvinfo", "whoami",   "setup",   "drvtest", "fwinfo",   0};
+    "js",     "bench", "drvinfo", "whoami",   "setup",   "drvtest", "fwinfo",   "wifidiag", 0};
 #define CAP 8192
 static void emit(char *out, const char *s) {
     append(out, s, CAP);
@@ -546,6 +547,8 @@ static int execute(int argc, char **a, const char *input, char *out) {
         emit(out, account_name());
         emit(out, "\n");
         return 0;
+    } else if (!strcmp(c, "wifidiag")) {
+        return rtw8822be_diag(out, CAP) ? 1 : 0;
     } else if (!strcmp(c, "drvinfo")) {
         driver_services_status(out, CAP);
         return 0;
