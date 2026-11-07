@@ -129,6 +129,14 @@ static int efuse(struct rtw_dev *d) {
     d->efuse.rfe_option=logical[0xca];
     d->efuse.crystal_cap=logical[0xb9]==255 ? 0 : logical[0xb9]&63;
     d->efuse.channel_plan=logical[0xb8];
+    /* RTL8822BE PCIe logical efuse: station MAC starts at 0xD0 (not USB 0x107). */
+    memcpy(d->efuse.mac,logical+0xd0,6);
+    unsigned mac_bits=0;
+    for(unsigned i=0;i<6;i++) mac_bits|=d->efuse.mac[i];
+    if(!mac_bits || (d->efuse.mac[0]&1)) return -95;
+    bool all_ff=true;
+    for(unsigned i=0;i<6;i++) if(d->efuse.mac[i]!=255) all_ff=false;
+    if(all_ff) return -95;
     if(d->efuse.rfe_option!=2 && d->efuse.rfe_option!=3 && d->efuse.rfe_option!=5)
         return -95; /* No guessed antenna/front-end configuration. */
     return d->error;
