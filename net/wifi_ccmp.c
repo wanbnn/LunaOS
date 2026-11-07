@@ -52,7 +52,7 @@ static void crypt(const br_aes_ct_cbcenc_keys *k,const uint8_t *f,
     }
     zero(n,sizeof(n));zero(b,sizeof(b));
 }
-static int header(const uint8_t *f,size_t len,bool protected) {
+static int header(const uint8_t *f,size_t len,bool protected,bool from_ds) {
     if(!f || len<24 || f[0]!=0x08 || (f[1]&0x03)!=0x01 ||
        (f[1]&0x80) || (f[22]&15) || (f[1]&0x0c) ||
        !!(f[1]&0x40)!=protected) return ERR_INVAL;
@@ -72,7 +72,7 @@ int wifi_ccmp_install(WifiCcmp *s,const Wpa2Keys *keys) {
 }
 void wifi_ccmp_clear(WifiCcmp *s) { if(s) zero(s,sizeof(*s)); }
 int wifi_ccmp_encrypt(WifiCcmp *s,uint8_t *f,size_t *length,size_t cap) {
-    if(!s || !s->active || !f || !length || header(f,*length,false)) return ERR_INVAL;
+    if(!s || !s->active || !f || !length || header(f,*length,false,false)) return ERR_INVAL;
     size_t n=*length-24;
     if(n>2296 || *length>cap || cap-*length<16) return ERR_NOSPC;
     if(s->tx_pn==0xffffffffffffULL) return ERR_OVERFLOW;
@@ -92,7 +92,7 @@ int wifi_ccmp_encrypt(WifiCcmp *s,uint8_t *f,size_t *length,size_t cap) {
 }
 int wifi_ccmp_decrypt(WifiCcmp *s,uint8_t *f,size_t *length) {
     if(!s || !s->active || !f || !length || *length<40 ||
-       header(f,*length,true)) return ERR_INVAL;
+       header(f,*length,true,true)) return ERR_INVAL;
     uint8_t *iv=f+24;
     if(iv[2]!=0 || (iv[3]&0x3f)!=0x20) return ERR_ACCESS;
     unsigned keyid=iv[3]>>6;
