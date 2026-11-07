@@ -302,7 +302,7 @@ faz duas leituras do setor zero sem escrever.
 | SATA/AHCI | DMA, IDENTIFY, READ/WRITE/FLUSH | LBA48/512 B, polling |
 | NVMe | Filas admin + I/O, Identify, READ/WRITE/FLUSH | Namespace 1/512 B, polling, PCI MMIO <4 GiB |
 | USB mass storage | EHCI + enumeração + BOT/SCSI READ/WRITE/SYNCHRONIZE CACHE | USB 2 high-speed em porta raiz, LUN0, 512 B; sem xHCI, hubs ou UAS |
-| eMMC/SDHCI | Inicialização SD/MMC, capacidade, READ/WRITE e flush | SDHC/SDXC ou eMMC em modo setor, PIO 1-bit, 512 B, área de usuário |
+| eMMC/SDHCI | Descoberta PCI/ACPI, inicialização SD/MMC, capacidade, READ/WRITE e flush | SDHC/SDXC ou eMMC em modo setor, PIO 1-bit, 512 B, área de usuário |
 | RAID | MegaRAID MFI: lista de volumes lógicos, READ/WRITE, cache flush | SAS1078/2108, volumes existentes de 512 B; sem Intel RST/VMD ou criação de arrays |
 
 **Detecção PCI continua distinta de suporte funcional.** O kernel só publica
@@ -315,4 +315,5 @@ O boot UEFI entrega uma cópia da imagem na RAM; a resolução por ID MBR pode
 selecionar depois o disco físico reconhecido por um desses drivers.
 O filesystem de dados ainda não é redimensionável.
 
-Veja [projeto do armazenamento](docs/storage.md).
+Veja [projeto do armazenamento](docs/storage.md). Execute `make test-storage-matrix`
+para simular todos os backends implementados, incluindo eMMC sem PCI via ACPI.

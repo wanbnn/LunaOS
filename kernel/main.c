@@ -1,3 +1,4 @@
+#include "acpi.h"
 #include "../ui/calendar.h"
 #include "boot.h"
 #include "clock.h"
@@ -27,6 +28,7 @@ void kmain(void) {
     task_init();
     driver_services_init();
     storage_pci_init();
+    acpi_storage_init();
     disk_resolve_native_boot();
     fs_init();
     settings_init();

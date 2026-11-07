@@ -135,6 +135,18 @@ static int memory_handoff(uint8_t *buffer,uint64_t size,uint64_t stride,uint8_t 
  if(used>128) return 0;
  *(uint32_t *)out=used;memcpy(out+4,regions,used*sizeof(Region));return 1;
 }
+/* ACPI table addresses survive ExitBootServices in ACPI reclaim/NVS memory. */
+static uint64_t find_rsdp(EFI_SYSTEM_TABLE *table) {
+ const EFI_GUID acpi2={0x8868e871,0xe4f1,0x11d3,{0xbc,0x22,0x00,0x80,0xc7,0x3c,0x88,0x81}};
+ const EFI_GUID acpi1={0xeb9d2d30,0x2d88,0x11d3,{0x9a,0x16,0x00,0x90,0x27,0x3f,0xc1,0x4d}};
+ typedef struct {EFI_GUID guid;void *address;} Entry;
+ Entry *entries=table->Configuration;uint64_t legacy=0;
+ for(uint64_t i=0;i<table->Entries && i<4096;i++) {
+  if(equal(&entries[i].guid,&acpi2,sizeof(acpi2)))return (uintptr_t)entries[i].address;
+  if(equal(&entries[i].guid,&acpi1,sizeof(acpi1)))legacy=(uintptr_t)entries[i].address;
+ }
+ return legacy;
+}
 EFI_STATUS efi_main(EFI_HANDLE image,EFI_SYSTEM_TABLE *table) {
  system_table=table;bs=table->Boot;
  if(!relocation_anchor) return EFI_NOT_FOUND;
@@ -160,6 +172,7 @@ EFI_STATUS efi_main(EFI_HANDLE image,EFI_SYSTEM_TABLE *table) {
  if(!setup_gop(prefix)) return error("no supported GOP framebuffer below 4 GiB");
  prefix[0x1f00]=0x80;memcpy(prefix+0x1f04,rom+440,4);memcpy(prefix+0x1f08,rom+444,2);memcpy(prefix+0x1f0c,rom+432,4);
  uint32_t *boot=(void *)(prefix+0x1f10);boot[0]=0x55454649;boot[1]=1;boot[2]=(uintptr_t)rom;boot[3]=IMAGE_BYTES;
+ uint64_t rsdp=find_rsdp(table);boot[4]=(uint32_t)rsdp;boot[5]=(uint32_t)(rsdp>>32);
  uint64_t *pml4=(void *)(bootstrap+8192),*pdpt=(void *)(bootstrap+12288);
  pml4[0]=(uintptr_t)pdpt|3;
  for(unsigned i=0;i<4;i++) {

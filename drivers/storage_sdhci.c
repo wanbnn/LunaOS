@@ -9,7 +9,8 @@ typedef struct {
     uint32_t rca;
     unsigned phase, last_cmd;
     uint32_t last_status;
-    bool embedded;
+    bool embedded, platform, platform_embedded;
+    uint32_t physical;
     uint64_t sectors;
     bool used, ready, mmc, cache, write_protected;
 } SdHost;
@@ -134,7 +135,7 @@ static bool clock_set(SdHost *h,unsigned hz) {
 static bool card_init(SdHost *h) {
     h->phase=1;
     uint32_t caps=rd(h,0x40,4);
-    h->embedded=sdhci_pci_embedded(h->pci.vendor,h->pci.device) ||
+    h->embedded=h->platform_embedded || sdhci_pci_embedded(h->pci.vendor,h->pci.device) ||
         ((caps>>30)&3u)==1u;
     /* Soldered eMMC has neither a card-detect switch nor a WP pin. */
     if(!h->embedded && !wait_bits(h,0x24,4,1u<<16,1u<<16,100))return false;
@@ -231,6 +232,22 @@ static int pci_power_on(SdHost *h) {
     }
     return cap?DRV_EINVAL:0;
 }
+static void diagnose(SdHost *h) {
+    {char text[16];strcpy(last_reason,"SDHCI phase ");number(text,h->phase);
+    append(last_reason,text,sizeof(last_reason));append(last_reason," CMD",sizeof(last_reason));
+    number(text,h->last_cmd);append(last_reason,text,sizeof(last_reason));
+    append(last_reason," status=",sizeof(last_reason));hex(text,h->last_status);
+    append(last_reason,text,sizeof(last_reason));
+    if(h->io.base) {
+        append(last_reason," present=",sizeof(last_reason));hex(text,rd(h,0x24,4));
+        append(last_reason,text,sizeof(last_reason));
+        append(last_reason," caps=",sizeof(last_reason));hex(text,rd(h,0x40,4));
+        append(last_reason,text,sizeof(last_reason));
+        append(last_reason," ver=",sizeof(last_reason));hex(text,rd(h,0xfe,2));
+        append(last_reason,text,sizeof(last_reason));
+    }
+    serial_write(last_reason);serial_write("\n");}
+}
 int storage_sdhci_probe(uint8_t bus,uint8_t slot,uint8_t fn) {
     strcpy(last_reason,"SDHCI: no host slot available");
     SdHost *h=0;
@@ -248,6 +265,7 @@ int storage_sdhci_probe(uint8_t bus,uint8_t slot,uint8_t fn) {
     if(pci_power_on(h))goto fail;
     if(drv_pci_map(&h->pci,0,&h->io) || h->io.size<0x100 ||
        drv_pci_enable(&h->pci,false,true) || !card_init(h))goto fail;
+    h->physical=pci_read(bus,slot,fn,0x10)&~15u;
     h->ready=true;
     bool ro=h->write_protected || (!h->mmc && !(rd(h,0x24,4)&(1u<<19)));
     StorageDevice d={.ctx=h,.transfer=transfer,.flush=flush,.sectors=h->sectors,
@@ -258,20 +276,32 @@ int storage_sdhci_probe(uint8_t bus,uint8_t slot,uint8_t fn) {
     if(storage_register(&d)<0)goto fail;
     h->used=true;return 1;
 fail:
-    {char text[16];strcpy(last_reason,"SDHCI phase ");number(text,h->phase);
-    append(last_reason,text,sizeof(last_reason));append(last_reason," CMD",sizeof(last_reason));
-    number(text,h->last_cmd);append(last_reason,text,sizeof(last_reason));
-    append(last_reason," status=",sizeof(last_reason));hex(text,h->last_status);
-    append(last_reason,text,sizeof(last_reason));
-    if(h->io.base) {
-        append(last_reason," present=",sizeof(last_reason));hex(text,rd(h,0x24,4));
-        append(last_reason,text,sizeof(last_reason));
-        append(last_reason," caps=",sizeof(last_reason));hex(text,rd(h,0x40,4));
-        append(last_reason,text,sizeof(last_reason));
-        append(last_reason," ver=",sizeof(last_reason));hex(text,rd(h,0xfe,2));
-        append(last_reason,text,sizeof(last_reason));
-    }
-    serial_write(last_reason);serial_write("\n");}
+    diagnose(h);
     if(h->io.base){wr(h,0x2c,2,0);drv_mmio_unmap(&h->io);}
     drv_pci_release(&h->pci);memset(h,0,sizeof(*h));return DRV_ENOTSUP;
+}
+
+/* Same data path as PCI; discovery and ownership come from ACPI _CRS. */
+int storage_sdhci_platform_probe(uint32_t physical,uint32_t length,bool embedded) {
+    SdHost *h=0;
+    strcpy(last_reason,"SDHCI ACPI: no host slot available");
+    for(unsigned i=0;i<4;i++) {
+        if(hosts[i].used && hosts[i].physical==physical)return DRV_EALREADY;
+        if(!hosts[i].used && !h)h=&hosts[i];
+    }
+    if(!h)return DRV_ENOSPC;
+    *h=(SdHost){.platform=true,.platform_embedded=embedded,.physical=physical,.phase=8};
+    if(drv_platform_map(physical,length,&h->io) || !card_init(h))goto fail;
+    h->ready=true;
+    bool ro=h->write_protected || (!h->mmc && !(rd(h,0x24,4)&(1u<<19)));
+    StorageDevice d={.ctx=h,.transfer=transfer,.flush=flush,.sectors=h->sectors,
+        .logical_bytes=512,.transport=STORAGE_EMMC,.removable=!h->mmc,
+        .readonly=ro,.installable=!ro};
+    strcpy(d.model,h->mmc?"ACPI MMC/eMMC user area":"ACPI SDHC/SDXC card");
+    if(storage_register(&d)<0)goto fail;
+    h->used=true;return 1;
+fail:
+    diagnose(h);
+    if(h->io.base){wr(h,0x2c,2,0);drv_mmio_unmap(&h->io);}
+    memset(h,0,sizeof(*h));return DRV_ENOTSUP;
 }

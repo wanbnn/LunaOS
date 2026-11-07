@@ -11,7 +11,17 @@ from guest import ROOT, TEST, Guest, env, qemu
 
 def device_args(kind, path, readonly=False):
     args = ["-drive", f"file={path},format=raw,if=none,id=target" + (",readonly=on" if readonly else "")]
-    if kind == "usb":
+    if kind == "ide":
+        args += ["-device", "ide-hd,drive=target,bus=ide.0,unit=1"]
+    elif kind == "ahci":
+        args += ["-device", "ich9-ahci,id=hc", "-device", "ide-hd,drive=target,bus=hc.0"]
+    elif kind == "nvme":
+        args += ["-device", "nvme,serial=LUNAMATRIX01,drive=target"]
+    elif kind == "emmc-acpi":
+        if not os.environ.get("LUNA_ACPI_STORAGE_FIXTURE") or not os.environ.get("LUNA_QEMU"):
+            raise RuntimeError("emmc-acpi requires the pinned non-PCI QEMU fixture")
+        args += ["-acpitable", f"file={ROOT}/build/emmc-acpi.aml", "-device", "emmc,drive=target"]
+    elif kind == "usb":
         args += ["-device", "usb-ehci,id=hc", "-device", "usb-storage,drive=target,bus=hc.0"]
     elif kind in ("sdhci", "emmc"):
         args += ["-device", "sdhci-pci,id=hc", "-device", f"{'emmc' if kind == 'emmc' else 'sd-card'},drive=target"]
@@ -24,7 +34,7 @@ def device_args(kind, path, readonly=False):
 
 
 def supports_kind(kind):
-    if kind != "emmc":
+    if kind not in ("emmc", "emmc-acpi"):
         return True
     available = subprocess.check_output([qemu, "-device", "help"], env=env, text=True)
     if 'name "emmc"' in available:
@@ -62,7 +72,7 @@ def readonly_case(kind):
 
 
 def main():
-    for kind, label in [("usb", "USB"), ("sdhci", "eMMC/SDHCI"), ("emmc", "eMMC/SDHCI"), ("raid", "RAID"), ("raid2", "RAID")]:
+    for kind, label in [("ide", "IDE"), ("ahci", "SATA/AHCI"), ("nvme", "NVMe"), ("emmc-acpi", "eMMC/SDHCI"), ("usb", "USB"), ("sdhci", "eMMC/SDHCI"), ("emmc", "eMMC/SDHCI"), ("raid", "RAID"), ("raid2", "RAID")]:
         if kind not in os.environ.get("LUNA_STORAGE_KINDS", "usb sdhci emmc raid raid2").split():
             continue
         if not supports_kind(kind):
@@ -71,15 +81,23 @@ def main():
         target = TEST / f"interfaces-{kind}-target.img"
         shutil.copyfile(ROOT / "dist/LunaOS.img", source)
         with target.open("wb") as stream:
-            stream.truncate((4096 if kind in ("sdhci", "emmc") else 128) * 1024 * 1024)
+            stream.truncate((4096 if kind in ("sdhci", "emmc", "emmc-acpi") else 128) * 1024 * 1024)
             stream.write(b"READ ONLY NATIVE STORAGE TEST " + kind.encode())
         before = image_digest(target)
         g = Guest(source, extra_args=device_args(kind, target), ram=256)
         try:
             status = g.command("storage", "Storage:")
             match = re.search(r"disk(\d+) " + re.escape(label) + r" .*\[installable\]", status)
-            assert match, status + "\n" + g.transcript[-4000:]
-            g.command("storage verify " + match.group(1), "two consistent physical reads", timeout=40)
+            if kind=="ide":
+                assert "IDE1: QEMU HARDDISK" in status, status
+                target_index="1"
+            else:
+                assert match, status + "\n" + g.transcript[-4000:]
+                target_index=match.group(1)
+            if kind=="emmc-acpi":
+                assert "no PCI SDHCI host found" in status and "ACPI 80860F14:" in status, status
+                assert "driver ready" in status, status
+            g.command("storage verify " + target_index, "two consistent physical reads", timeout=40)
         finally:
             g.close()
         assert image_digest(target) == before, f"{kind} target modified"

@@ -1,4 +1,5 @@
 #include "storage.h"
+#include "acpi.h"
 #include "../drivers/storage_sdhci_policy.h"
 
 typedef struct {
@@ -174,7 +175,8 @@ void storage_status(char *out,size_t cap) {
         }
         append(out,"\n",cap);
     }
-    if(!sdhci_found)append(out,"eMMC: no PCI SDHCI host found; ACPI-only hosts need a platform driver.\n",cap);
+    if(!sdhci_found)append(out,"eMMC: no PCI SDHCI host found; checking ACPI namespace.\n",cap);
+    acpi_storage_status(out,cap);
 }
 
 /* Non-destructive two-read check, never modifies the target's partition table. */

@@ -8,6 +8,7 @@
 #define LUNA_ESP_SECTOR (LUNA_CORE_BYTES / 512u)
 typedef struct {
     uint32_t magic, version, ram_image, ram_bytes;
+    uint32_t rsdp_low, rsdp_high; /* optional v1 extension; zero in old loaders */
 } UefiBootInfo;
 static inline bool boot_is_uefi(void) {
     return LUNA_UEFI_INFO->magic == LUNA_UEFI_MAGIC && LUNA_UEFI_INFO->version == 1;

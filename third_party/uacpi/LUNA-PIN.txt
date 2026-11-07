@@ -1,0 +1,5 @@
+Repository: https://github.com/UltraOS/uACPI
+Commit: c0edecef62bcac6ce3f783540099190bafadadda
+License: MIT (LICENSE)
+Use: AML namespace and ACPI storage resource discovery; no SCI/GPE ownership.
+Upstream tests and CI fixtures omitted; source and public headers preserved.

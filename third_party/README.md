@@ -19,3 +19,11 @@ notices in /etc/licenses. Root CA data in assets/tls is a pinned public CA snaps
 a development CA or its private key is never included in the release image.
 
 WebKit is **not** integrated. See docs/browser-engine.md for the actual missing work.
+
+## uACPI
+
+`uacpi/` contains the MIT-licensed AML interpreter and resource parser, pinned
+at `c0edecef62bcac6ce3f783540099190bafadadda` (upstream 7.0.0). See
+`uacpi/LUNA-PIN.txt` and `uacpi/LICENSE`. Upstream test fixtures are omitted.
+The kernel uses the reduced-hardware build for boot-time ACPI storage discovery,
+without SCI/GPE takeover. The license is also included in `/etc/licenses/uACPI.txt`.

@@ -4,6 +4,17 @@ on:
     branches: [feat/native-storage-stack, main]
     paths:
       - 'kernel/storage.*'
+      - 'kernel/acpi*'
+      - 'kernel/boot.h'
+      - 'kernel/driver.h'
+      - 'kernel/task.c'
+      - 'tests/guest.py'
+      - 'tools/notices.py'
+      - 'boot/uefi.c'
+      - 'drivers/driver_pci.c'
+      - 'tests/fixtures/storage/**'
+      - 'tools/storage/**'
+      - 'third_party/uacpi/**'
       - 'drivers/storage_*'
       - 'drivers/ata.c'
       - 'ui/setup.c'
@@ -14,6 +25,17 @@ on:
   pull_request:
     paths:
       - 'kernel/storage.*'
+      - 'kernel/acpi*'
+      - 'kernel/boot.h'
+      - 'kernel/driver.h'
+      - 'kernel/task.c'
+      - 'tests/guest.py'
+      - 'tools/notices.py'
+      - 'boot/uefi.c'
+      - 'drivers/driver_pci.c'
+      - 'tests/fixtures/storage/**'
+      - 'tools/storage/**'
+      - 'third_party/uacpi/**'
       - 'drivers/storage_*'
       - 'drivers/ata.c'
       - 'ui/setup.c'
@@ -24,22 +46,31 @@ on:
 jobs:
   storage-unit-and-boot:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Install freestanding and virtual-machine toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-multilib libc6-dev-i386 clang lld python3-pip qemu-system-x86
+          sudo apt-get install -y gcc-multilib libc6-dev-i386 clang lld python3-pip qemu-system-x86 ovmf ninja-build pkgconf libglib2.0-dev acpica-tools
           mkdir -p .tools/python build dist
           python3 -m pip install --target .tools/python -r requirements-dev.txt
       - name: Test block-device contracts and PCI dispatch
         run: make test-storage test-storage-sdhci
       - name: Compile complete BIOS and UEFI distributions
         run: make -j2 all
-      - name: Test non-destructive SATA/NVMe I/O inside LunaOS/QEMU
-        run: make test-storage-guest
-      - name: Test EHCI/BOT, SDHCI, eMMC and MegaRAID physical reads
-        run: make test-storage-interfaces
-      - name: Install on disposable native disk images (write/readback/flush verification)
-        run: make test-storage-install
+      - name: Build pinned non-PCI SDHCI ACPI fixture and run strict storage matrix
+        run: make test-storage-matrix
+      - name: Preserve per-backend evidence (including failures)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: storage-simulation-evidence
+          path: |
+            dist/storage-matrix-report.*
+            build/storage-matrix/**/run.log
+            build/storage-matrix/**/transcript.log
+            build/storage-matrix/**/install-report.json
+            build/storage-matrix/**/negative-report.json
+            build/storage-matrix/**/high-mmio-report.json
+            build/storage-matrix/**/run.high-mmio.log

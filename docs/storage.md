@@ -34,7 +34,7 @@ uma partição de dados com gerenciamento de espaço e drivers correspondentes.
 | AHCI/SATA PCI class `010601` | **Experimental** | IDENTIFY, LBA48 DMA EXT, cache flush | BAR5 abaixo 4 GiB, 512B lógico, 64 setores por comando, polling |
 | NVMe PCI class `010802` | **Experimental** | Identify ctrl/ns1, fila admin+I/O, leitura, gravação, flush | 4 KiB PRP, 512B LBA, 8 setores por comando, polling; sem namespaces adicionais |
 | USB EHCI (`0c0320`) | **Experimental** | Enumeração, BOT/SCSI INQUIRY, READ CAPACITY, MODE SENSE, READ/WRITE(10), SYNCHRONIZE CACHE | High-speed em porta raiz, LUN0, 512 B, 32 setores por comando; sem hubs, UAS, xHCI/OHCI/UHCI |
-| SDHCI/eMMC (`080500/080501`) | **Experimental** | CMD0/1/2/3/7/8/9/13/17/24, SD ACMD41, eMMC EXT_CSD/cache flush | PIO 1-bit até 25 MHz; SDHC/SDXC e eMMC com OCR sector mode, 512 B, área de usuário |
+| SDHCI/eMMC (PCI ou ACPI `_HID`/`_CRS`) | **Experimental** | CMD0/1/2/3/7/8/9/13/17/24, SD ACMD41, eMMC EXT_CSD/cache flush | PIO 1-bit até 25 MHz; SDHC/SDXC e eMMC com OCR sector mode, 512 B, área de usuário |
 | RAID MegaRAID MFI (`1000:0060/0079`) | **Experimental** | Inicializa fila, lista volumes, SCSI READ CAPACITY/MODE SENSE, LD READ/WRITE, DCMD cache flush | SAS1078/2108; volumes existentes, 512 B; não cria arrays nem escreve em membros físicos |
 
 **Nenhum backend de instalação é automaticamente universal.** IOMMU, MSI,
@@ -126,8 +126,8 @@ MODE SENSE verifica proteção contra escrita do volume lógico. A
 disposição dos membros e a paridade continuam sob responsabilidade do
 firmware RAID. Nenhum comando de configuração de array é emitido.
 
-Os testes em QEMU não validam hardware físico, reinicialização pelo disco de
-destino nem recuperação de falta de energia. Permanecem pendentes xHCI,
+Os testes em QEMU não certificam hardware físico, boot pelo firmware de cada
+controlador nem recuperação de falta de energia. Permanecem pendentes xHCI,
 hubs, UAS, Intel RST/VMD, software RAID, GPT, 4Kn, LBA64 e filesystem escalável.
 
 Referências de protocolo e modelos usados para validação:
@@ -159,9 +159,62 @@ Esses testes não substituem o reteste no HP Stream físico.
 
 Se o disco não aparecer, iniciar o modo live e executar `storage`: o comando
 agora mostra fase, CMD, status, present-state, capabilities, versão SDHCI e
-ID PCI da falha. Se não encontrar nenhum host PCI, avisa explicitamente que
-controladores expostos somente por ACPI ainda precisam de driver de plataforma.
-Não há varredura especulativa de endereços MMIO nem interpretação AML.
+ID PCI da falha. Sem host PCI, percorre o namespace ACPI com uACPI e avalia `_HID`, `_UID`,
+`_STA`, `_INI`, `_PR0`/`_ON`, `_PS0` e `_CRS` dos dispositivos compatíveis.
+Não há varredura especulativa de endereços MMIO. Falhas de AML/energia e
+recursos ambíguos ou em RAM impedem publicar o dispositivo.
 
 Referências: [IDs e hosts eMMC Intel no Linux](https://github.com/torvalds/linux/blob/master/drivers/mmc/host/sdhci-pci-core.c),
 [divisores e sinalização SDHCI](https://github.com/torvalds/linux/blob/master/drivers/mmc/host/sdhci.c).
+
+### Matriz de simulação completa desta etapa
+
+```sh
+make test-storage-matrix
+```
+
+O comando compila o QEMU **10.2.0 fixado por SHA-256**, aplica o fixture em
+`tests/fixtures/storage/qemu-10.2.0-acpi-emmc.patch` e executa os nove perfis:
+IDE, AHCI, NVMe, USB EHCI/BOT, SDHC, eMMC PCI, eMMC ACPI/MMIO, MegaRAID
+SAS1078 e SAS2108. Cada perfil exige leitura física, instalação completa de
+66 MiB com escrita/leitura de retorno/flush e início da ISO por UEFI com o
+mesmo tipo de armazenamento. Também injeta `EIO` na escrita de LBA1 em cada
+backend e exige que o instalador aborte sem confirmar a assinatura de boot.
+Não há SKIP aceito na matriz estrita.
+
+O cenário ACPI cria um SDHCI **System Bus**, sem função PCI, em `0xfed80000`;
+a SSDT é a única descoberta disponível. Usa clock base de 200 MHz, alimentação
+de 1,8 V, sem pinos CD/WP e exige `_PR0`/`_ON`/`_PS0` para entregar `_CRS`.
+O fixture QEMU só é habilitado por `LUNA_ACPI_STORAGE_FIXTURE=1` e não faz
+parte da imagem LunaOS. Também completa o modelo MMC com a faixa OCR de
+1,7–1,95 V, ausente no modelo original. O guest não conhece esse endereço
+fixo: ele o obtém exclusivamente dos recursos ACPI.
+
+Há casos negativos para xHCI sem driver, NVMe 4Kn, slot SD vazio, `_STA`
+ausente, UID de SDIO, recurso sobre RAM e sequência de energia incompleta.
+Mídias USB e MegaRAID protegidas são excluídas da instalação. Os testes UEFI
+positivos pedem ao OVMF MMIO abaixo de 4 GiB (`X-PciMmio64Mb=0`), limite do
+kernel i386 sem PAE. Um conjunto negativo separado mantém a configuração
+padrão OVMF e verifica por QMP que BARs NVMe/MegaRAID foram alocados acima
+de 4 GiB e corretamente rejeitados, sem truncar endereços ou escrever dados. Esses passes
+validam **rejeição**, não suporte a xHCI/4Kn.
+
+Os processos QEMU têm diretórios e sockets separados em `build/storage-matrix`.
+As imagens de destino são descartáveis; nenhum caminho `/dev/...` é usado.
+Após fechar QEMU, o teste compara todo o payload imutável da imagem e verifica
+que os snapshots persistidos contêm a configuração de instalação. Os relatórios
+são `dist/storage-matrix-report.json` e `.md`, com hashes da ISO/kernel,
+versão do emulador, resultado de cada fase e caminhos dos logs.
+
+Limites: suporte real ainda depende do hardware. Hosts com energia por EC/GPIO
+sem handler, Intel RST/VMD, UAS/xHCI, 4Kn e protocolos não implementados não
+se tornam funcionais por causa desses testes. ACPI funciona em boot-time,
+com SystemMemory/SystemIO/PCI segmento 0; SCI/GPE, hotplug e suspensão não
+estão habilitados. Boot pelo firmware no destino e falta de energia permanecem
+validações distintas da correção dos comandos de bloco.
+
+Para retomar uma execução parcial do **mesmo** kernel/ISO/fixture:
+`LUNA_STORAGE_RESUME=1 python3 tests/storage_matrix.py`. A retomada exige
+hashes iguais, preserva o relatório inicial e reaproveita somente fases
+concluídas; UEFI e rejeições são executados novamente. O conjunto EIO pode
+ser repetido isoladamente com `python3 tests/storage_fault_matrix.py`.

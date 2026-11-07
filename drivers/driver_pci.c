@@ -271,6 +271,22 @@ int drv_pci_map(DrvPci *p, unsigned bar, DrvMmio *out) {
     drv_irq_restore(flags);
     return DRV_ENOSPC;
 }
+/* ACPI resource-backed PIO devices have no PCI function to claim. */
+int drv_platform_map(uint32_t physical,uint32_t bytes,DrvMmio *out) {
+    if(!out || out->base || out->cookie || physical<0x100000 || !bytes ||
+       bytes>0x10000 || (uint64_t)physical+bytes>0x100000000ull ||
+       overlaps_ram(physical,bytes))return DRV_EINVAL;
+    uint32_t flags=drv_irq_save();
+    for(unsigned i=0;i<MAPPINGS;i++)if(!mappings[i].cookie) {
+        void *address=0;int rc=task_mmio_map(physical,bytes,&address);
+        if(rc){drv_irq_restore(flags);return rc;}
+        uint32_t id=cookie();
+        mappings[i].base=address;mappings[i].size=bytes;
+        mappings[i].cookie=id;mappings[i].owner=0;
+        *out=(DrvMmio){address,bytes,id};drv_irq_restore(flags);return 0;
+    }
+    drv_irq_restore(flags);return DRV_ENOSPC;
+}
 static int mapping_index(DrvMmio *mem) {
     if (!mem || !mem->cookie)
         return -1;

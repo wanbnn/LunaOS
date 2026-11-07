@@ -33,8 +33,9 @@ void append(char *out,const char *str,size_t cap) {
     memcpy(out+n,str,len);
     out[n+len]=0;
 }
-static unsigned ctx0,ctx1;
+static unsigned ctx0,ctx1=1;
 void storage_sdhci_reason(char *out,size_t cap){out[0]=0;append(out,"unsupported interface",cap);}
+void acpi_storage_status(char *out,size_t cap){(void)out;(void)cap;}
 static bool extended_ready, intel_class_quirk;
 static unsigned extended_ctx[]={2,3,4};
 static int extended_probe(uint8_t b,uint8_t s,uint8_t f,unsigned kind) {

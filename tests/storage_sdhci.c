@@ -50,6 +50,10 @@ int drv_pci_map(DrvPci *p,unsigned bar,DrvMmio *m) {
     *m=(DrvMmio){.base=regs,.size=sizeof(regs),.cookie=1};return 0;
 }
 int drv_mmio_unmap(DrvMmio *m){mapped=false;*m=(DrvMmio){0};return 0;}
+int drv_platform_map(uint32_t p,uint32_t n,DrvMmio *m) {
+    assert(p==0xfed80000 && n==4096);mapped=true;
+    *m=(DrvMmio){.base=regs,.size=sizeof(regs),.cookie=2};return 0;
+}
 int storage_register(const StorageDevice *d) {
     assert(!registered);registered=true;published=*d;return 5;
 }
@@ -126,6 +130,13 @@ int main(void) {
     assert(published.transfer(published.ctx,published.sectors,1,back,false)==DRV_EINVAL);
     ((SdHost *)published.ctx)->write_protected=true;
     assert(published.transfer(published.ctx,7,1,data,true)==DRV_ENOTSUP);
+    setup_model(0x1234); /* no PCI eMMC ID, ACPI supplied a fixed MMIO resource */
+    assert(storage_sdhci_platform_probe(0xfed80000,4096,true)==1 && registered);
+    assert(!pmcsr && published.installable && published.sectors==134217728u);
+    assert(!published.transfer(published.ctx,7,1,data,true));
+    assert(!published.flush(published.ctx));
+    assert(!published.transfer(published.ctx,7,1,back,false) && !memcmp(data,back,512));
+    assert(storage_sdhci_platform_probe(0xfed80000,4096,true)==DRV_EALREADY);
     setup_model(0x0f16); /* removable SD must still require card detect */
     assert(storage_sdhci_probe(0,5,0)<0 && !registered && !commands[1]);
     setup_model(0x5acc);fail_cmd=1;

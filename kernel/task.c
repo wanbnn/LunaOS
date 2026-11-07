@@ -475,7 +475,7 @@ void task_ring_tests(char *out, size_t cap) {
 }
 
 /* Dedicated virtual arena shared by all CR3s, never mapped user-accessible. */
-int task_mmio_map(uint32_t physical, uint32_t bytes, void **out) {
+static int physical_map(uint32_t physical, uint32_t bytes, void **out, uint32_t attributes) {
     if (!initialized || !out || !bytes || (uint64_t)physical + bytes > 0x100000000ull)
         return DRV_EINVAL;
     uint32_t offset = physical & 4095;
@@ -497,7 +497,7 @@ int task_mmio_map(uint32_t physical, uint32_t bytes, void **out) {
             if (j)
                 mmio_lengths[i + j] = 0xffff;
             mmio_tables[(i + j) / 1024][(i + j) % 1024] =
-                ((physical & ~4095u) + j * 4096u) | 0x1b; /* P/W, PWT, PCD; supervisor. */
+                ((physical & ~4095u) + j * 4096u) | attributes; /* supervisor-only physical mapping */
             __asm__ volatile("invlpg (%0)" ::"r"(MMIO_BASE + (i + j) * 4096u) : "memory");
         }
         *out = (void *)(MMIO_BASE + i * 4096u + offset);
@@ -506,6 +506,12 @@ int task_mmio_map(uint32_t physical, uint32_t bytes, void **out) {
     }
     drv_irq_restore(flags);
     return DRV_ENOSPC;
+}
+int task_mmio_map(uint32_t physical,uint32_t bytes,void **out) {
+    return physical_map(physical,bytes,out,0x1b);
+}
+int task_physical_map_cached(uint32_t physical,uint32_t bytes,void **out) {
+    return physical_map(physical,bytes,out,3);
 }
 int task_mmio_unmap(void *address, uint32_t bytes) {
     uintptr_t p = (uintptr_t)address;

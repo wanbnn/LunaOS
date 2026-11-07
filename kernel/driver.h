@@ -101,6 +101,8 @@ int drv_irq_free(DrvIrq *);
 void driver_irq_dispatch(unsigned line);
 /* Paging backend, shared supervisor-only mappings, internal to driver services. */
 int task_mmio_map(uint32_t physical, uint32_t bytes, void **virtual_address);
+int task_physical_map_cached(uint32_t physical, uint32_t bytes, void **virtual_address);
+int drv_platform_map(uint32_t physical, uint32_t bytes, DrvMmio *out);
 int task_mmio_unmap(void *virtual_address, uint32_t bytes);
 
 #define DRV_PACKET_CAP 4096

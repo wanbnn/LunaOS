@@ -5,6 +5,8 @@ PYTHON ?= python3
 # Local build-only dependencies may also be installed with tools/bootstrap.sh.
 export PYTHONPATH := $(CURDIR)/.tools/python:$(PYTHONPATH)
 CFLAGS := -m32 -std=gnu11 -O2 -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -fno-asynchronous-unwind-tables -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Ikernel -Ibuild
+UACPI_FLAGS := -Ithird_party/uacpi/include -DUACPI_REDUCED_HARDWARE -DUACPI_DEFAULT_LOG_LEVEL=UACPI_LOG_WARN -DUACPI_DEFAULT_LOOP_TIMEOUT_SECONDS=3 -DUACPI_DEFAULT_MAX_CALL_STACK_DEPTH=64
+UACPI_OBJECTS := $(patsubst third_party/uacpi/source/%.c,build/uacpi/%.o,$(wildcard third_party/uacpi/source/*.c))
 SOURCES := $(wildcard kernel/*.c drivers/*.c lib/*.c ui/*.c apps/*.c net/*.c net/wireless/*.c)
 MUSLINC := -nostdinc -isystem third_party/musl/include -isystem third_party/musl/arch/i386 -isystem third_party/musl/arch/generic -isystem third_party/musl/obj/include -isystem $(shell $(CC) -print-file-name=include)
 LIBGCC32 := $(firstword $(wildcard .tools/usr/lib/gcc/*/*/32/libgcc.a /usr/lib/gcc/*/*/32/libgcc.a))
@@ -12,15 +14,19 @@ NATIVEFLAGS := -fexcess-precision=standard -m32 -Os -ffreestanding -fno-builtin 
 BEAR_SOURCES := $(shell find third_party/bearssl/src -name "*.c" | sort)
 BEAR_OBJECTS := $(patsubst third_party/bearssl/%.c,build/bearssl/%.o,$(BEAR_SOURCES))
 JS_OBJECTS := $(addprefix build/quickjs/,$(addsuffix .o,quickjs libregexp libunicode cutils dtoa))
-OBJECTS := $(patsubst %.c,build/%.o,$(SOURCES)) build/kernel/entry.o build/apps/user.o $(JS_OBJECTS)
+OBJECTS := $(patsubst %.c,build/%.o,$(SOURCES)) build/kernel/entry.o build/apps/user.o $(JS_OBJECTS) $(UACPI_OBJECTS)
 $(OBJECTS) $(BEAR_OBJECTS): Makefile
 $(patsubst %.c,build/%.o,$(SOURCES)): $(wildcard kernel/*.h ui/*.h drivers/*.h include/net/*.h)
 .PHONY: test-rtw8822be-rx-dma test-wifi-scan all clean run run-iso iso test test-iso-install check test-wifi-port test-wireless-frames test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
 all: dist/LunaOS.img dist/LunaOS.iso
 build/font.h: tools/fontgen.py assets/fonts/InterTight.ttf
 	$(PYTHON) tools/fontgen.py
-build/notices.h: tools/notices.py assets/fonts/OFL.txt assets/icons/lucide/LICENSE $(wildcard assets/licenses/*) third_party/quickjs/LICENSE third_party/musl/COPYRIGHT third_party/bearssl/LICENSE.txt third_party/stb/LICENSE
+build/notices.h: tools/notices.py assets/fonts/OFL.txt assets/icons/lucide/LICENSE $(wildcard assets/licenses/*) third_party/quickjs/LICENSE third_party/musl/COPYRIGHT third_party/bearssl/LICENSE.txt third_party/stb/LICENSE third_party/uacpi/LICENSE
 	$(PYTHON) tools/notices.py
+build/uacpi/%.o: third_party/uacpi/source/%.c $(shell find third_party/uacpi/include -name '*.h')
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(UACPI_FLAGS) -c $< -o $@
+build/kernel/acpi.o build/kernel/acpi_os.o: CFLAGS += $(UACPI_FLAGS)
 build/kernel/fs.o: build/notices.h
 build/icons.h: tools/icongen.py $(wildcard assets/icons/lucide/*)
 	$(PYTHON) tools/icongen.py
@@ -273,3 +279,14 @@ test-storage-sdhci:
 test-storage-emmc-iso: all
 	LUNA_TEST_DIR=build/test-emmc-iso $(PYTHON) tests/storage_emmc_iso.py
 	LUNA_UEFI=1 LUNA_TEST_DIR=build/test-emmc-iso-uefi $(PYTHON) tests/storage_emmc_iso.py
+
+.PHONY: storage-sim-setup test-storage-matrix
+storage-sim-setup:
+	$(PYTHON) tools/storage/build-qemu.py
+build/emmc-acpi.aml: tests/fixtures/storage/emmc-acpi.asl
+	@mkdir -p build
+	$(if $(wildcard .tools/usr/bin/iasl),.tools/usr/bin/iasl,iasl) -p build/emmc-acpi $<
+test-storage-matrix: all test-storage test-storage-sdhci
+	$(PYTHON) tools/storage/build-qemu.py
+	$(MAKE) build/emmc-acpi.aml
+	$(PYTHON) tests/storage_matrix.py

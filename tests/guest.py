@@ -15,9 +15,14 @@ TEST = ROOT / os.environ.get("LUNA_TEST_DIR", "build/test")
 TEST.mkdir(exist_ok=True)
 UEFI = os.environ.get("LUNA_UEFI") == "1"
 ARCH = "x86_64" if UEFI else "i386"
-qemu = shutil.which("qemu-system-" + ARCH)
+qemu = os.environ.get("LUNA_QEMU") or shutil.which("qemu-system-" + ARCH)
 env = os.environ.copy()
+if os.environ.get("LUNA_QEMU"):
+    env["LD_LIBRARY_PATH"] = str(ROOT / ".tools/usr/lib/x86_64-linux-gnu")
 firmware = []
+if os.environ.get("LUNA_QEMU"):
+    firmware_dir = ROOT / ".tools/qemu-storage-src/pc-bios"
+    firmware = ["-L", str(firmware_dir), "-bios", str(firmware_dir / "bios-256k.bin")]
 if not qemu:
     qemu = str(ROOT / (".tools/usr/bin/qemu-system-" + ARCH))
     env["LD_LIBRARY_PATH"] = str(ROOT / ".tools/usr/lib/x86_64-linux-gnu")
@@ -32,6 +37,8 @@ assert Path(qemu).exists(), "Install qemu-system-x86 (host development dependenc
 
 class Guest:
     def __init__(self, disk, network=True, ram=64, extra_args=None, setup=False, cdrom=False):
+        if os.environ.get("LUNA_TEST_OFFLINE") == "1":
+            network = False
         self.serialpath = TEST / "serial.sock"
         self.qmppath = TEST / "qmp.sock"
         for p in [self.serialpath, self.qmppath]:
@@ -42,7 +49,7 @@ class Guest:
             if not (ovmf / "OVMF_CODE_4M.fd").exists(): ovmf = Path("/usr/share/OVMF")
             variables = TEST / "uefi-vars.fd"
             shutil.copyfile(ovmf / "OVMF_VARS_4M.fd", variables)
-            boot_firmware = ["-L", str(ROOT / ".tools/usr/share/qemu"), "-drive", f"if=pflash,format=raw,readonly=on,file={ovmf / 'OVMF_CODE_4M.fd'}", "-drive", f"if=pflash,format=raw,file={variables}"]
+            boot_firmware = ["-L", str(ROOT / (".tools/qemu-storage-src/pc-bios" if os.environ.get("LUNA_QEMU") else ".tools/usr/share/qemu")), "-drive", f"if=pflash,format=raw,readonly=on,file={ovmf / 'OVMF_CODE_4M.fd'}", "-drive", f"if=pflash,format=raw,file={variables}"]
             ram = max(ram, 256)
         args = [
             qemu,

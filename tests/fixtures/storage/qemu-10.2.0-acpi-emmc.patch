@@ -1,0 +1,55 @@
+--- a/hw/i386/pc_piix.c
++++ b/hw/i386/pc_piix.c
+@@ -321,6 +321,18 @@
+                                x86ms->fw_cfg, OBJECT(pcms));
+     }
+ 
++/* LunaOS test-only fixture: MMIO SDHCI without a PCI function. The SSDT
++     * supplied by -acpitable is the sole discovery mechanism for the guest. */
++    if (getenv("LUNA_ACPI_STORAGE_FIXTURE")) {
++        DeviceState *sdhci = qdev_new("generic-sdhci");
++        qdev_prop_set_uint8(sdhci, "sd-spec-version", 3);
++        qdev_prop_set_uint8(sdhci, "uhs", 1);
++        qdev_prop_set_uint64(sdhci, "capareg", 0x0400c8b4);
++        object_property_add_child(OBJECT(machine), "luna-sdhci", OBJECT(sdhci));
++        sysbus_realize_and_unref(SYS_BUS_DEVICE(sdhci), &error_fatal);
++        sysbus_mmio_map(SYS_BUS_DEVICE(sdhci), 0, 0xfed80000);
++    }
++
+ #if defined(CONFIG_IGVM)
+     /* Apply guest state from IGVM if supplied */
+     if (x86ms->igvm) {
+--- a/hw/sd/sdhci.c
++++ b/hw/sd/sdhci.c
+@@ -1060,6 +1060,9 @@
+         break;
+     case SDHC_PRNSTS:
+         ret = s->prnsts;
++        if (getenv("LUNA_ACPI_STORAGE_FIXTURE")) {
++            ret &= ~((1u << 16) | (1u << 19)); /* no CD/WP pins */
++        }
+         ret = FIELD_DP32(ret, SDHC_PRNSTS, DAT_LVL,
+                          sdbus_get_dat_lines(&s->sdbus));
+         ret = FIELD_DP32(ret, SDHC_PRNSTS, CMD_LVL,
+--- a/hw/sd/sd.c
++++ b/hw/sd/sd.c
+@@ -418,6 +418,9 @@
+ {
+     /* All voltages OK */
+     sd->ocr = R_OCR_VDD_VOLTAGE_WIN_HI_MASK;
++    if (sd_is_emmc(sd)) {
++        sd->ocr |= 0x80; /* MMC 1.7-1.95 V window */
++    }
+ 
+     if (sd_is_spi(sd)) {
+         /*
+@@ -2298,7 +2301,8 @@
+         sd->state = sd_ready_state;
+         return sd_r1;
+     } else {
+-        if (FIELD_EX32(sd->ocr & req.arg, OCR, VDD_VOLTAGE_WINDOW)) {
++        if (FIELD_EX32(sd->ocr & req.arg, OCR, VDD_VOLTAGE_WINDOW) ||
++            (sd_is_emmc(sd) && (sd->ocr & req.arg & 0x80))) {
+             /*
+              * We accept any voltage.  10000 V is nothing.
+              *
