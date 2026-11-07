@@ -31,7 +31,7 @@ third_party/musl/config.mak: third_party/musl/configure
 third_party/musl/lib/libc.a: third_party/musl/config.mak
 	$(MAKE) -C third_party/musl -j4 AR=ar RANLIB=ranlib lib/libc.a
 $(JS_OBJECTS) build/lib/runtime.o build/apps/javascript.o build/ui/web_js.o build/drivers/tls.o $(BEAR_OBJECTS): third_party/musl/lib/libc.a
-build/kernel/account.o: kernel/account.c
+build/kernel/account.o: kernel/account.c third_party/musl/lib/libc.a
 	@mkdir -p build/kernel
 	$(CC) $(CFLAGS) $(MUSLINC) -Ithird_party/bearssl/inc -c $< -o $@
 build/drivers/tls.o: drivers/tls.c assets/tls/trust_anchors.h
