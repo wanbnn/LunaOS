@@ -1,6 +1,7 @@
 #ifndef LUNA_WIFI_SCAN_H
 #define LUNA_WIFI_SCAN_H
 #include "wifi.h"
+#include "../include/net/wpa2.h"
 /* Native passive scanner. The hardware adapter owns RF initialization, channel
  * policy and RX DMA. Simulated adapters belong to host tests only. */
 #define WIFI_SCAN_FRAME_CAP 11520
@@ -12,11 +13,18 @@ typedef struct {
     /* 1=frame (FCS removed), 0=no frame, negative=error. */
     int (*receive)(void *, uint8_t *, unsigned, unsigned *, int16_t *);
     int (*stop)(void *);
+    /* Optional client MLME: absent on passive-only scanner drivers. */
+    int (*connect)(void *,const WifiAp *,const char *,const uint8_t *,size_t);
+    WifiLink (*link)(void *);
+    int (*connection_error)(void *);
+    void (*poll_client)(void *);
 } WifiScanRadio;
 typedef struct {
     WifiScanRadio radio;
     WifiAp aps[WIFI_MAX_APS];
     uint8_t bssid[WIFI_MAX_APS][6];
+    uint8_t rsn[WIFI_MAX_APS][WPA2_RSN_MAX];
+    unsigned rsn_len[WIFI_MAX_APS];
     uint8_t channels[64], channel_index, channel_count;
     uint32_t deadline;
     unsigned count;
