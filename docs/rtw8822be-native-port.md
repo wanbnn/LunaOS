@@ -1,9 +1,11 @@
-# RTL8822BE native passive scan — experimental
+# RTL8822BE native station TX/RX and WPA2 — hardware-experimental
 
-The release now contains a native RTL8822BE (`10ec:b822`) initialization path.
-This is an **untested-on-hardware experimental passive scanner**, not a working
-association/WPA2 driver. Setup attempts scanning automatically on its network
-page. No simulated SSIDs are compiled into the image.
+The release includes native RTL8822BE (`10ec:b822`) firmware/PHY initialization,
+passive scanning and an **experimental station TX/MLME/WPA2 path**. This is
+**not validated on physical hardware**. Actual association, firmware TX descriptor
+interpretation, RF regulation and encrypted IP traffic must be confirmed on the
+target laptop before this can be marked supported. Setup enumerates observed APs;
+no simulated SSIDs are shipped in the production image.
 
 ## Runtime
 
@@ -26,10 +28,51 @@ RX/drop counters. No presence-only preflight resizes BARs of the active native
 driver. Cleanup disables and reads back PCI bus mastering before releasing DMA
 memory; when that cannot be confirmed, mappings/allocations are retained.
 
-The current backend has `can_connect=false`. Setup displays that it is a
-passive scan and disables Connect. Authentication, association, WPA2/CCMP,
-DHCP and general Wi-Fi IP traffic are **not implemented**. Receiving an SSID
-must not be interpreted as a network connection.
+## Experimental 802.11 station path
+
+The native PCIe driver supplies a real station MAC from card efuse and now has
+separate polled management and best-effort PCIe TX descriptor queues. It
+constructs auth and association requests for an observed BSSID/channel, processes
+responses with bounded timeouts and preserves the exact RSN IE advertised by the
+scanned access point. Association is followed by the existing `drivers/wifi_station.c`
+controlled port: EAPOL 4-way handshake using `net/wpa2.c` (PBKDF2,
+HMAC-SHA1, replay/MIC validation), software AES-CCMP, and DHCP/ARP/IP after
+successful key installation. `can_connect=true` exposes the option in setup.
+`WIFI_ONLINE` is reported only after a DHCP lease is configured.
+
+**This code path is experimental**, not a verified working Wi-Fi connection.
+The hardware MAC, PCIe queue IDs/pointers, TX descriptor flags and 802.11
+management compatibility need on-device verification. The card may transmit
+nothing or fail to associate. It is not a Linux `rtw88` implementation;
+in particular we do not yet support WPA3/SAE, 802.1X, TKIP, 802.11w required
+PMF, AMSDU/AMPDU, fragmentation, 802.11r roaming or advanced power management.
+Data rates are deliberately legacy. Card transmit power, RF regulatory country
+policy and per-device calibration are **not yet independently validated for TX**.
+Do not ship this build as production WLAN support.
+
+The Wi-Fi diagnostics report initialization, RX count, TX count, queue-full
+events, and errors. Scanning an SSID is not connection proof; an online IPv4
+state plus actual bidirectional traffic on the physical RTL8822BE is required.
+
+## Hardware acceptance sequence
+
+1. Use a WPA2-Personal **AES/CCMP-only** access point with PMF not required
+   and 2.4 GHz channel 1–11 (initially test channel 1 or 6). Do not begin with
+   WPA2/WPA3 mixed mode. Test on an isolated AP and only where permitted by
+   local radio regulations.
+2. Boot the new ISO on the RTL8822BE device, open setup Wi-Fi, scan and select
+   a real BSSID/SSID, then enter its WPA2 passphrase (8–63 characters).
+3. Record `wifidiag` and serial logs at each state; confirm non-zero TX
+   counts and that auth/association advances beyond `WIFI_ASSOCIATING`.
+4. Require WPA2 4-way completion without MIC/replay errors, DHCP assignment,
+   and actual bidirectional DNS/IPv4/ICMP/HTTP. `WIFI_ONLINE` alone is not
+   enough to claim verified internet reachability.
+5. Retry disconnect/reconnect, wrong password, lost AP, DHCP expiration,
+   RF failure, ring-full and power cycle. Failure must close the port,
+   clear the key state and invalidate IP.
+
+Host tests under `make test-wifi-client test-rtw8822be-tx-dma test-wifi-ccmp
+test-wifi-station` are simulations, not RF certification.
 
 ## Source and license
 
@@ -59,4 +102,4 @@ calibration, PCIe timing or firmware execution works on physical RTL8822BE.
 The new end-to-end hardware initialization path has not yet been tested on a
 physical card; the user's separate test machine provides that validation.
 
-Build: `make -j2 all`. Focused RX model: `make test-rtw8822be-rx-dma`.
+Build: `make -j2 all`. Focused DMA models: `make test-rtw8822be-rx-dma test-rtw8822be-tx-dma`.
