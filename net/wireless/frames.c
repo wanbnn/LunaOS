@@ -113,6 +113,12 @@ int luna80211_to_ethernet(const uint8_t *frame, size_t length,
         return rc;
     if (h.type != 2 || (h.subtype & 4) || h.protected_frame)
         return L80211_ENOTSUP;
+    /* A fragmented MPDU is not an Ethernet MSDU. Reassembly is not present. */
+    if ((frame[1] & 0x04) || (frame[22] & 0x0f))
+        return L80211_ENOTSUP;
+    /* A-MSDU contains multiple subframes; do not expose one as Ethernet. */
+    if (h.qos && (frame[24 + (h.to_ds && h.from_ds ? 6 : 0)] & 0x80))
+        return L80211_ENOTSUP;
     if (length - h.header_len < 8)
         return L80211_EINVAL;
     const uint8_t *llc = frame + h.header_len;
