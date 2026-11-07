@@ -8,6 +8,12 @@
 #define TIMEOUT (-110)
 #define UNSUPPORTED (-95)
 static void wipe(void *p,size_t n) { volatile uint8_t *v=p;while(n--) *v++=0; }
+/* Avoid host _FORTIFY_SOURCE memcpy_chk references in the freestanding kernel. */
+static void copy(void *dst,const void *src,size_t n) {
+    volatile uint8_t *d=dst;
+    const uint8_t *s=src;
+    for(size_t i=0;i<n;i++) d[i]=s[i];
+}
 static bool unicast(const uint8_t *m) {
     if(m[0]&1) return false;
     unsigned n=0;for(unsigned i=0;i<6;i++) n|=m[i];return n!=0;
@@ -27,9 +33,9 @@ static int emit(WifiClient *c,uint8_t *frame,unsigned len,bool mgmt) {
 }
 static void hdr(WifiClient *c,uint8_t *f,uint8_t subtype) {
     memset(f,0,24);f[0]=subtype;
-    memcpy(f+4,c->ap.bssid,6);
-    memcpy(f+10,c->mac,6);
-    memcpy(f+16,c->ap.bssid,6);
+    copy(f+4,c->ap.bssid,6);
+    copy(f+10,c->mac,6);
+    copy(f+16,c->ap.bssid,6);
 }
 static int auth(WifiClient *c) {
     uint8_t f[30];hdr(c,f,0xb0);
@@ -44,17 +50,17 @@ static int assoc(WifiClient *c) {
     put16(f+pos,1|(c->ap.security==WIFI_WPA2_PSK?0x10:0));pos+=2;
     put16(f+pos,10);pos+=2;
     f[pos++]=0;f[pos++]=c->ap.ssid_len;
-    memcpy(f+pos,c->ap.ssid,c->ap.ssid_len);pos+=c->ap.ssid_len;
+    copy(f+pos,c->ap.ssid,c->ap.ssid_len);pos+=c->ap.ssid_len;
     static const uint8_t r2[]={0x82,0x84,0x8b,0x96,0x0c,0x12,0x18,0x24};
     static const uint8_t r5[]={0x8c,0x98,0xb0,0x12,0x24,0x48};
     bool is5=c->ap.channel>14;
     const uint8_t *rates=is5?r5:r2;
     unsigned n=is5?sizeof(r5):sizeof(r2);
-    f[pos++]=1;f[pos++]=n;memcpy(f+pos,rates,n);pos+=n;
+    f[pos++]=1;f[pos++]=n;copy(f+pos,rates,n);pos+=n;
     if(c->ap.security==WIFI_WPA2_PSK) {
         static const uint8_t selected[]={48,20,1,0,0,15,172,4,1,0,0,15,172,4,
                                          1,0,0,15,172,2,0,0};
-        memcpy(f+pos,selected,sizeof(selected));pos+=sizeof(selected);
+        copy(f+pos,selected,sizeof(selected));pos+=sizeof(selected);
     }
     int rc=emit(c,f,pos,true);
     if(!rc) {c->stage=WIFI_CLIENT_ASSOC;c->deadline=c->radio.now(c->radio.context)+3000;}
@@ -144,9 +150,9 @@ int wifi_client_start(WifiClient *c,const WifiClientRadio *radio,const uint8_t m
     }
     /* Only the scanned AP supplies these parameters; never auto-roam into
      * a new BSSID or silently downgrade an encrypted network to open. */
-    c->radio=*radio;c->ap=*ap;memcpy(c->mac,mac,6);c->error=0;
-    c->rsn_len=rsn_len;if(rsn_len) memcpy(c->rsn,rsn,rsn_len);
-    if(n) memcpy(c->password,pass,n);
+    c->radio=*radio;c->ap=*ap;copy(c->mac,mac,6);c->error=0;
+    c->rsn_len=rsn_len;if(rsn_len) copy(c->rsn,rsn,rsn_len);
+    if(n) copy(c->password,pass,n);
     c->password[n]=0;
     int rc=radio->tune(radio->context,ap->channel);
     if(!rc) rc=auth(c);
