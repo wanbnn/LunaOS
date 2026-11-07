@@ -15,7 +15,7 @@ JS_OBJECTS := $(addprefix build/quickjs/,$(addsuffix .o,quickjs libregexp libuni
 OBJECTS := $(patsubst %.c,build/%.o,$(SOURCES)) build/kernel/entry.o build/apps/user.o $(JS_OBJECTS)
 $(OBJECTS) $(BEAR_OBJECTS): Makefile
 $(patsubst %.c,build/%.o,$(SOURCES)): $(wildcard kernel/*.h ui/*.h include/net/*.h)
-.PHONY: all clean run run-iso iso test test-iso-install check test-wireless-frames
+.PHONY: all clean run run-iso iso test test-iso-install check test-wifi-port test-wireless-frames
 all: dist/LunaOS.img dist/LunaOS.iso
 build/font.h: tools/fontgen.py assets/fonts/InterTight.ttf
 	$(PYTHON) tools/fontgen.py
@@ -92,7 +92,7 @@ run-iso: all
 	LUNA_IMAGE=dist/LunaOS.iso tools/run-qemu.sh
 run: all
 	tools/run-qemu.sh
-test: all test-wireless-frames
+test: all test-wireless-frames test-wifi-port
 	$(PYTHON) tests/smoke.py
 	$(PYTHON) tests/multitask.py
 	$(PYTHON) tests/desktop.py
@@ -104,7 +104,7 @@ test: all test-wireless-frames
 	$(PYTHON) tests/iso.py
 test-iso-install: all
 	LUNA_SETUP_ISO=1 LUNA_TEST_DIR=build/test-iso-install $(PYTHON) tests/setup.py
-check: all test-wireless-frames
+check: all test-wireless-frames test-wifi-port
 	$(PYTHON) tools/check_image.py
 	$(PYTHON) tools/check_iso.py
 clean:
@@ -115,3 +115,9 @@ test-wireless-frames:
 	@mkdir -p build
 	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -I. net/wireless/frames.c tests/wireless_frames.c -o build/wireless-frames-test
 	./build/wireless-frames-test
+
+# Preflight mocks only; never interpreted as proof of radio functionality.
+test-wifi-port:
+	@mkdir -p build
+	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -Ikernel drivers/wifi_port.c tests/wifi_port.c -o build/wifi-port-test
+	./build/wifi-port-test
