@@ -100,13 +100,13 @@ Saiba mais: [Memória física](docs/physical-memory.md), [RAM por processo](docs
 
 ### Requisitos de desenvolvimento
 
-Host Linux x86 com ferramentas GCC/binutils e **suporte de compilação de 32 bits**, Make, Python 3, Clang/LLD (loader UEFI) e QEMU x86. Os utilitários Python para a **build**, como Pillow e CairoSVG, estão em `requirements-dev.txt`. O script `tools/bootstrap.sh` pode instalá-los localmente em `.tools/python`.
+Host Linux x86 com ferramentas GCC/binutils e **suporte de compilação de 32 bits**, Make, Python 3, Clang/LLD (loader UEFI) e QEMU x86. Os utilitários Python para a **build**, como Pillow e CairoSVG, estão em `requirements-dev.txt`. O script `tools/bootstrap.sh` pode instalá-los localmente em `.tools/python`; ele verifica as bibliotecas e os cabeçalhos de compilação 32 bits sem precisar de `ripgrep`.
 
 Exemplo no Ubuntu (nomes de pacotes sujeitos à versão da distribuição):
 
 ```bash
 sudo apt update
-sudo apt install -y build-essential gcc-multilib binutils clang lld \
+sudo apt install -y build-essential gcc-multilib libc6-dev-i386 binutils clang lld \
   make python3 python3-pip qemu-system-x86 ovmf
 ```
 
