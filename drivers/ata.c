@@ -1,5 +1,6 @@
 #include "boot.h"
 #include "install.h"
+#include "storage.h"
 static DiskInfo disks[4];
 static unsigned boot_index;
 static const uint8_t *ram_source;
@@ -146,6 +147,8 @@ static bool cd_read_image(unsigned index, uint32_t lba, unsigned count, void *da
     return true;
 }
 bool disk_read_blocks(unsigned index, uint32_t lba, unsigned count, void *data) {
+    if(index>=STORAGE_NATIVE_BASE)
+        return storage_transfer(index,lba,count,data,false)==0;
     if (index == 4 && ram_source) {
         if (!data || !count || count > 128 || (uint64_t)lba + count > LUNA_IMAGE_BYTES / 512)
             return false;
@@ -171,6 +174,8 @@ bool disk_read_blocks(unsigned index, uint32_t lba, unsigned count, void *data) 
     return true;
 }
 bool disk_write_blocks(unsigned index, uint32_t lba, unsigned count, const void *data) {
+    if(index>=STORAGE_NATIVE_BASE)
+        return storage_transfer(index,lba,count,(void *)data,true)==0;
     unsigned group = index < 4 && count >= disks[index].multiple && disks[index].multiple > 1
                          ? disks[index].multiple
                          : 1;
@@ -194,6 +199,8 @@ bool disk_write_on(unsigned index, uint32_t lba, const void *data) {
     return disk_write_blocks(index, lba, 1, data);
 }
 bool disk_flush(unsigned index) {
+    if(index>=STORAGE_NATIVE_BASE)
+        return storage_flush(index)==0;
     if (index >= 4 || !disks[index].present || !disks[index].supported || disks[index].optical)
         return false;
     select_drive(index, 0xe0);
@@ -207,12 +214,42 @@ bool disk_write(uint32_t lba, const void *data) {
     return disk_write_on(boot_index, lba, data) && disk_flush(boot_index);
 }
 const DiskInfo *disk_info(unsigned index) {
-    return index < 4 ? &disks[index] : 0;
+    return index < 4 ? &disks[index] : storage_disk_info(index);
 }
 unsigned disk_boot_index(void) {
     return boot_index;
 }
+/* Reconcile BIOS or UEFI boot MBR identity with native block devices after
+ * PCI DMA controllers are operational, but BEFORE mounting LunaFS.
+ * No match: keep the firmware-provided RAM/ATA fallback. Cloned IDs:
+ * reject ambiguous native selection. Never guess the first NVMe drive. */
+void disk_resolve_native_boot(void) {
+    uint32_t identity=*(volatile uint32_t *)0x6f04;
+    if(boot_is_uefi() && ram_source)
+        memcpy(&identity,ram_source+440,4);
+    if(!identity)return;
+    unsigned count=0,candidate=boot_index;
+    uint8_t sector[512];
+    for(unsigned i=0;i<STORAGE_DEVICE_COUNT;i++) {
+        if(i==4)continue;
+        const DiskInfo *d=disk_info(i);
+        if(!d || !d->present || !d->supported || d->optical || !d->sectors ||
+           !disk_read_on(i,0,sector) || sector[510]!=0x55 || sector[511]!=0xaa)continue;
+        uint32_t found=0;
+        memcpy(&found,sector+440,4);
+        if(found!=identity)continue;
+        count++;candidate=i;
+    }
+    if(count==1) {
+        boot_index=candidate;
+        serial_write("STORAGE: native boot volume matched MBR ID on disk ");
+        char n[16];number(n,candidate);
+        serial_write(n);serial_write("\n");
+    } else if(count>1)
+        serial_write("STORAGE: ambiguous boot disk identity; retained safe fallback\n");
+}
 void disk_init(void) {
+    storage_reset();
     for (unsigned i = 0; i < 4; i++) {
         DiskInfo *d = &disks[i];
         d->index = i;

@@ -22,7 +22,7 @@ A imagem de distribuição abre o assistente nativo. A interface usa Inter Tight
    Não há banco IANA/DST integrado; o relógio atual continua UTC.
 6. Usuário padrão, senha e confirmação. Nome: inicia com a-z e contém até 24
    caracteres a-z/0-9/_/-. Senha: 8–64 bytes ASCII.
-7. Escolha explícita do disco inteiro: modelo, índice IDE e capacidade. A mídia
+7. Escolha explícita do disco inteiro: modelo, índice do dispositivo e capacidade. A mídia
    de origem, suas cópias com o mesmo identificador e discos pequenos/não suportados
    ficam indisponíveis. Nenhum destino vem selecionado.
 8. Revisão do destino e digitação de `apagar N`/`erase N`, onde N é o índice
@@ -37,10 +37,14 @@ Em uma instalação concluída, esse comando recusa reinstalar pela sessão ativ
 
 ## Discos e durabilidade
 
-O backend atual suporta quatro dispositivos ATA/IDE legados nas portas padrão,
-com setores lógicos de 512 bytes e LBA28 (até 128 GiB). Enumera modelo/capacidade,
-seleciona READ/WRITE MULTIPLE quando anunciado pelo dispositivo e usa PIO com
-transferências em bloco. Não há AHCI, NVMe, USB mass storage, UEFI ou GPT de destino.
+O backend oferece quatro slots ATA/IDE legados, com LBA28 e PIO. O novo subsistema
+de blocos enumera também SATA/AHCI e NVMe PCI e inclui caminhos experimentais
+de DMA para IDENTIFY, leitura, gravação e flush em setores de 512 bytes. A
+tela possui três páginas de dispositivos, com setas esquerda/direita para
+navegar. A descoberta PCI de USB, eMMC/SDHCI e RAID **não fornece** acesso a
+discos; esses controladores não ficam disponíveis como destinos de instalação.
+Os drivers SATA/NVMe ainda precisam de testes em hardware físico. Não há
+AHCI/NVMe inicializável via USB, suporte completo a eMMC/RAID, ou GPT de destino.
 Não anunciar a instalação como validada para um computador físico moderno com
 controlador não suportado. A imagem pode iniciar pelo BIOS USB, mas o kernel ainda
 não consegue usar essa mídia USB como origem dos arquivos da instalação.

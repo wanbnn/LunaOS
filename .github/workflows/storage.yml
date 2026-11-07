@@ -1,0 +1,43 @@
+name: LunaOS storage (block, SATA, NVMe and controller discovery)
+on:
+  push:
+    branches: [feat/native-storage-stack, main]
+    paths:
+      - 'kernel/storage.*'
+      - 'drivers/storage_*'
+      - 'drivers/ata.c'
+      - 'ui/setup.c'
+      - 'apps/shell.c'
+      - 'tests/storage*'
+      - 'Makefile'
+      - '.github/workflows/storage.yml'
+  pull_request:
+    paths:
+      - 'kernel/storage.*'
+      - 'drivers/storage_*'
+      - 'drivers/ata.c'
+      - 'ui/setup.c'
+      - 'apps/shell.c'
+      - 'tests/storage*'
+      - 'Makefile'
+      - '.github/workflows/storage.yml'
+jobs:
+  storage-unit-and-boot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install freestanding and virtual-machine toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib libc6-dev-i386 clang lld python3-pip qemu-system-x86
+          mkdir -p .tools/python build dist
+          python3 -m pip install --target .tools/python -r requirements-dev.txt
+      - name: Test block-device contracts and PCI dispatch
+        run: make test-storage
+      - name: Compile complete BIOS and UEFI distributions
+        run: make -j2 all
+      - name: Test non-destructive SATA/NVMe I/O inside LunaOS/QEMU
+        run: make test-storage-guest
+      - name: Install on disposable SATA and NVMe images (write/readback verification)
+        run: python3 tests/storage_install.py
