@@ -2,6 +2,18 @@
 #include <stdio.h>
 #include <string.h>
 #include "../kernel/devkit.h"
+static int hardware_read(void *ctx, char *out, size_t cap) {
+    const char *value = (const char *)ctx;
+    if (strlen(value) >= cap) return -28;
+    strcpy(out, value);
+    return 0;
+}
+static int hardware_write(void *ctx, const char *value) {
+    char *dest = ctx;
+    if (strlen(value) > 15) return -22;
+    strcpy(dest, value);
+    return 0;
+}
 int main(void) {
     char b[512];
     assert(ldev_valid_name("demo_01"));
@@ -34,6 +46,16 @@ int main(void) {
     assert(strstr(b, "count  counter"));
     assert(ldev_unload("upper") == 0 && ldev_read("upper", b, sizeof(b)) == -2);
     assert(ldev_unload("upper") == -2);
-    puts("PASS: LunaSDK virtual driver lifecycle, operations and malformed descriptors");
+    char device_state[16] = "physical";
+    assert(!ldev_native_register("real-callback", hardware_read,
+                                 hardware_write, device_state));
+    assert(!ldev_read("real-callback", b, sizeof(b)) && !strcmp(b, "physical"));
+    assert(!ldev_write("real-callback", "updated"));
+    assert(!ldev_read("real-callback", b, sizeof(b)) && !strcmp(b, "updated"));
+    assert(ldev_unload("real-callback") == -95);
+    assert(ldev_native_register("real-callback", hardware_read, 0, 0) == -22);
+    ldev_list(b, sizeof(b));
+    assert(strstr(b, "real-callback  hardware"));
+    puts("PASS: LunaSDK virtual driver lifecycle, native C endpoints and malformed descriptors");
     return 0;
 }

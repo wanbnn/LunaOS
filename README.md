@@ -27,7 +27,7 @@ O LunaOS tem **bootloader próprio**, **kernel próprio em C**, **interface grá
 - Desktop com dock, pesquisa, janelas, compositor 32 bits, **transições suaves nativas**, fontes **Inter Tight** e ícones **Lucide**.
 - Assistente de primeiro boot, modo live, instalação em disco IDE compatível e login.
 - Terminal **lunaSH**, Files, Notes, Settings, navegador e Gerenciador de Tarefas.
-- **LunaSDK v1**: criar e executar programas JavaScript `.ljs` no guest, com API de arquivos, aplicativos e dispositivos virtuais `.ldrv` (não são módulos de hardware).
+- **LunaSDK v2**: aplicativos JavaScript `.ljs`, Python limitado `.py` (prévia), API de descoberta **PCI real** e endpoints de hardware implementados por drivers C nativos; projetos C/CMake ainda são compilados no host.
 - Pilha de rede IPv4 via **RTL8139**, HTTP e HTTPS/TLS 1.2.
 - Navegador com HTML, CSS, DOM/JavaScript **parciais** e decodificação de PNG externo.
 - Infraestrutura de drivers e desenvolvimento de Wi-Fi com scanner passivo experimental para **RTL8822BE**.
@@ -185,19 +185,21 @@ O app **Notes** oferece edição de textos e realce de sintaxe para alguns forma
 
 ### Criar seus próprios aplicativos e dispositivos virtuais
 
-O comando **`dev`** permite desenvolver dentro do LunaOS usando **Notes** e executar scripts `.ljs` com QuickJS e a API `luna`. Dispositivos virtuais `.ldrv` (tipos `register`, `upper`, `counter`) podem ser criados, editados, carregados e acessados por scripts, **sem acesso ao hardware**:
+O comando **`dev`** permite editar código dentro do LunaOS com **Notes**, executar scripts `.ljs` com QuickJS e executar uma **prévia limitada** de arquivos `.py`. A API `luna.hardware.pci` enumera dispositivos PCI físicos e lê a área de configuração com validação; drivers C nativos podem registrar endpoints que comunicam com hardware real (o exemplo `qemu-edu` usa PCI/MMIO):
 
 ```sh
-dev new hello
+dev new hello js
 dev run /home/luna/hello.ljs
-dev driver new lamp register
-dev driver load /home/luna/lamp.ldrv
-dev driver write lamp on
-dev driver read lamp
+dev new probe py
+dev run /home/luna/probe.py
+dev hardware pci
+dev hardware read 0 2 0 0 4
+dev driver list
+dev new native_probe c
 dev list
 ```
 
-Os caminhos acima usam o usuário live padrão `luna`; adapte-os ao diretório `/home/SEU_USUARIO` após a instalação. **Código de hardware em C ainda precisa ser compilado e vinculado ao kernel no host**: não existe compilador C, loader ELF ou suporte a drivers nativos carregados dinamicamente dentro do guest. Scripts QuickJS ainda rodam em um serviço confiável do kernel, portanto **não são um sandbox de segurança completo**.
+Os caminhos acima usam o usuário live padrão `luna`; adapte-os ao diretório `/home/SEU_USUARIO` após a instalação. **Drivers C reais usam `kernel/driver.h` para PCI, MMIO, DMA e IRQ e podem publicar um endpoint LunaSDK de leitura/escrita validada**. O exemplo `qemu-edu` depende de um dispositivo QEMU EDU realmente conectado (`tools/run-qemu.sh -device edu`). **CMake ainda roda no host**, já que LunaOS não tem compilador C nativo nem loader ELF; a prévia `.py` aceita somente um subconjunto pequeno da sintaxe Python e não substitui MicroPython/CPython. Scripts não confiáveis ainda não estão isolados do kernel.
 
 Contrato, exemplos, limites e teste: [API para desenvolvedores](docs/developer-api.md).
 
@@ -250,7 +252,7 @@ Testes específicos de calendário, UEFI, instalação e drivers estão descrito
 | ISO/ATAPI e mídia inicializável | [ISO](docs/iso.md) |
 | Capacidades e limites do navegador | [Motor do navegador](docs/browser-engine.md) |
 | API de drivers DMA, PCI, MMIO e firmware | [Serviços de drivers](docs/driver-services.md) |
-| Criação de aplicativos e dispositivos virtuais dentro do sistema | [LunaSDK v1](docs/developer-api.md) |
+| Desenvolvimento in-guest, integração com PCI real e CMake no host | [LunaSDK v2](docs/developer-api.md) |
 | Famílias e estratégia de drivers Wi-Fi | [Porte de Wi-Fi](docs/wireless-port.md) |
 | RTL8822BE experimental | [Port nativo RTL8822BE](docs/rtw8822be-native-port.md) |
 | Intel AX211 e WPA2/DHCP | [Intel AX211](docs/intel-ax211-wifi.md) |

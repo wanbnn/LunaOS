@@ -1,137 +1,206 @@
-# LunaSDK v1 — API de desenvolvimento dentro do LunaOS
+# LunaSDK v2 — aplicativos, drivers e hardware real
 
-A primeira versão do **LunaSDK** fornece programação **dentro do guest**:
-um shell `dev`, aplicativos JavaScript `.ljs` editáveis com Notes e dispositivos
-virtuais `.ldrv` acessíveis por scripts e pelo terminal. O formato e a API
-recebem versão; o comportamento pode evoluir enquanto o LunaOS é experimental.
+O LunaSDK evolui em direção a uma API unificada do LunaOS: um mesmo
+programa pode usar recursos do sistema e endpoints fornecidos por drivers
+de hardware reais. **A conexão com hardware é real**, não uma simulação,
+quando o dispositivo está fisicamente presente. Suporte a runtimes e
+toolchains completos no guest permanece um trabalho separado.
 
-> **Limite importante:** `.ljs` não é um binário ELF ou um novo processo ring 3.
-> QuickJS executa como serviço do kernel e ainda **não tem isolamento suficiente
-> para código não confiável**. `.ldrv` são dispositivos **virtuais**, não drivers
-> PCI/USB reais, não executam código arbitrário e não têm acesso a MMIO/DMA/IRQ.
+## Estado atual por linguagem
 
-## Seu primeiro aplicativo
+| Linguagem | Escrever no Notes | Executar no LunaOS | Compilar no LunaOS | Hardware |
+| --- | --- | --- | --- | --- |
+| **JavaScript `.ljs`** | Sim | QuickJS com `dev run` | Não aplicável | PCI real read-only, áudio e endpoints de drivers C nativos |
+| **Python `.py` (LunaPy preview)** | Sim | **Subconjunto experimental** com `dev run` | Não aplicável | Contagem/consulta PCI, áudio e endpoints de drivers C |
+| **C `.c`** | Sim | **Não**, sem loader geral | **Não** (CMake só no host por enquanto) | API privilegiada PCI/DMA/MMIO/IRQ em C compilado no kernel |
 
-No lunaSH:
+> **Sem alegações falsas:** o LunaOS **não** tem CPython, MicroPython,
+> GCC/Clang/TCC, CMake executável ou loader ELF dinâmico no guest.
+> O interpretador LunaPy é intencionalmente um subconjunto verificável, não
+> a linguagem Python completa. Binários ELF e drivers compilados fora do
+> sistema não podem ser executados/carregados diretamente nesta versão.
+
+## Ferramentas no lunaSH
 
 ```sh
 dev
-dev new hello
-dev list
+dev new hello js
 dev run /home/luna/hello.ljs
+dev new scanner py
+dev run /home/luna/scanner.py
+dev new mydriver c
+dev list
+dev hardware pci
+dev hardware read 0 2 0 0 4
+dev driver list
 sync
 ```
 
-Abra o arquivo `/home/luna/hello.ljs` no **Notes**, edite o JavaScript,
-salve com `Ctrl+S`, e execute com `dev run /home/luna/hello.ljs`.
-Em uma instalação, substitua `luna` pelo usuário da sessão.
-`dev new` nunca substitui um arquivo que já existe.
+Altere `/home/luna` para o diretório da sessão atual. `dev new` não
+sobrescreve arquivos existentes. O editor Notes permite modificar as fontes.
 
-O script gerado já exercita o SDK. Exemplo:
+### Hardware real: PCI
+
+A API em [`kernel/lunasdk_hardware.h`](../kernel/lunasdk_hardware.h)
+delegada a [`drivers/pci.c`](../drivers/pci.c) faz leituras de verdade
+nos registradores PCI CF8/CFC do processador. Não usa listas de dispositivos
+fixas nem mocks em produção.
 
 ```js
-console.log("Olá!", luna.version);
-console.log("API", luna.apiVersion, "uptime", luna.uptime());
-luna.fs.write("mensagem.txt", "Criado no LunaOS");
-console.log(luna.fs.read("mensagem.txt"));
-console.log(luna.fs.list("."));
-luna.app.open("notes");
+// arquivo example.ljs, via "dev run"
+const n = luna.hardware.pci.count();
+console.log("PCI devices:", n);
+for (let i = 0; i < n; i++) {
+  const d = luna.hardware.pci.get(i);
+  console.log(d.bus, d.slot, d.function, d.vendor, d.device, d.classCode);
+}
+const d = luna.hardware.pci.get(0);
+if (d) console.log(luna.hardware.pci.read(d.bus, d.slot, d.function, 0, 4));
 ```
 
-### API JavaScript exposta por `dev run`
+`pci.count()` retorna o número de funções PCI detectadas.
+`pci.get(index)` retorna um objeto com `bus`, `slot`, `function`,
+`vendor`, `device`, `revision`, `classCode`, `subsystem`, `irq`
+e `pin` ou `null`. `pci.read(bus,slot,function,offset,width)` lê
+1, 2 ou 4 bytes alinhados da configuração PCI (até offset 255).
+Parâmetros inválidos são rejeitados. **Não existe `pci.write()` para scripts.**
 
-| Função | Retorno | Observações |
-| --- | --- | --- |
-| `luna.version` | string | Versão do LunaOS |
-| `luna.apiVersion` | integer | Versão da API; inicial = 1 |
-| `luna.uptime()` | integer | Relógio monotônico do kernel, em ms |
-| `luna.fs.read(path)` | string ou `null` | Arquivos de texto existentes no diretório do usuário |
-| `luna.fs.write(path, text)` | boolean | Cria ou sobrescreve arquivo de texto; **não persiste automaticamente** |
-| `luna.fs.list(directory)` | array ou `null` | Nomes de filhos diretos de um diretório |
-| `luna.app.open(name)` | boolean | `home`, `shell`, `files`, `browser`, `settings`, `tasks`, `notes` |
-| `luna.device.read(name)` | string ou `null` | Estado do dispositivo virtual carregado |
-| `luna.device.write(name, text)` | boolean | Escreve no dispositivo virtual |
+`luna.audio.beep(hz, duration_ms)` controla o subsistema de áudio do
+LunaOS com limites 20–20000 Hz e 1–250 ms. A disponibilidade de som depende
+do dispositivo/driver em uso. `luna.device.read/write(name)` funcionam
+tanto com os dispositivos virtuais `.ldrv` quanto com os endpoints
+publicados por um **driver físico em C**.
 
-Caminhos relativos em `luna.fs` são relativos ao **diretório home**, não ao
-`cwd` do lunaSH. A API restringe caminhos ao home, inclusive após normalizar
-`..`. O LunaFS suporta arquivos de texto de até **8191 bytes** e até **64
-entradas** (arquivos + diretórios); as alterações só sobrevivem ao reinício
-após `sync`. Esta checagem de caminho **não é um mecanismo de isolamento
-de processos**.
+**Importante:** leituras de configuração PCI são read-only; o código C
+privilegiado continua sendo responsável por reivindicar o dispositivo,
+habilitar o BAR, mapear MMIO, instalar INTx, configurar DMA e liberar tudo
+no momento adequado. Acesso arbitrário a PCI/MMIO vindo de JS/Python
+permitiria travar o kernel ou corromper memória e foi deliberadamente
+excluído da API de scripts.
 
-Scripts são limitados pela configuração do QuickJS (stack, memória e
-interrupção por tempo). Operações síncronas, como I/O pesado, ainda podem
-bloquear o desktop. O comando original `js 'código'` continua disponível
-sem os objetos adicionais do LunaSDK.
+### Exemplo real de hardware: QEMU EDU
 
-## Criar um dispositivo virtual
+[`kernel/lunasdk_edu.c`](../kernel/lunasdk_edu.c) é um driver C real,
+integrado ao boot. Quando encontra o dispositivo educativo **PCI
+`1234:11e8`**, ele tenta fazer claim, habilitar BAR0, mapear MMIO e
+registrar o endpoint `qemu-edu`.
+
+Para testar com um dispositivo físico emulado pelo QEMU:
 
 ```sh
-dev driver new lamp register
-dev driver load /home/luna/lamp.ldrv
+make -j2 all
+tools/run-qemu.sh -device edu
+```
+
+No lunaSH do LunaOS:
+
+```sh
+dev hardware pci
 dev driver list
-dev driver read lamp
-dev driver write lamp on
-dev driver read lamp
-dev driver unload lamp
+dev driver read qemu-edu
 ```
 
-Arquivo `lamp.ldrv`, editável pelo Notes:
+O valor lido por `qemu-edu` vem do registrador **MMIO offset 0**
+do dispositivo real conectado à VM. Caso o dispositivo não esteja
+presente ou o claim/map falhe, o endpoint **não é registrado**. O
+endpoint é somente leitura e não pode ser removido com `dev driver unload`.
 
-```ini
-LDEV1
-name=lamp
-type=register
-value=hello
+O QEMU EDU é um dispositivo virtualizado pelo hipervisor, mas o driver
+usa **a mesma API de PCI/MMIO real** do kernel, não um mock de software.
+Para outras placas físicas, o desenvolvedor escreve um driver C próprio
+usando o mesmo contrato, implementa o controle específico do chip e
+registra callbacks em `ldev_native_register()`.
+
+### Driver C com endpoint para JS/Python
+
+A API de kernel `kernel/devkit.h` oferece:
+
+```c
+typedef int (*LunaNativeRead)(void *ctx, char *out, size_t cap);
+typedef int (*LunaNativeWrite)(void *ctx, const char *value);
+int ldev_native_register(const char *name, LunaNativeRead read,
+                         LunaNativeWrite write, void *context);
 ```
 
-Os dispositivos são **declarativos e limitados**. Até 8 são mantidos em RAM,
-com identificador de 1 a 24 caracteres alfanuméricos, `_` ou `-`.
-Tipos suportados:
+A função `ldev_native_register` só deve ser usada por drivers nativos
+confiáveis; ponteiros/callbacks C não são passados para scripts.
+O driver mantém ownership de seu dispositivo, recursos MMIO/DMA e
+callbacks. A interface exposta ao script é textual, limitada a 127 bytes
+na leitura padrão de `dev driver read` e com validação por driver.
 
-- `register`: armazenamento de uma string de até 127 bytes, leitura e escrita.
-- `upper`: armazena a última string escrita convertida para maiúsculas ASCII.
-- `counter`: contador inteiro não negativo; aceita `inc`, `dec`, `reset` (valor inicial `0`).
+Os `.ldrv` criados via `dev driver new NAME register|upper|counter`
+continuam disponíveis como **dispositivos puramente virtuais**. Eles
+não representam hardware. O registro fixo tem 8 slots para endpoints
+virtuais e nativos; estados em RAM não persistem após reinício.
 
-Arquivos `.ldrv` persistem no LunaFS após `sync`, mas os **dispositivos
-carregados e seus estados em RAM não persistem**; recarregue-os no boot
-seguinte. Não há carregamento de código executável ou controle de hardware.
+## Python: subconjunto LunaPy preview
 
-Um script pode interagir com o dispositivo:
-
-```js
-console.log(luna.device.read("lamp"));
-luna.device.write("lamp", "ativada");
-console.log(luna.device.read("lamp"));
+```python
+# arquivo scanner.py
+print('Scanning physical PCI devices')
+print(luna.hardware.pci.count())
+print(luna.hardware.pci.get(0))
+print(luna.hardware.pci.read(0,2,0,0,4))
+print(luna.device.read('qemu-edu'))
+luna.audio.beep(660,25)
 ```
 
-## Drivers de hardware (API nativa C)
+LunaPy aceita linhas de comentários, expressões literais simples,
+`print(expr)`, chamadas diretas às funções listadas de hardware/áudio,
+`luna.device.read('name')` e `luna.device.write('name','value')`.
+A saída de `pci.get(index)` é uma string descritiva, não um objeto Python.
 
-Drivers físicos **não** podem ser compilados e carregados dinamicamente pelo
-LunaOS v0.3. A API existente do kernel em
-[`kernel/driver.h`](../kernel/driver.h) fornece serviços para
-**drivers nativos compilados junto ao kernel**: PCI, DMA, MMIO, interrupções
-INTx, work queues, timers, firmware e filas de pacotes.
+**Ainda não suporta**: `import`, `def`, atribuições, `for`, `while`,
+classes, pacotes, exceções, `async` e a biblioteca padrão do Python.
+Syntax unsupported retorna erro explícito; **não** há tradução silenciosa
+para JavaScript nem execução de bytecode Python. O objetivo é portar
+MicroPython e substituir esse runner mantendo uma API coerente.
 
-Fluxo atual de desenvolvimento: escrever C (pode ser rascunhado no Notes),
-transferir/editar o fonte em um host com GCC de 32 bits, adicioná-lo em
-`drivers/` e chamar seu `*_init()` no kernel conforme a arquitetura;
-recompilar a imagem e testar no QEMU/hardware apropriado. Isto envolve
-**código privilegiado**, sem isolamento e sem suporte a módulos ELF. Não
-execute código de hardware desconhecido ou não auditado.
+## CMake e SDK C: compilação no host, integração no kernel
 
-Ver [Serviços para drivers](driver-services.md) e
-[Arquitetura](architecture.md).
+O projeto CMake em [`sdk/native/CMakeLists.txt`](../sdk/native/CMakeLists.txt)
+compila **o driver EDU do LunaOS** como objeto freestanding i386, útil
+como base para drivers terceiros:
+
+```sh
+cmake -S sdk/native -B build/lunasdk-native
+cmake --build build/lunasdk-native
+```
+
+O objeto criado **não é executável no guest** e não deve ser copiado
+como se fosse um módulo carregável. No estado atual, a integração de um
+driver C exige adicioná-lo à build do kernel e chamar sua inicialização
+no boot. Veja [`kernel/driver.h`](../kernel/driver.h) para PCI claim,
+DMA, mapeamento MMIO, IRQ, firmware e filas.
+
+Para suportar literalmente **CMake dentro do LunaOS**, ainda são
+necessários: sistema de arquivos com binários de tamanho real, processos
+com ABI executável, loader ELF/relocações, execução de código externo com
+isolamento/capacidades, toolchain C compatível e porte do próprio CMake.
+Apenas disponibilizar um arquivo `CMakeLists.txt` não resolve isso.
+
+## Segurança e limitações
+
+- **JS e LunaPy rodam em serviços de confiança do kernel.** Limits de
+  memória/tempo reduzem riscos, mas **não constituem sandbox de segurança**.
+  Não execute código de terceiros não auditado.
+- Acesso PCI read-only pode expor detalhes de hardware; futuras ABI devem
+  usar capacidades por processo/usuário e mediação de dispositivos.
+- **Nenhuma API de script recebe escrita arbitrária em PCI, MMIO, PIO,
+  DMA ou IRQ.** Só funções controladas por driver C podem alterar hardware.
+- A API C privilegiada não implica compatibilidade com drivers Linux;
+  nenhum carregamento dinâmico de código de terceiros foi implementado.
+- Os testes host simulam respostas PCI para conferir o contrato. Para
+  comprovar interação com um dispositivo, rode no LunaOS com QEMU EDU
+  ou uma placa real e acompanhe logs e valores lidos.
 
 ## Testes
 
 ```sh
-make test-devkit
+make test-lunasdk-hardware test-lunapy test-devkit
 make check
 ```
 
-`tests/devkit.c` verifica parsing `.ldrv`, leitura, escrita, contadores,
-conversão, descarregamento e recusa de descritores malformados.
-Os cenários `dev new`/`dev run`/`dev driver` no guest precisam também
-ser verificados manualmente ou em um teste QEMU. A compilação ou o teste
-de virtual devices **não confirma drivers físicos**.
+A primeira verificação testa parser de argumentos, validação e endpoints
+com mocks no host. **Não garante** boot, integração completa do QuickJS
+ou funcionamento em hardware físico sem um teste do guest/QEMU.

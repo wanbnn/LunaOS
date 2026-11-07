@@ -2,6 +2,7 @@
 #include "boot.h"
 #include "clock.h"
 #include "driver.h"
+#include "devkit.h"
 #include "memory.h"
 #include "wifi.h"
 #include "../drivers/iwl_pcie.h"
@@ -28,6 +29,7 @@ void kmain(void) {
     audio_init();
     task_init();
     driver_services_init();
+    lunasdk_edu_init();
     rtw8822be_init();
     wifi_intel_init();
     gui_init();

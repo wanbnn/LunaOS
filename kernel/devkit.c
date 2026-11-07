@@ -7,6 +7,9 @@ typedef struct {
     char name[25], data[128];
     unsigned count;
     unsigned char kind;
+    LunaNativeRead read;
+    LunaNativeWrite write;
+    void *context;
 } VirtualDevice;
 static VirtualDevice devices[LDEV_MAX];
 
@@ -82,9 +85,26 @@ int ldev_load(const char *descriptor) {
         strcpy(d->data, value);
     return 0;
 }
+int ldev_native_register(const char *name, LunaNativeRead read,
+                         LunaNativeWrite write, void *ctx) {
+    if (!ldev_valid_name(name) || !read || find_device(name) >= 0)
+        return -22;
+    for (int i = 0; i < LDEV_MAX; i++)
+        if (!devices[i].kind) {
+            memset(&devices[i], 0, sizeof(devices[i]));
+            strcpy(devices[i].name, name);
+            devices[i].read = read;
+            devices[i].write = write;
+            devices[i].context = ctx;
+            devices[i].kind = 4;
+            return 0;
+        }
+    return -28;
+}
 int ldev_unload(const char *name) {
     int i = find_device(name);
     if (i < 0) return -2;
+    if (devices[i].kind == 4) return -95; /* cannot detach a running PCI driver */
     memset(&devices[i], 0, sizeof(devices[i]));
     return 0;
 }
@@ -99,6 +119,8 @@ int ldev_read(const char *name, char *out, size_t cap) {
     int i = find_device(name);
     if (i < 0) return -2;
     if (!out || !cap) return -22;
+    if (devices[i].kind == 4)
+        return devices[i].read(devices[i].context, out, cap);
     char num[16];
     const char *s = devices[i].data;
     if (devices[i].kind == 3) {
@@ -114,6 +136,8 @@ int ldev_write(const char *name, const char *value) {
     if (i < 0) return -2;
     if (!value || strlen(value) >= sizeof(devices[i].data)) return -22;
     VirtualDevice *d = &devices[i];
+    if (d->kind == 4)
+        return d->write ? d->write(d->context, value) : -95;
     if (d->kind == 3) {
         if (!strcmp(value, "inc")) {
             if (d->count == UINT32_MAX) return -28;
@@ -143,6 +167,7 @@ void ldev_list(char *out, size_t cap) {
     for (int i = 0; i < LDEV_MAX; i++) if (devices[i].kind) {
         add(out, cap, devices[i].name);
         add(out, cap, devices[i].kind == 1 ? "  register\n" :
-                       devices[i].kind == 2 ? "  upper\n" : "  counter\n");
+                       devices[i].kind == 2 ? "  upper\n" :
+                       devices[i].kind == 3 ? "  counter\n" : "  hardware\n");
     }
 }

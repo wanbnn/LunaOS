@@ -1,0 +1,45 @@
+name: LunaSDK native ABI and scripting smoke
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'kernel/lunasdk_*'
+      - 'kernel/devkit.*'
+      - 'apps/developer.c'
+      - 'apps/lunapy.c'
+      - 'apps/javascript.c'
+      - 'tests/lunasdk_*'
+      - 'tests/lunapy.c'
+      - 'tests/devkit.c'
+      - 'sdk/native/**'
+      - 'Makefile'
+      - '.github/workflows/lunasdk.yml'
+  pull_request:
+    paths:
+      - 'kernel/lunasdk_*'
+      - 'kernel/devkit.*'
+      - 'apps/developer.c'
+      - 'apps/lunapy.c'
+      - 'apps/javascript.c'
+      - 'tests/lunasdk_*'
+      - 'tests/lunapy.c'
+      - 'tests/devkit.c'
+      - 'sdk/native/**'
+      - 'Makefile'
+      - '.github/workflows/lunasdk.yml'
+jobs:
+  sdk-host:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate LunaSDK ABI and LunaPy preview contracts
+        run: make test-devkit test-lunasdk-hardware test-lunapy
+      - name: Compile native driver examples for i386
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib cmake
+          mkdir -p build/ci
+          gcc -m32 -std=gnu11 -O2 -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Ikernel -c kernel/lunasdk_hardware.c -o build/ci/lunasdk_hardware.o
+          gcc -m32 -std=gnu11 -O2 -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Ikernel -c kernel/lunasdk_edu.c -o build/ci/lunasdk_edu.o
+          cmake -S sdk/native -B build/sdk-cmake
+          cmake --build build/sdk-cmake

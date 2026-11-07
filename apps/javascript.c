@@ -4,6 +4,7 @@
 #include "install.h"
 #include "task.h"
 #include "devkit.h"
+#include "lunasdk_hardware.h"
 static uint32_t deadline;
 static char *log_buffer;
 static size_t log_cap;
@@ -140,12 +141,60 @@ static JSValue sdk_open_app(JSContext *ctx, JSValueConst self, int argc, JSValue
     gui_open(app);
     return JS_NewBool(ctx, true);
 }
+/* Real hardware discovery. These methods access the kernel's PCI bus
+ * accessor but never grant direct config writes or MMIO to script code. */
+static JSValue sdk_pci_count(JSContext *ctx, JSValueConst self, int argc, JSValueConst *argv) {
+    (void)self; (void)argc; (void)argv;
+    unsigned count = 0;
+    if (lunasdk_pci_count(&count)) return JS_ThrowTypeError(ctx, "PCI enumeration failed");
+    return JS_NewUint32(ctx, count);
+}
+static JSValue sdk_pci_get(JSContext *ctx, JSValueConst self, int argc, JSValueConst *argv) {
+    (void)self;
+    uint32_t index = 0;
+    if (argc < 1 || JS_ToUint32(ctx, &index, argv[0]) < 0)
+        return JS_ThrowTypeError(ctx, "pci.get(index) requires an unsigned index");
+    LunaPciInfo d;
+    if (lunasdk_pci_get(index, &d)) return JS_NULL;
+    JSValue info = JS_NewObject(ctx);
+#define PCI_FIELD(name, value) JS_SetPropertyStr(ctx, info, name, JS_NewUint32(ctx, value))
+    PCI_FIELD("bus", d.bus); PCI_FIELD("slot", d.slot);
+    PCI_FIELD("function", d.function); PCI_FIELD("vendor", d.vendor);
+    PCI_FIELD("device", d.device); PCI_FIELD("classCode", d.class_code);
+    PCI_FIELD("revision", d.revision); PCI_FIELD("subsystem", d.subsystem);
+    PCI_FIELD("irq", d.irq); PCI_FIELD("pin", d.pin);
+#undef PCI_FIELD
+    return info;
+}
+static JSValue sdk_pci_read(JSContext *ctx, JSValueConst self, int argc, JSValueConst *argv) {
+    (void)self;
+    uint32_t v[5] = {0};
+    if (argc != 5)
+        return JS_ThrowTypeError(ctx, "pci.read(bus,slot,function,offset,width)");
+    for (int i = 0; i < 5; i++)
+        if (JS_ToUint32(ctx, &v[i], argv[i]) < 0) return JS_EXCEPTION;
+    uint32_t value = 0;
+    if (lunasdk_pci_read(v[0], v[1], v[2], v[3], v[4], &value))
+        return JS_ThrowTypeError(ctx, "PCI device not found or invalid read");
+    return JS_NewUint32(ctx, value);
+}
+static JSValue sdk_audio_beep(JSContext *ctx, JSValueConst self, int argc, JSValueConst *argv) {
+    (void)self;
+    uint32_t hz = 0, ms = 0;
+    if (argc != 2 || JS_ToUint32(ctx, &hz, argv[0]) < 0 ||
+        JS_ToUint32(ctx, &ms, argv[1]) < 0)
+        return JS_ThrowTypeError(ctx, "audio.beep(hz, duration_ms)");
+    if (hz < 20 || hz > 20000 || ms < 1 || ms > 250)
+        return JS_ThrowRangeError(ctx, "audio.beep: range 20..20000 Hz and 1..250 ms");
+    audio_beep(hz, ms);
+    return JS_UNDEFINED;
+}
 static void sdk_install(JSContext *ctx) {
     JSValue global = JS_GetGlobalObject(ctx);
     JSValue luna = JS_NewObject(ctx);
     JSValue fs = JS_NewObject(ctx), dev = JS_NewObject(ctx), app = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, luna, "version", JS_NewString(ctx, VERSION));
-    JS_SetPropertyStr(ctx, luna, "apiVersion", JS_NewInt32(ctx, 1));
+    JS_SetPropertyStr(ctx, luna, "apiVersion", JS_NewInt32(ctx, 2));
     JS_SetPropertyStr(ctx, luna, "uptime", JS_NewCFunction(ctx, sdk_uptime, "uptime", 0));
     JS_SetPropertyStr(ctx, fs, "read", JS_NewCFunction(ctx, sdk_read, "read", 1));
     JS_SetPropertyStr(ctx, fs, "write", JS_NewCFunction(ctx, sdk_write, "write", 2));
@@ -156,6 +205,15 @@ static void sdk_install(JSContext *ctx) {
     JS_SetPropertyStr(ctx, luna, "device", dev);
     JS_SetPropertyStr(ctx, app, "open", JS_NewCFunction(ctx, sdk_open_app, "open", 1));
     JS_SetPropertyStr(ctx, luna, "app", app);
+    JSValue hardware = JS_NewObject(ctx), pci = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, pci, "count", JS_NewCFunction(ctx, sdk_pci_count, "count", 0));
+    JS_SetPropertyStr(ctx, pci, "get", JS_NewCFunction(ctx, sdk_pci_get, "get", 1));
+    JS_SetPropertyStr(ctx, pci, "read", JS_NewCFunction(ctx, sdk_pci_read, "read", 5));
+    JS_SetPropertyStr(ctx, hardware, "pci", pci);
+    JS_SetPropertyStr(ctx, luna, "hardware", hardware);
+    JSValue audio = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, audio, "beep", JS_NewCFunction(ctx, sdk_audio_beep, "beep", 2));
+    JS_SetPropertyStr(ctx, luna, "audio", audio);
     JS_SetPropertyStr(ctx, global, "luna", luna);
     JS_FreeValue(ctx, global);
 }
