@@ -78,7 +78,7 @@ static JSValue sdk_write(JSContext *ctx, JSValueConst self, int argc, JSValueCon
     if (!body) return JS_EXCEPTION;
     /* Avoid silent truncation or embedded NUL: LunaFS is a text file system. */
     size_t len = strlen(body);
-    bool written = len < FILE_CAP && !fs_write(path, body, false);
+    bool written = !fs_write_bytes(path, body, len, false);
     JS_FreeCString(ctx, body);
     return JS_NewBool(ctx, written);
 }

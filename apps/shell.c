@@ -525,7 +525,11 @@ static int execute(int argc, char **a, const char *input, char *out) {
             emit(out, "source: file unavailable or recursion limit\n");
             return 1;
         }
-        char script[FILE_CAP];
+        char script[LUNA_TEXT_BUFFER];
+        if (f->size >= sizeof(script)) {
+            emit(out, "source: script exceeds shell execution buffer; split the script\n");
+            return 1;
+        }
         strcpy(script, f->data);
         depth++;
         char *p = script;
@@ -743,7 +747,11 @@ void shell_run(const char *line) {
                     valid = false;
                     status = 1;
                 } else
-                    strcpy(input, f->data);
+                    if (f->size >= sizeof(input)) {
+                        strcpy(out, "lunaSH: input exceeds pipeline buffer\n");
+                        valid = false;
+                        status = 1;
+                    } else strcpy(input, f->data);
             }
             if (valid)
                 status = execute(argc, argv, input, out);

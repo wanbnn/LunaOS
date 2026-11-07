@@ -192,7 +192,7 @@ void setup_live(void) {
 }
 static void fail(const char *s) {
     if (backup_valid) {
-        memcpy(files, file_backup, sizeof(files));
+        fs_restore_state(file_backup);
         backup_valid = false;
     }
     secret_clear(password, sizeof(password));
@@ -814,7 +814,12 @@ void setup_poll(void) {
         return;
     }
     if (install_phase == 2) {
-        memcpy(file_backup, files, sizeof(files));
+        /* File data uses owned heap buffers; a shallow copy would dangle. */
+        fs_discard_state(file_backup);
+        if (fs_clone(file_backup, files)) {
+            fail("Insufficient memory for filesystem backup.");
+            return;
+        }
         backup_valid = true;
         char region[256] = "country=";
         strcat(region, country_codes[selected_region]);
@@ -860,6 +865,7 @@ void setup_poll(void) {
             fail("Unable to commit verified boot sector.");
             return;
         }
+        fs_discard_state(file_backup);
         backup_valid = false;
         change_page(9);
         reboot_at = frame_clock + 7000;

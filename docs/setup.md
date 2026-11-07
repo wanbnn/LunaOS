@@ -54,8 +54,11 @@ Após confirmação, o instalador invalida o boot do destino, limpa metadados GP
 final do disco e copia a imagem. O começo da imagem substitui também o GPT primário.
 Cada bloco copiado é lido de volta e comparado. O formato é MBR, com uma entrada
 LunaOS 0xda iniciando no setor 8192; o loader próprio lê seus estágios antes disso.
-O LunaFS mantém os limites atuais (64 entradas, arquivos de até 8 KiB), sem expandir
-capacidade de arquivos só porque a partição é maior.
+O LunaFS2 mantém até 64 entradas e grava arquivos binários de tamanho variável.
+O limite de 8 KiB por arquivo foi removido, mas o armazenamento persistente ainda
+cabe em duas regiões reservadas de ~2 MiB para snapshots; a capacidade disponível
+no disco/pendrive não se torna automaticamente espaço para arquivos. O formato v1
+continua legível para migração.
 
 A configuração e o hash vão para snapshots LunaFS no **destino**, com flush e
 verificação. O setor de boot assinado e o novo identificador de disco só são

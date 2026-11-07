@@ -25,7 +25,8 @@ void settings_init(void) {
     File *f = fs_find("/etc/luna-settings");
     if (!f)
         return;
-    char buf[FILE_CAP];
+    char buf[LUNA_TEXT_BUFFER];
+    if (f->size >= sizeof(buf)) return;
     strcpy(buf, f->data);
     char *p = buf;
     while (*p) {

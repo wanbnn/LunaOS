@@ -1,0 +1,21 @@
+name: LunaFS2 compatibility and persistence
+on:
+  push:
+    branches: [main, feat/lunafs2-large-files]
+    paths: ['kernel/fs.c','kernel/luna.h','apps/**','ui/setup.c','tests/lunafs2.c','tests/fs_mock/**','Makefile','.github/workflows/lunafs2.yml']
+  pull_request:
+    paths: ['kernel/fs.c','kernel/luna.h','apps/**','ui/setup.c','tests/lunafs2.c','tests/fs_mock/**','Makefile','.github/workflows/lunafs2.yml']
+jobs:
+  lunafs2:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify filesystem, snapshots and migration
+        run: make test-lunafs2
+      - name: Build affected kernel sources for freestanding i386
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib libc6-dev-i386
+          mkdir -p build/ci
+          gcc -m32 -std=gnu11 -O2 -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Ikernel -Ibuild -Itests/fs_mock -c kernel/fs.c -o build/ci/fs.o
+          gcc -m32 -std=gnu11 -O2 -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Ikernel -Ibuild -c ui/setup.c -o build/ci/setup.o

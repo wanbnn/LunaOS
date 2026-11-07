@@ -4,6 +4,7 @@
 #include "luna.h"
 #include "web.h"
 #include "lunasdk_hardware.h"
+#include "heap.h"
 
 static void put(char *out, size_t cap, const char *s) {
     append(out, s, cap);
@@ -216,10 +217,15 @@ int developer_command(int argc, char **argv, char *out, size_t cap) {
         File *f = fs_find(argv[2]);
         if (!f || f->dir) { put(out, cap, "dev: program not found\n"); return 1; }
         /* Copy before execution: the script is allowed to overwrite itself. */
-        char script[FILE_CAP];
-        memcpy(script, f->data, f->size + 1);
-        if (py) return lunapy_eval_sdk(script, out, cap) ? 1 : 0;
-        return javascript_eval_sdk(script, f->path, out, cap) ? 1 : 0;
+        /* Scripts may now be larger than the old 8 KiB LunaFS record.
+         * Use kernel-owned scratch and release it after evaluation. */
+        char *script = heap_allocate_owned((size_t)f->size + 1u, 1);
+        if (!script) { put(out, cap, "dev: insufficient memory for program\n"); return 1; }
+        memcpy(script, f->data, f->size + 1u);
+        int result = py ? lunapy_eval_sdk(script, out, cap)
+                        : javascript_eval_sdk(script, f->path, out, cap);
+        heap_release(script);
+        return result ? 1 : 0;
     }
     if (argc == 2 && !strcmp(argv[1], "list")) {
         const char *home = account_home();

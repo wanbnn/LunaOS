@@ -76,3 +76,10 @@ ser confundida com isolamento completo de falhas/OOM por processo.
   e gera `dist/process-ram.png` e `dist/process-memory-report.json`.
 - `LUNA_TEST_DIR=/tmp/luna-process-tasks python3 tests/multitask.py`: proteções
   dos rings, PIDs, janelas, encerramento e reabertura de tarefas.
+
+## Arquivos no LunaFS2
+
+A estrutura de arquivos deixou de embutir um buffer de 8 KiB em cada entrada;
+o conteúdo de arquivos agora é alocado pelo heap conforme necessário e liberado
+na exclusão/substituição. Backups temporários do instalador fazem cópia profunda
+para não compartilhar ponteiros de memória. Ver [LunaFS2](lunafs2.md).

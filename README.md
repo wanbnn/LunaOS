@@ -275,3 +275,14 @@ O LunaOS utiliza componentes de terceiros, incluindo **musl**, **QuickJS**, **Be
 **LunaOS · Construindo um sistema operacional, um componente de cada vez.**
 
 </div>
+
+### LunaFS2: arquivos maiores e binários
+
+O LunaFS deixou de reservar 8 KiB fixos por arquivo. Dados são alocados sob demanda
+na RAM e serializados em snapshots compactos `LUNAFS2` no disco, com conteúdo
+binário e até 64 entradas. O formato `LUNAFS1` é lido para migração sem apagar
+a instalação; a próxima gravação atualiza o formato. O limite restante é a região
+**total** de snapshots (aproximadamente 2 MiB por slot), e não um teto de 8 KiB
+por arquivo. Esta região ainda **não é suficiente** para CPython completo ou
+pacotes grandes: será necessária uma partição de dados e drivers de armazenamento
+nativos para ampliar a capacidade. Consulte [LunaFS2](docs/lunafs2.md).

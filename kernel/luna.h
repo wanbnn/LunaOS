@@ -103,12 +103,13 @@ void pci_list(char *, size_t);
 bool disk_read(uint32_t, void *);
 bool disk_write(uint32_t, const void *);
 #define MAX_FILES 64
-#define FILE_CAP 8192
+/* Scratch buffers for shell/UI text commands; NOT a file-size limit. */
+#define LUNA_TEXT_BUFFER 8192
 #define PATH_CAP 128
 typedef struct {
     char path[PATH_CAP];
     uint32_t used, size, dir;
-    char data[FILE_CAP];
+    char *data; /* Owned by LunaFS, dynamically sized and NUL-terminated. */
 } File;
 extern File files[MAX_FILES];
 extern char cwd[PATH_CAP];
@@ -118,6 +119,10 @@ File *fs_find(const char *);
 int fs_create(const char *, bool);
 int fs_remove(const char *);
 int fs_write(const char *, const char *, bool);
+int fs_write_bytes(const char *, const void *, size_t, bool);
+int fs_clone(File *destination, const File *source);
+void fs_discard_state(File *state);
+void fs_restore_state(File *backup);
 bool fs_save(void);
 bool fs_load(void);
 extern bool fs_dirty;
