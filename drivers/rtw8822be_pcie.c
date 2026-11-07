@@ -11,7 +11,7 @@
 #define RX_COUNT 16u
 #define RX_BYTES 11520u
 static struct {
-    bool present, master, powered, ready;
+    bool present, master, powered, ready, emulated;
     const char *stage;
     int error;
     DrvPci pci;
@@ -216,6 +216,7 @@ void rtw8822be_init(void) {
     int rc=drv_pci_find(0x10ec,0xb822,0,&dev.pci);
     if(rc) { dev.error=rc; return; }
     dev.present=true;
+    dev.emulated=dev.pci.subsystem==0x88221b36u;
     dev.io=(RtwRegisterIo){.read=rd,.write=wr,.delay_us=us};
 #define STEP(label,expr) do { dev.stage=label; rc=(expr); if(rc) goto fail; } while(0)
     STEP("PCI claim",drv_pci_claim(&dev.pci));
@@ -303,6 +304,7 @@ bool rtw8822be_present(void) { return dev.present; }
 void rtw8822be_status(char *out,size_t cap) {
     out[0]=0;
     append(out,"RTL8822BE: ",cap); append(out,dev.stage ? dev.stage : "not initialized",cap);
+    if(dev.emulated) append(out," [QEMU laboratory model; passive RX only]",cap);
     if(dev.error) {
         char n[20]; append(out," error=",cap); number(n,(uint32_t)-dev.error); append(out,n,cap);
     }

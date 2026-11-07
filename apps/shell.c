@@ -1,4 +1,5 @@
 #include "clock.h"
+#include "wifi.h"
 #include "../drivers/rtw8822be_diag.h"
 #include "../drivers/iwl_pcie.h"
 #include "memory.h"
@@ -24,7 +25,7 @@ static const char *commands[] = {
     "uname",  "free",  "uptime",  "date",     "pci",     "net",     "ifconfig", "ping",  "wget",
     "browse", "audio", "beep",    "sync",     "history", "source",  "set",      "env",   "true",
     "false",  "sleep", "reboot",  "poweroff", "about",   "ps",      "tasks",    "kill",  "ringtest",
-    "js",     "dev",   "bench", "drvinfo", "whoami",   "setup",   "drvtest", "fwinfo",   "wifidiag", "memtest", 0};
+    "js",     "dev",   "bench", "drvinfo", "whoami",   "setup",   "drvtest", "fwinfo",   "wifidiag", "wifi", "memtest", 0};
 #define CAP 8192
 static void emit(char *out, const char *s) {
     append(out, s, CAP);
@@ -611,6 +612,39 @@ static int execute(int argc, char **a, const char *input, char *out) {
         emit(out, account_name());
         emit(out, "\n");
         return 0;
+    } else if (!strcmp(c, "wifi")) {
+        if (argc == 2 && !strcmp(a[1], "scan")) {
+            int rc=wifi_scan_start();
+            if(rc) { emit(out,"Wi-Fi scan failed error="); num(out,(unsigned)-rc); emit(out,"\n"); return 1; }
+            emit(out,"Wi-Fi scan started; use wifi results after completion\n"); return 0;
+        }
+        if (argc == 2 && !strcmp(a[1], "results")) {
+            WifiAp aps[WIFI_MAX_APS]; unsigned count=0;
+            int rc=wifi_scan_results(aps,WIFI_MAX_APS,&count);
+            if(rc) { emit(out,"Wi-Fi results unavailable error="); num(out,(unsigned)-rc); emit(out,"\n"); return 1; }
+            emit(out,"Wi-Fi networks="); num(out,count); emit(out,"\n");
+            for(unsigned i=0;i<count;i++) {
+                for(unsigned j=0;j<aps[i].ssid_len;j++) {
+                    unsigned char ch=(unsigned char)aps[i].ssid[j];
+                    char printable[2]={(ch>=32 && ch<127) ? (char)ch : '?',0};
+                    emit(out,printable);
+                }
+                emit(out," channel="); num(out,aps[i].channel);
+                emit(out," security="); emit(out,aps[i].security==WIFI_OPEN ? "open" :
+                    aps[i].security==WIFI_WPA2_PSK ? "WPA2-PSK" : "unsupported"); emit(out,"\n");
+            }
+            return 0;
+        }
+        if (argc == 2 && !strcmp(a[1], "status")) {
+            WifiState state={0}; int rc=wifi_state(&state);
+            if(rc) { emit(out,"Wi-Fi driver unavailable\n"); return 1; }
+            emit(out,"Wi-Fi link="); num(out,state.link);
+            emit(out," radio="); num(out,state.radio_ready);
+            emit(out," connect="); num(out,state.can_connect);
+            emit(out," error="); num(out,state.error < 0 ? (unsigned)-state.error : (unsigned)state.error);
+            emit(out,"\n"); return 0;
+        }
+        emit(out,"usage: wifi scan|results|status\n"); return 2;
     } else if (!strcmp(c, "wifidiag")) {
         if (argc == 2 && !strcmp(a[1], "intel")) return wifi_intel_diag(out, CAP) ? 1 : 0;
         if (rtw8822be_present()) { rtw8822be_status(out, CAP); return 0; }
