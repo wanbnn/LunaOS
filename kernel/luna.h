@@ -138,6 +138,7 @@ extern int shell_cursor;
 extern bool ui_dirty;
 void gui_init(void);
 void gui_draw(void);
+void gui_motion_poll(void);
 void gui_damage(int, int, int, int);
 void gui_damage_quick(void);
 void gui_damage_all(void);

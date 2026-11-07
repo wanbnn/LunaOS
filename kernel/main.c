@@ -82,6 +82,7 @@ void kmain(void) {
             gui_invalidate_app(APP_TASKS);
             gui_damage(W - 136, 8, 130, 28); /* the clock in the top bar */
         }
+        gui_motion_poll();
         if (ui_dirty || cursor_pending) {
             uint32_t now = frame_clock * prefs.frame_hz;
                         if ((int32_t)(now - next_frame) >= 0) {

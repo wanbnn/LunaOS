@@ -3,6 +3,7 @@
 #include "settings.h"
 #include "web.h"
 #include "window.h"
+#include "motion.h"
 Window windows[APP_COUNT];
 bool ui_dirty = true, controls_open;
 int active_app = -1;
@@ -17,6 +18,9 @@ static int glass_app, glass_x, glass_y, glass_w, glass_h;
 /* One large cache is shared by oversize windows; the small caches stay bounded. */
 static uint32_t large_surface[GFX_MAX_W * GFX_MAX_H];
 static int large_owner = -1;
+/* Display-only Y offsets. The canonical Window geometry never changes during an animation. */
+static int motion_y[APP_COUNT];
+_Static_assert(APP_COUNT == MOTION_CHANNELS, "one motion channel per app");
 static bool surface_valid[APP_COUNT], surface_focus[APP_COUNT];
 static bool launcher_open;
 static char launcher_query[64];
@@ -116,11 +120,23 @@ void gui_damage_quick(void) {
 static void damage_switch(void) {
     gui_damage((W - 468) / 2 - 10, H - 218, 488, 96);
 }
-static void damage_window(int app) {
+static void damage_window_at(int app, int dy) {
     Window *w = &windows[app];
     if (w->open)
-        gui_damage(w->x - SHADOW_SIDE, w->y - SHADOW_SIDE, w->w + 2 * SHADOW_SIDE,
-                   w->h + SHADOW_DROP);
+        gui_damage(w->x - SHADOW_SIDE, w->y + dy - SHADOW_SIDE,
+                   w->w + 2 * SHADOW_SIDE, w->h + SHADOW_DROP);
+}
+static void damage_window(int app) {
+    damage_window_at(app, motion_y[app]);
+}
+static void transition_begin(int app, int offset, unsigned duration) {
+    Window *w = &windows[app];
+    if (!w->open || w->minimized)
+        return;
+    damage_window(app);
+    motion_begin(app, frame_clock, offset, 0, duration);
+    motion_y[app] = offset;
+    damage_window(app);
 }
 static void damage_titlebar(int app) {
     Window *w = &windows[app];
@@ -175,6 +191,7 @@ void window_focus(int app) {
     if (!w->open)
         return;
     int previous = active_app;
+    bool restored = w->minimized;
     w->minimized = false;
     remove_z(app);
     zorder[zcount++] = app;
@@ -184,11 +201,17 @@ void window_focus(int app) {
         damage_titlebar(previous);
     damage_titlebar(app);
     damage_dock();
+    if (restored)
+        transition_begin(app, 28, 180);
+    else if (previous >= 0 && previous != app)
+        transition_begin(app, 10, 130);
 }
 void gui_task_closed(int app) {
     if (app < 0 || app >= APP_COUNT)
         return;
     damage_window(app);
+    motion_cancel(app);
+    motion_y[app] = 0;
     windows[app].open = false;
     windows[app].minimized = false;
     windows[app].pid = 0;
@@ -208,6 +231,8 @@ void window_minimize(int app) {
     if (app < 0)
         return;
     damage_window(app);
+    motion_cancel(app);
+    motion_y[app] = 0;
     windows[app].minimized = true;
     if (active_app == app)
         next_focus();
@@ -243,6 +268,8 @@ static void fit_window(Window *w) {
         w->y = 54;
 }
 void gui_display_changed(void) {
+    motion_reset();
+    memset(motion_y, 0, sizeof(motion_y));
     for (int i = 0; i < APP_COUNT; i++) {
         if (windows[i].open)
             fit_window(&windows[i]);
@@ -257,6 +284,8 @@ void window_maximize(int app) {
         return;
     Window *w = &windows[app];
     damage_window(app);
+    motion_cancel(app);
+    motion_y[app] = 0;
     if (!w->maximized) {
         w->restore_x = w->x;
         w->restore_y = w->y;
@@ -283,6 +312,7 @@ void gui_open(int app) {
     if (app < 0 || app >= APP_COUNT)
         return;
     Window *w = &windows[app];
+    bool created = !w->open;
     if (!w->open) {
         surface_valid[app] = false;
         uint32_t pid = task_spawn(app, names[app], 3, 0);
@@ -311,14 +341,19 @@ void gui_open(int app) {
         damage_window(app);
     }
     window_focus(app);
+    if (created)
+        transition_begin(app, 28, 180);
     damage_dock();
 }
 void gui_focus_home(void) {
-    for (int i = 0; i < APP_COUNT; i++)
+    for (int i = 0; i < APP_COUNT; i++) {
         if (windows[i].open) {
             damage_window(i);
             windows[i].minimized = true;
         }
+        motion_cancel(i);
+        motion_y[i] = 0;
+    }
     active_app = -1;
     controls_open = false;
     gui_damage_all();
@@ -523,6 +558,10 @@ static void titlebar(Window *w, bool focused) {
 }
 /* A window fully hidden by another one does not need to be painted. */
 static bool window_covered(int z) {
+    /* A moving window cannot be used as an exact occluder. */
+    for (int i = 0; i < APP_COUNT; i++)
+        if (motion_y[i])
+            return false;
     Window *w = &windows[zorder[z]];
     for (int next = z + 1; next < zcount; next++) {
         Window *above = &windows[zorder[next]];
@@ -635,8 +674,9 @@ static void paint_region(int rx, int ry, int rw, int rh) {
         bool large = w->w > GFX_CACHE_W || w->h > GFX_CACHE_H;
         uint32_t *surface = large ? large_surface : surfaces[w->app];
         int stride = large ? GFX_MAX_W : GFX_CACHE_W;
-        gfx_window_shadow(w->x, w->y, w->w, w->h, 20);
-        gfx_blit_surface(surface, stride, w->x, w->y, w->w, w->h, 20);
+        int visible_y = w->y + motion_y[w->app];
+        gfx_window_shadow(w->x, visible_y, w->w, w->h, 20);
+        gfx_blit_surface(surface, stride, w->x, visible_y, w->w, w->h, 20);
     }
     gfx_occlusion_clear();
     dock();
@@ -651,6 +691,35 @@ static void paint_region(int rx, int ry, int rw, int rh) {
         icon((W - 468) / 2 + 20, H - 192, app_icons[active_app], 28, 0xffffff);
         text((W - 468) / 2 + 64, H - 190, app_name(active_app), 20, 0xffffff);
     }
+}
+/* Called by the kernel loop. Repaint only old/new footprints, at most once
+ * per frame; dormant channels consume no redraw time. */
+void gui_motion_poll(void) {
+    if (setup_active)
+        return;
+    uint32_t now = frame_clock;
+    for (int app = 0; app < APP_COUNT; app++) {
+        if (!motion_active(app, now) && !motion_y[app])
+            continue;
+        int next = motion_value(app, now);
+        if (next != motion_y[app]) {
+            damage_window(app);
+            motion_y[app] = next;
+            damage_window(app);
+        }
+        if (!motion_active(app, now)) {
+            motion_cancel(app);
+            motion_y[app] = 0;
+        }
+    }
+    /* A reusable eight-dot busy indicator for clients with nonblocking work.
+     * Synchronous network requests still block UI updates until they yield. */
+    static unsigned last_spinner;
+    unsigned phase = motion_spinner_phase(now);
+    if (browser_is_loading() && windows[APP_BROWSER].open && !windows[APP_BROWSER].minimized &&
+        phase != last_spinner)
+        gui_invalidate_app(APP_BROWSER);
+    last_spinner = phase;
 }
 void gui_draw(void) {
         if (setup_active) {
@@ -687,6 +756,7 @@ void gui_draw(void) {
 }
 
 void gui_init(void) {
+    motion_reset();
     gfx_init();
     setup_init();
     if (!setup_active)
@@ -717,6 +787,12 @@ void gui_pointer(int x, int y, int buttons) {
         drag = -1;
     }
     if (drag >= 0 && (buttons & 1)) {
+        /* Pointer dragging always owns the geometry; cancel the easing. */
+        if (motion_y[drag]) {
+            damage_window(drag);
+            motion_cancel(drag);
+            motion_y[drag] = 0;
+        }
         Window *w = &windows[drag];
         int ox = w->x, oy = w->y;
         w->x = x - drag_dx;

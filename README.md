@@ -24,7 +24,7 @@ O LunaOS tem **bootloader próprio**, **kernel próprio em C**, **interface grá
 **O que existe hoje:**
 
 - Boot BIOS x86 e caminho **UEFI x64 experimental** que transfere o controle ao kernel i386.
-- Desktop com dock, pesquisa, janelas, compositor 32 bits, fontes **Inter Tight** e ícones **Lucide**.
+- Desktop com dock, pesquisa, janelas, compositor 32 bits, **transições suaves nativas**, fontes **Inter Tight** e ícones **Lucide**.
 - Assistente de primeiro boot, modo live, instalação em disco IDE compatível e login.
 - Terminal **lunaSH**, Files, Notes, Settings, navegador e Gerenciador de Tarefas.
 - Pilha de rede IPv4 via **RTL8139**, HTTP e HTTPS/TLS 1.2.
@@ -91,6 +91,8 @@ Leia [RTL8822BE nativo](docs/rtw8822be-native-port.md), [Intel AX211](docs/intel
 - O comando `free` mostra reservas, páginas alocadas e livres; `memtest` verifica alocação e liberação. O kernel continua **i386 sem PAE**, com o limite de endereçamento correspondente.
 - `ps` e o Gerenciador de Tarefas mostram **RAM por PID**, incluindo arenas, pilhas e estruturas de paginação. A contabilização não transforma os backends de aplicativos em processos completamente isolados.
 - O relógio da barra superior abre um **calendário mensal**. Em **Settings > Date & time** é possível definir data/hora sem internet, ajustar offset UTC e configurar sincronização SNTP assíncrona (servidor padrão: `time.cloudflare.com`). Não há banco de fusos IANA nem autenticação NTS.
+
+Detalhes do motor de animações: [Motion Engine](docs/motion.md).
 
 Saiba mais: [Memória física](docs/physical-memory.md), [RAM por processo](docs/process-memory.md) e [Calendário e horário](docs/calendar.md).
 

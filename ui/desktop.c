@@ -2,6 +2,7 @@
 #include "settings.h"
 #include "window.h"
 #include "webengine.h"
+#include "motion.h"
 #include "memory.h"
 #define WHITE 0xf2f7ff
 #define MUTED 0xb5cbdf
@@ -314,6 +315,9 @@ static void browser_load(const char *url) {
     }
     browser_loading = false;
     gui_invalidate_app(APP_BROWSER);
+}
+bool browser_is_loading(void) {
+    return browser_loading;
 }
 void browser_open(const char *url) {
     if (strlen(url) >= sizeof(pending_url))
@@ -643,6 +647,15 @@ static void browser(int x, int y, int w, int h) {
              secure ? 0x86e3ab : 0xffcf8f);
     }
     if (browser_loading) {
+        /* Eight tiny primitives instead of frames, textures or trigonometry. */
+        static const int8_t sx[8] = {0, 7, 10, 7, 0, -7, -10, -7};
+        static const int8_t sy[8] = {-10, -7, 0, 7, 10, 7, 0, -7};
+        unsigned phase = motion_spinner_phase(frame_clock);
+        for (unsigned i = 0; i < 8; i++) {
+            unsigned age = (phase + 8 - i) & 7u;
+            round_rect(x + 33 + sx[i], y + 130 + sy[i], 4, 4, 2, WHITE,
+                       42 + (int)age * 25);
+        }
         text(x + 18, y + 89, "Opening document...", 28, WHITE);
         text(x + 18, y + 137, "Other apps keep running while this one waits.", 16, MUTED);
     } else if (welcome) {
