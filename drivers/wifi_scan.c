@@ -6,14 +6,18 @@
 static int state(void *ctx, WifiState *s) {
     WifiScanner *w = ctx;
     *s = (WifiState){.radio_ready=w->radio.ready(w->radio.context),
-        .link=w->scanning ? WIFI_SCANNING : WIFI_IDLE, .error=w->error};
+        .can_connect=w->radio.connect && w->radio.link,
+        .link=w->scanning ? WIFI_SCANNING : (w->radio.link ?
+              w->radio.link(w->radio.context) : WIFI_IDLE),
+        .error=w->error ? w->error : (w->radio.connection_error ?
+              w->radio.connection_error(w->radio.context) : 0)};
     if (!s->radio_ready) s->link=WIFI_DOWN;
     return s->radio_ready ? 0 : ENOTSUP;
 }
 static int start(void *ctx) {
     WifiScanner *w=ctx;
     if (!w->radio.ready(w->radio.context)) return ENOTSUP;
-    if (w->scanning) return -16;
+    if (w->scanning || (w->radio.link && w->radio.link(w->radio.context)>=WIFI_ASSOCIATING)) return -16;
     w->count=0; w->error=0; w->channel_index=0;
     int rc=w->radio.set_channel(w->radio.context,w->channels[0]);
     if (rc) { w->error=rc; return rc; }
@@ -33,7 +37,14 @@ static int results(void *ctx, WifiAp *out, unsigned cap, unsigned *count) {
 /* Scan support is independent of association; never imply that selecting an
  * SSID is sufficient to connect before authentication is implemented. */
 static int connect_ap(void *ctx, const WifiAp *ap, const char *password) {
-    (void)ctx; (void)ap; (void)password; return ENOTSUP;
+    WifiScanner *w=ctx;
+    if(!w->radio.connect || !w->radio.link) return ENOTSUP;
+    if(w->scanning || w->radio.link(w->radio.context)>=WIFI_ASSOCIATING) return -16;
+    for(unsigned i=0;i<w->count;i++) if(!memcmp(ap->bssid,w->aps[i].bssid,6) &&
+        ap->ssid_len==w->aps[i].ssid_len && !memcmp(ap->ssid,w->aps[i].ssid,ap->ssid_len) &&
+        ap->channel==w->aps[i].channel && ap->security==w->aps[i].security)
+        return w->radio.connect(w->radio.context,ap,password,w->rsn[i],w->rsn_len[i]);
+    return -2; /* Stale or spoofed selection: require a new genuine scan. */
 }
 static WifiSecurity security(const uint8_t *frame, unsigned bytes, uint16_t caps) {
     if (!(caps & 16)) return WIFI_OPEN;
@@ -90,6 +101,16 @@ static void ingest(WifiScanner *w, unsigned bytes, int16_t rssi) {
         .security=security(w->frame,bytes,b.capability)};
     memcpy(ap->bssid,b.bssid,6);
     memcpy(ap->ssid,b.ssid,b.ssid_len); memcpy(w->bssid[slot],b.bssid,6);
+    /* Preserve the AP's exact RSN IE for downgrade checks in WPA2 M3. */
+    w->rsn_len[slot]=0;
+    if(ap->security==WIFI_WPA2_PSK) for(unsigned p=36;p+2<=bytes;) {
+        unsigned id=w->frame[p], n=w->frame[p+1];
+        if(n>bytes-p-2) break;
+        if(id==48 && n+2<=WPA2_RSN_MAX) {
+            memcpy(w->rsn[slot],w->frame+p,n+2);w->rsn_len[slot]=n+2;break;
+        }
+        p+=n+2;
+    }
 }
 static void finish(WifiScanner *w, int error) {
     w->scanning=false;
@@ -98,7 +119,10 @@ static void finish(WifiScanner *w, int error) {
 }
 static void poll(void *ctx) {
     WifiScanner *w=ctx;
-    if(!w->scanning) return;
+    if(!w->scanning) {
+        if(w->radio.poll_client) w->radio.poll_client(w->radio.context);
+        return;
+    }
     if(!w->radio.ready(w->radio.context)) { finish(w,ENOTSUP); return; }
     for(unsigned budget=0;budget<16;budget++) {
         unsigned bytes=0; int16_t rssi=0;
