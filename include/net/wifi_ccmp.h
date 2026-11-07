@@ -5,13 +5,13 @@
 #include <stdint.h>
 #include "wpa2.h"
 /* Software WPA2 CCMP-128 (802.11i, non-QoS, single-MPDU only).
- * No TKIP, fragmentation, A-MSDU, QoS or rekeying. Not thread safe.
+ * No TKIP, fragmentation, A-MSDU, aggregate MPDUs or rekeying. Not thread safe.
  * The caller MUST validate BSSID, transmitter and association state.
  * On MIC/replay failure, the decrypted output is NEVER delivered.
  */
 typedef struct {
     uint8_t pairwise[16], group[16], group_index;
-    uint64_t tx_pn, rx_pairwise_pn, rx_group_pn[4];
+    uint64_t tx_pn, rx_pairwise_pn[17], rx_group_pn[4][17];
     bool active;
 } WifiCcmp;
 int wifi_ccmp_install(WifiCcmp *, const Wpa2Keys *);
