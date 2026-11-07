@@ -4,6 +4,7 @@
 #include "task.h"
 #include "web.h"
 #include "wifi.h"
+#include "storage.h"
 #define INK 0x20344f
 #define SECONDARY 0x586d85
 #define BLUE 0x316ade
@@ -15,7 +16,8 @@ static uint32_t page_started, greeting_clock, reboot_at;
 static int greeting, previous_buttons, install_phase;
 static uint32_t install_sector, source_bytes;
 static bool detected, hashing, installed, login_busy;
-static bool eligible[4];
+static bool eligible[STORAGE_DEVICE_COUNT];
+static unsigned storage_page;
 static char username[25], password[65], confirmation[65], erase_text[32], layout_test[64];
 static char radio[512], message[192];
 static WifiAp wifi_aps[WIFI_MAX_APS];
@@ -122,6 +124,16 @@ static void setup_wifi_connect(void) {
     secret_clear(wifi_password, sizeof(wifi_password));
     ui_dirty = true;
 }
+static unsigned storage_entry(unsigned row) {
+    return storage_page==0 ? row :
+           STORAGE_NATIVE_BASE+(storage_page-1u)*4u+row;
+}
+static unsigned storage_page_for(unsigned index) {
+    return index < 4 ? 0 : 1u+(index-STORAGE_NATIVE_BASE)/4u;
+}
+static unsigned storage_pages(void) {
+    return 1u+(STORAGE_NATIVE_SLOTS+3u)/4u;
+}
 static bool source_valid(void) {
     uint8_t header[512];
     uint32_t version, bytes, sector;
@@ -140,9 +152,10 @@ static void enumerate_targets(void) {
     uint32_t source_id = 0;
     if (disk_read(0, transfer))
         memcpy(&source_id, transfer + 440, 4);
-    for (unsigned i = 0; i < 4; i++) {
-        const DiskInfo *d = disk_info(i);
-        eligible[i] = d->present && d->supported && !d->optical && i != disk_boot_index() &&
+    for (unsigned i = 0; i < STORAGE_DEVICE_COUNT; i++) {
+        const DiskInfo *d = i==4 ? 0 : disk_info(i);
+        eligible[i] = d && d->present && d->supported && !d->optical &&
+                      i != disk_boot_index() && d->sectors <= UINT32_MAX &&
                       d->sectors >= LUNA_IMAGE_BYTES / 512;
         if (eligible[i] && disk_read_on(i, 0, transfer)) {
             uint32_t id;
@@ -156,6 +169,7 @@ void setup_init(void) {
     secret_clear(password, sizeof(password));
     secret_clear(confirmation, sizeof(confirmation));
     selected_disk = -1;
+    storage_page = 0;
     selected_region = 0;
     previous_buttons = 0;
     detected = false;
@@ -219,7 +233,7 @@ static void erase_token(char *out) {
     strcat(out, n);
 }
 static bool confirmed(void) {
-    if (selected_disk < 0 || selected_disk >= 4 || !eligible[selected_disk])
+    if (selected_disk < 0 || selected_disk >= STORAGE_DEVICE_COUNT || !eligible[selected_disk])
         return false;
     char token[32];
     erase_token(token);
@@ -435,39 +449,44 @@ void setup_draw(void) {
         heading("Onde o LunaOS vai morar?", "Where will LunaOS live?",
                 "Selecione o disco inteiro. As partições existentes serão removidas.",
                 "Select the whole disk. Existing partitions will be removed.");
-        for (unsigned i = 0; i < 4; i++) {
-            const DiskInfo *d = disk_info(i);
-            char name[96] = "IDE ", n[20], detail[128];
-            number(n, i);
-            strcat(name, n);
-            strcat(name, "  ");
-            strcat(name, d->present ? d->model : tr("Não detectado", "Not detected"));
-            if (!d->present)
-                strcpy(detail, "--");
+        for (unsigned row_index = 0; row_index < 4; row_index++) {
+            unsigned i=storage_entry(row_index);
+            const DiskInfo *d=disk_info(i);
+            char name[96],n[20],detail[128];
+            strcpy(name,storage_disk_type(i));
+            strcat(name," ");
+            number(n,i);strcat(name,n);strcat(name,"  ");
+            strcat(name,d && d->present ? d->model :
+                  tr("Não detectado","Not detected"));
+            if(!d || !d->present)strcpy(detail,"--");
             else {
-                number(n, (uint32_t)(d->sectors / 2048));
-                strcpy(detail, n);
-                strcat(detail, " MiB / ");
-                strcat(detail,
-                       i == disk_boot_index()
-                           ? tr("mídia de instalação (protegida)", "installation media (protected)")
-                       : eligible[i]
-                           ? tr("disponível para instalação", "available for installation")
-                       : !d->supported
-                           ? tr("modo ATA não suportado", "unsupported ATA mode")
-                           : tr("pequeno demais ou cópia da origem", "too small or source clone"));
+                uint64_t mib=d->sectors/2048u;
+                if(mib>UINT32_MAX)strcpy(n,">4 TiB");
+                else number(n,(uint32_t)mib);
+                strcpy(detail,n);strcat(detail," MiB / ");
+                strcat(detail,i==disk_boot_index() ?
+                       tr("mídia de boot (protegida)","boot media (protected)") :
+                       eligible[i] ?
+                       tr("disponível para instalação","available for install") :
+                       !d->supported ?
+                       tr("driver/formato não suportado","unsupported driver/format") :
+                       tr("origem ou capacidade incompatível","source/capacity unsupported"));
             }
-            row(158, 279 + i * 65, 708, name, detail, selected_disk == (int)i, eligible[i]);
+            row(158,279+row_index*65,708,name,detail,
+                selected_disk==(int)i,eligible[i]);
         }
-        text(160, 552,
-             tr("Backend atual: IDE/ATA legado. AHCI, NVMe e USB pendentes.",
-                "Current backend: legacy IDE/ATA. AHCI, NVMe and USB pending."),
-             13, SECONDARY);
+        char page_info[80]="Discos - página ",n[20];
+        number(n,storage_page+1);strcat(page_info,n);
+        strcat(page_info,"/");number(n,storage_pages());strcat(page_info,n);
+        strcat(page_info,"  (< / > para trocar)");
+        text(160,552,page_info,13,SECONDARY);
     } else if (setup_page == 7) {
         heading("Pronto para instalar?", "Ready to install?",
                 "Confira o destino. Esta operação apaga as partições desse disco.",
                 "Review the target. This operation erases its existing partitions.");
-        char line[128] = "IDE ", n[8];
+        char line[128], n[8];
+        strcpy(line, storage_disk_type(selected_disk));
+        strcat(line, " ");
         number(n, selected_disk);
         strcat(line, n);
         strcat(line, " / ");
@@ -619,10 +638,18 @@ void setup_pointer(int x, int y, int buttons) {
         if (y >= 388 && y < 430)
             field_index = x >= 522 ? 2 : 1;
     }
-    if (setup_page == 6)
-        for (unsigned i = 0; i < 4; i++)
-            if (hit(x, y, 158, 279 + i * 65, 708, 48) && eligible[i])
+    if (setup_page == 6) {
+        if(hit(x,y,158,546,708,30)) {
+            if(x<450 && storage_page)storage_page--;
+            else if(x>=450 && storage_page+1<storage_pages())storage_page++;
+        }
+        for (unsigned row_index = 0; row_index < 4; row_index++) {
+            unsigned i=storage_entry(row_index);
+            if (i<STORAGE_DEVICE_COUNT &&
+                hit(x, y, 158, 279 + row_index * 65, 708, 48) && eligible[i])
                 selected_disk = i;
+        }
+    }
     ui_dirty = true;
 }
 void setup_key(int key) {
@@ -651,12 +678,20 @@ void setup_key(int key) {
         ui_dirty = true;
         return;
     }
+    if (setup_page == 6 && (c == KEY_LEFT || c == KEY_RIGHT)) {
+        if(c==KEY_LEFT && storage_page)storage_page--;
+        if(c==KEY_RIGHT && storage_page+1<storage_pages())storage_page++;
+        ui_dirty=true;return;
+    }
     if (setup_page == 6 && (c == KEY_DOWN || c == KEY_UP)) {
-        int i = selected_disk < 0 ? 0 : selected_disk;
-        for (int n = 0; n < 4; n++) {
-            i = (i + (c == KEY_UP ? 3 : 1)) % 4;
+        int i = selected_disk < 0 ? (c==KEY_UP ? 0 : STORAGE_DEVICE_COUNT-1)
+                                  : selected_disk;
+        for (unsigned n = 0; n < STORAGE_DEVICE_COUNT; n++) {
+            i = (i + (c == KEY_UP ? STORAGE_DEVICE_COUNT-1 : 1))
+                % STORAGE_DEVICE_COUNT;
             if (eligible[i]) {
                 selected_disk = i;
+                storage_page=storage_page_for((unsigned)i);
                 break;
             }
         }

@@ -2,6 +2,7 @@
 #include "boot.h"
 #include "clock.h"
 #include "driver.h"
+#include "storage.h"
 #include "devkit.h"
 #include "memory.h"
 #include "wifi.h"
@@ -29,6 +30,7 @@ void kmain(void) {
     audio_init();
     task_init();
     driver_services_init();
+    storage_pci_init(); /* Discover SATA/NVMe disks before first setup display. */
     lunasdk_edu_init();
     rtw8822be_init();
     wifi_intel_init();

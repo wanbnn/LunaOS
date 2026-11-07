@@ -36,7 +36,7 @@ int storage_register(const StorageDevice *d) {
     for(unsigned i=0;i<STORAGE_NATIVE_SLOTS;i++)if(!native[i].present) {
         Stored *e=&native[i];
         e->dev=*d;
-        e->info=(DiskInfo){.present=true,.supported=d->installable&&!d->readonly,
+        e->info=(DiskInfo){.present=true,.supported=d->installable&&!d->readonly&&d->sectors<=UINT32_MAX,
                            .optical=false,.index=(uint8_t)(STORAGE_NATIVE_BASE+i),
                            .multiple=1,.sectors=d->sectors};
         memcpy(e->info.model,d->model,sizeof(e->info.model));

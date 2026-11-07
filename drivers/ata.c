@@ -1,5 +1,6 @@
 #include "boot.h"
 #include "install.h"
+#include "storage.h"
 static DiskInfo disks[4];
 static unsigned boot_index;
 static const uint8_t *ram_source;
@@ -146,6 +147,8 @@ static bool cd_read_image(unsigned index, uint32_t lba, unsigned count, void *da
     return true;
 }
 bool disk_read_blocks(unsigned index, uint32_t lba, unsigned count, void *data) {
+    if(index>=STORAGE_NATIVE_BASE)
+        return storage_transfer(index,lba,count,data,false)==0;
     if (index == 4 && ram_source) {
         if (!data || !count || count > 128 || (uint64_t)lba + count > LUNA_IMAGE_BYTES / 512)
             return false;
@@ -171,6 +174,8 @@ bool disk_read_blocks(unsigned index, uint32_t lba, unsigned count, void *data) 
     return true;
 }
 bool disk_write_blocks(unsigned index, uint32_t lba, unsigned count, const void *data) {
+    if(index>=STORAGE_NATIVE_BASE)
+        return storage_transfer(index,lba,count,(void *)data,true)==0;
     unsigned group = index < 4 && count >= disks[index].multiple && disks[index].multiple > 1
                          ? disks[index].multiple
                          : 1;
@@ -194,6 +199,8 @@ bool disk_write_on(unsigned index, uint32_t lba, const void *data) {
     return disk_write_blocks(index, lba, 1, data);
 }
 bool disk_flush(unsigned index) {
+    if(index>=STORAGE_NATIVE_BASE)
+        return storage_flush(index)==0;
     if (index >= 4 || !disks[index].present || !disks[index].supported || disks[index].optical)
         return false;
     select_drive(index, 0xe0);
@@ -207,12 +214,13 @@ bool disk_write(uint32_t lba, const void *data) {
     return disk_write_on(boot_index, lba, data) && disk_flush(boot_index);
 }
 const DiskInfo *disk_info(unsigned index) {
-    return index < 4 ? &disks[index] : 0;
+    return index < 4 ? &disks[index] : storage_disk_info(index);
 }
 unsigned disk_boot_index(void) {
     return boot_index;
 }
 void disk_init(void) {
+    storage_reset();
     for (unsigned i = 0; i < 4; i++) {
         DiskInfo *d = &disks[i];
         d->index = i;

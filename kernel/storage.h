@@ -42,6 +42,7 @@ int storage_transfer(unsigned index, uint32_t lba, unsigned sectors,
                      void *buffer, bool write);
 int storage_flush(unsigned index);
 unsigned storage_device_count(void);
+const char *storage_disk_type(unsigned index);
 void storage_pci_init(void);
 void storage_status(char *out, size_t cap);
 unsigned storage_controller_count(void);

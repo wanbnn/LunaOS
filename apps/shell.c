@@ -4,6 +4,7 @@
 #include "memory.h"
 #include "../drivers/rtw8822be_pcie.h"
 #include "driver.h"
+#include "storage.h"
 #include "devkit.h"
 #include "install.h"
 #include "luna.h"
@@ -618,6 +619,9 @@ static int execute(int argc, char **a, const char *input, char *out) {
             return rtw8822be_power_test(out, CAP) ? 1 : 0;
         emit(out, "usage: wifidiag [power|intel] (MAC power cycle only; no scan/connect)\n");
         return 2;
+    } else if (!strcmp(c, "storage")) {
+        storage_status(out,CAP);
+        return 0;
     } else if (!strcmp(c, "drvinfo")) {
         driver_services_status(out, CAP);
         return 0;
