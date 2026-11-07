@@ -45,12 +45,21 @@ static void test_data(void) {
     raw[1] |= 0x40; /* protected traffic must be decrypted before decapsulation */
     assert(luna80211_to_ethernet(raw, n, got, sizeof(got), &neth) == L80211_ENOTSUP);
     raw[1] &= (uint8_t)~0x40;
+    raw[1] |= 4; /* More Fragments flag */
+    assert(luna80211_to_ethernet(raw, n, got, sizeof(got), &neth) == L80211_ENOTSUP);
+    raw[1] &= (uint8_t)~4;
+    raw[22] |= 1; /* Nonzero fragment number */
+    assert(luna80211_to_ethernet(raw, n, got, sizeof(got), &neth) == L80211_ENOTSUP);
+    raw[22] &= (uint8_t)~1;
     raw[0] = 0x88; /* QoS data: insert 2-byte QoS control */
     memmove(raw + 26, raw + 24, n - 24);
     raw[24] = raw[25] = 0;
     n += 2;
     assert(luna80211_to_ethernet(raw, n, got, sizeof(got), &neth) == L80211_OK);
     assert(neth == sizeof(ethernet) && memcmp(got, ethernet, neth) == 0);
+    raw[24] |= 0x80; /* A-MSDU present: not implemented */
+    assert(luna80211_to_ethernet(raw, n, got, sizeof(got), &neth) == L80211_ENOTSUP);
+    raw[24] &= (uint8_t)~0x80;
     raw[1] = 0x03; /* WDS: address4 between original header and QoS */
     memmove(raw + 30, raw + 24, n - 24);
     memcpy(raw + 24, ethernet + 6, 6);
