@@ -3,12 +3,12 @@
 #include <stdio.h>
 #include <string.h>
 #include "../kernel/storage.h"
-static uint8_t backing[2][100u*512u];
+static uint8_t backing[5][100u*512u];
 static unsigned writes,flushes;
 static DiskInfo ata[4];
 static int mock_transfer(void *ctx,uint64_t lba,unsigned count,void *buf,bool write) {
     unsigned n=*(unsigned *)ctx;
-    if(n>=2 || count>64 || lba+count>100)return DRV_EINVAL;
+    if(n>=5 || count>64 || lba+count>100)return DRV_EINVAL;
     uint8_t *p=backing[n]+(size_t)lba*512u;
     if(write){memcpy(p,buf,count*512u);writes++;}
     else memcpy(buf,p,count*512u);
@@ -34,6 +34,19 @@ void append(char *out,const char *str,size_t cap) {
     out[n+len]=0;
 }
 static unsigned ctx0,ctx1;
+static bool extended_ready;
+static unsigned extended_ctx[]={2,3,4};
+static int extended_probe(uint8_t b,uint8_t s,uint8_t f,unsigned kind) {
+    assert(!b && s==kind-STORAGE_USB+3 && !f);
+    if(!extended_ready)return DRV_ENOTSUP;
+    StorageDevice d={.ctx=&extended_ctx[kind-STORAGE_USB],.transfer=mock_transfer,
+        .flush=mock_flush,.sectors=100,.logical_bytes=512,.transport=kind,.installable=true};
+    strcpy(d.model,"EXTENDED-TEST");
+    return storage_register(&d)>=0?1:DRV_ENOSPC;
+}
+int storage_usb_probe(uint8_t b,uint8_t s,uint8_t f){return extended_probe(b,s,f,STORAGE_USB);}
+int storage_sdhci_probe(uint8_t b,uint8_t s,uint8_t f){return extended_probe(b,s,f,STORAGE_EMMC);}
+int storage_raid_probe(uint8_t b,uint8_t s,uint8_t f){return extended_probe(b,s,f,STORAGE_RAID);}
 int storage_ahci_probe(uint8_t b,uint8_t s,uint8_t f){
     assert(b==0 && s==1 && f==0);
     StorageDevice dev={.ctx=&ctx0,.transfer=mock_transfer,.flush=mock_flush,
@@ -84,10 +97,37 @@ int main(void) {
     storage_status(status,sizeof(status));
     assert(strstr(status,"SATA/AHCI") && strstr(status,"NVMe"));
     assert(strstr(status,"USB") && strstr(status,"eMMC/SDHCI") && strstr(status,"RAID"));
-    assert(strstr(status,"not yet available"));
+    assert(strstr(status,"unsupported interface"));
     assert(!storage_verify_read(5,status,sizeof(status)));
     assert(strstr(status,"consistent physical reads"));
     assert(storage_verify_read(7,status,sizeof(status))==DRV_ENOTSUP);
     assert(writes==1);
+    extended_ready=true;
+    storage_reset();storage_pci_init();
+    for(unsigned i=0;i<5;i++) {
+        unsigned index=STORAGE_NATIVE_BASE+i;
+        assert(storage_controller(i)->initialized);
+        assert(storage_disk_info(index)->supported);
+        memset(data,(int)(i+11),sizeof(data));
+        assert(!storage_transfer(index,98,2,data,true));
+        assert(!storage_flush(index));
+        assert(!storage_transfer(index,98,2,retrieved,false));
+        assert(!memcmp(data,retrieved,sizeof(data)));
+    }
+    assert(!strcmp(storage_disk_type(7),"USB"));
+    assert(!strcmp(storage_disk_type(8),"eMMC/SDHCI"));
+    assert(!strcmp(storage_disk_type(9),"RAID"));
+    StorageDevice ro={.ctx=&ctx0,.transfer=mock_transfer,.flush=mock_flush,
+        .sectors=100,.logical_bytes=512,.transport=STORAGE_USB,.readonly=true};
+    strcpy(ro.model,"READONLY");
+    int index=storage_register(&ro);
+    assert(index==10 && !storage_disk_info(index)->supported);
+    unsigned old_writes=writes;
+    assert(!storage_transfer(index,0,1,retrieved,false));
+    assert(storage_transfer(index,0,1,retrieved,true)==DRV_ENOTSUP);
+    assert(storage_flush(index)==DRV_ENOTSUP && writes==old_writes);
+    ro.logical_bytes=4096;assert(storage_register(&ro)==DRV_EINVAL);
+    ro.logical_bytes=512;memset(ro.model,'x',sizeof(ro.model));
+    assert(storage_register(&ro)==DRV_EINVAL);
     puts("PASS: block registry, read/write/flush, PCI dispatch, safe unsupported-controller inventory");
 }

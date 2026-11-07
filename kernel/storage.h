@@ -51,5 +51,8 @@ const StorageController *storage_controller(unsigned index);
 
 /* Polled controller backends; no bus mastering before safe claim/validation. */
 int storage_ahci_probe(uint8_t bus, uint8_t slot, uint8_t function);
+int storage_usb_probe(uint8_t bus, uint8_t slot, uint8_t function);
+int storage_sdhci_probe(uint8_t bus, uint8_t slot, uint8_t function);
+int storage_raid_probe(uint8_t bus, uint8_t slot, uint8_t function);
 int storage_nvme_probe(uint8_t bus, uint8_t slot, uint8_t function);
 #endif

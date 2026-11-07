@@ -301,5 +301,5 @@ void driver_services_status(char *out, size_t cap) {
     append(out, n, cap);
     append(out, " bytes\nPCI INTx / uncached MMIO / packet queues / binary firmware\n", cap);
     append(out, "Workers: bounded cooperative callbacks; not kernel threads.\n", cap);
-    append(out, "MSI/APIC, IOMMU, USB/HCI and mac80211 compatibility: unavailable.\n", cap);
+    append(out, "USB storage: EHCI/BOT polling (high-speed root ports).\nMSI/APIC, IOMMU and mac80211 compatibility: unavailable.\n", cap);
 }

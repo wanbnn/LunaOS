@@ -37,17 +37,19 @@ Em uma instalação concluída, esse comando recusa reinstalar pela sessão ativ
 
 ## Discos e durabilidade
 
-O backend oferece quatro slots ATA/IDE legados, com LBA28 e PIO. O novo subsistema
-de blocos enumera também SATA/AHCI e NVMe PCI e inclui caminhos experimentais
-de DMA para IDENTIFY, leitura, gravação e flush em setores de 512 bytes. A
-tela possui três páginas de dispositivos, com setas esquerda/direita para
-navegar. A descoberta PCI de USB, eMMC/SDHCI e RAID **não fornece** acesso a
-discos; esses controladores não ficam disponíveis como destinos de instalação.
-Os drivers SATA/NVMe ainda precisam de testes em hardware físico. Não há
-AHCI/NVMe inicializável via USB, suporte completo a eMMC/RAID, ou GPT de destino.
-Não anunciar a instalação como validada para um computador físico moderno com
-controlador não suportado. A imagem pode iniciar pelo BIOS USB, mas o kernel ainda
-não consegue usar essa mídia USB como origem dos arquivos da instalação.
+O backend oferece quatro slots ATA/IDE legados e oito slots nativos. Além de
+AHCI e NVMe, há leitura, gravação e flush por USB EHCI/BOT, SDHCI/eMMC e
+MegaRAID MFI SAS1078/2108. Todos usam setores lógicos de 512 bytes. O setup
+oferece como destino apenas dispositivos inicializados, graváveis e dentro dos
+limites da API. Use esquerda/direita para navegar pelas páginas de discos.
+
+USB exige dispositivo high-speed em porta raiz EHCI e protocolo BOT/SCSI;
+xHCI, hubs, UAS e HC legados continuam sem driver. SDHCI usa PIO 1-bit para
+SDHC/SDXC ou eMMC com endereçamento por setor (somente área de usuário).
+MegaRAID acessa volumes lógicos já configurados; não cria nem modifica arrays.
+Intel RST/VMD e outros protocolos RAID continuam não suportados. A descoberta
+PCI de um modelo fora desses limites não o torna destino de instalação.
+Consulte [armazenamento](storage.md) para testes e limitações.
 
 O loader entrega ao kernel o drive BIOS e o identificador MBR da mídia de boot.
 A descoberta ATA procura esse identificador para selecionar a origem; o instalador

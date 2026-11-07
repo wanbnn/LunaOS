@@ -25,7 +25,7 @@ O LunaOS tem **bootloader próprio**, **kernel próprio em C**, **interface grá
 
 - Boot BIOS x86 e caminho **UEFI x64 experimental** que transfere o controle ao kernel i386.
 - Desktop com dock, pesquisa, janelas, compositor 32 bits, **transições suaves nativas**, fontes **Inter Tight** e ícones **Lucide**.
-- Assistente de primeiro boot, modo live, instalação em IDE e backends **SATA/AHCI e NVMe experimentais** (512B LBA; requer validação em QEMU/hardware), login.
+- Assistente de primeiro boot, modo live, instalação em IDE e backends **SATA/AHCI, NVMe, USB EHCI/BOT, SDHCI/eMMC e MegaRAID MFI experimentais** (512B LBA; validação em hardware físico pendente), login.
 - Terminal **lunaSH**, Files, Notes, Settings, navegador e Gerenciador de Tarefas.
 - **LunaSDK v2**: aplicativos JavaScript `.ljs`, Python limitado `.py` (prévia), API de descoberta **PCI real** e endpoints de hardware implementados por drivers C nativos; projetos C/CMake ainda são compilados no host.
 - Pilha de rede IPv4 via **RTL8139**, HTTP e HTTPS/TLS 1.2.
@@ -45,7 +45,7 @@ A geração atual produz `dist/LunaOS.img` (disco raw de **32 MiB**) e `dist/Lun
 | **Boot UEFI** | Experimental | Loader UEFI x64 com transição para kernel i386; caminho testável com OVMF/QEMU |
 | **Desktop** | Implementado | Janelas, minimização, maximização, busca, atalhos, compositor com meta de 60 fps e resoluções do adaptador virtual até 1920×1080 |
 | **Sistema de arquivos** | Limitado | LunaFS com snapshots, até 64 entradas e arquivos de até 8191 bytes |
-| **Instalador** | IDE + SATA/AHCI e NVMe experimentais | Seleção explícita de disco, confirmação destrutiva, cópia verificada, usuário e senha; sem AHCI, NVMe ou USB mass storage |
+| **Instalador** | IDE + drivers nativos experimentais | Seleção explícita de disco, confirmação destrutiva, cópia verificada, usuário e senha; controladores e limites em [storage](docs/storage.md) |
 | **Ethernet e HTTPS** | Parcial | RTL8139, IPv4, DNS, TCP, HTTP e BearSSL/TLS 1.2; não é uma stack de rede universal |
 | **Navegador nativo** | Experimental | HTML e CSS com layout/cascata parciais, bindings DOM/JS e PNG; **sem** compatibilidade moderna completa |
 | **Wi-Fi RTL8822BE** | **Scanner passivo experimental** | Inicialização PCIe, firmware, PHY e recebimento de beacons por DMA; **sem conexão**, ainda sem validação em placa física |
@@ -290,7 +290,8 @@ nativos para ampliar a capacidade. Consulte [LunaFS2](docs/lunafs2.md).
 ## Subsistema de armazenamento nativo
 
 O kernel usa uma camada de blocos compartilhada (512 bytes lógicos) para
-**IDE/ATA**, **SATA/AHCI** e **NVMe** experimentais. O setup tem páginas para
+**IDE/ATA**, **SATA/AHCI**, **NVMe**, **USB EHCI/BOT**, **SDHCI/eMMC** e
+**MegaRAID MFI** experimentais. O setup tem páginas para
 mostrar os discos detectados, protege a origem de boot por identidade MBR e
 exige confirmação destrutiva explícita. A verificação `storage verify N`
 faz duas leituras do setor zero sem escrever.
@@ -298,17 +299,20 @@ faz duas leituras do setor zero sem escrever.
 | Interface | Nível implementado | Limitação |
 | --- | --- | --- |
 | IDE/ATA | Leitura/escrita legada | PIO, LBA28 |
-| SATA/AHCI | DMA, IDENTIFY, READ/WRITE/FLUSH | LBA48/512 B, polling, testes em QEMU pendentes |
+| SATA/AHCI | DMA, IDENTIFY, READ/WRITE/FLUSH | LBA48/512 B, polling |
 | NVMe | Filas admin + I/O, Identify, READ/WRITE/FLUSH | Namespace 1/512 B, polling, PCI MMIO <4 GiB |
-| USB mass storage | Detecção de controlador USB PCI | Falta xHCI/EHCI + hub + BOT/UAS + SCSI |
-| eMMC/SDHCI | Inventário PCI SDHCI | Falta protocolo MMC, card init, comandos e dados |
-| RAID | Detecção de controladores PCI RAID | Volumes RAID exigem driver por fabricante/protocolo |
+| USB mass storage | EHCI + enumeração + BOT/SCSI READ/WRITE/SYNCHRONIZE CACHE | USB 2 high-speed em porta raiz, LUN0, 512 B; sem xHCI, hubs ou UAS |
+| eMMC/SDHCI | Inicialização SD/MMC, capacidade, READ/WRITE e flush | SDHC/SDXC ou eMMC em modo setor, PIO 1-bit, 512 B, área de usuário |
+| RAID | MegaRAID MFI: lista de volumes lógicos, READ/WRITE, cache flush | SAS1078/2108, volumes existentes de 512 B; sem Intel RST/VMD ou criação de arrays |
 
-**Não confunda detecção PCI com suporte funcional a disco.** USB, eMMC e RAID
-não são destinos instaláveis nesta etapa. Controladores SATA/NVMe não validados
-em hardware real devem ser usados **apenas com imagens de disco descartáveis**.
-O boot UEFI ainda usa uma cópia da imagem na RAM, mesmo quando já existe um
-controlador de bloco identificado; não há suporte a boot nativo por USB após
-`ExitBootServices` nem a filesystem redimensionável.
+**Detecção PCI continua distinta de suporte funcional.** O kernel só publica
+um disco depois de inicializar seu protocolo e validar a mídia. As interfaces
+listadas possuem caminhos de dados para os modelos descritos; outros
+controladores continuam no inventário como não suportados. A instalação usa
+leitura de retorno e flush. Os testes automatizados usam imagens QEMU
+descartáveis; compatibilidade com hardware físico ainda exige validação.
+O boot UEFI entrega uma cópia da imagem na RAM; a resolução por ID MBR pode
+selecionar depois o disco físico reconhecido por um desses drivers.
+O filesystem de dados ainda não é redimensionável.
 
 Veja [projeto do armazenamento](docs/storage.md).

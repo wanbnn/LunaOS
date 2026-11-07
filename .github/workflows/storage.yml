@@ -1,4 +1,4 @@
-name: LunaOS storage (block, SATA, NVMe and controller discovery)
+name: LunaOS storage (SATA, NVMe, USB, SDHCI and MegaRAID)
 on:
   push:
     branches: [feat/native-storage-stack, main]
@@ -24,7 +24,7 @@ on:
 jobs:
   storage-unit-and-boot:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install freestanding and virtual-machine toolchain
@@ -39,5 +39,7 @@ jobs:
         run: make -j2 all
       - name: Test non-destructive SATA/NVMe I/O inside LunaOS/QEMU
         run: make test-storage-guest
-      - name: Install on disposable SATA and NVMe images (write/readback verification)
-        run: python3 tests/storage_install.py
+      - name: Test EHCI/BOT, SDHCI, eMMC and MegaRAID physical reads
+        run: make test-storage-interfaces
+      - name: Install on disposable native disk images (write/readback/flush verification)
+        run: make test-storage-install

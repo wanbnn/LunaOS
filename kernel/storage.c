@@ -95,8 +95,8 @@ static bool pci_present(uint32_t id) {
     return (id&0xffffu) && (id&0xffffu)!=0xffffu;
 }
 void storage_pci_init(void) {
-    /* A controller is not a drive. USB mass storage also requires a HCI,
-     * hub, enumeration, transport and SCSI layer. RAID needs vendor protocol. */
+    /* Dispatch by PCI interface; backends additionally validate protocols
+     * and supported hardware before publishing a functional block device. */
     controller_count=0;
     for(unsigned bus=0;bus<256;bus++)for(unsigned slot=0;slot<32;slot++) {
         uint32_t first=pci_read(bus,slot,0,0);
@@ -121,11 +121,14 @@ void storage_pci_init(void) {
             int rc=DRV_ENOTSUP;
             if(kind==STORAGE_AHCI)rc=storage_ahci_probe(bus,slot,fn);
             if(kind==STORAGE_NVME)rc=storage_nvme_probe(bus,slot,fn);
+            if(kind==STORAGE_USB)rc=storage_usb_probe(bus,slot,fn);
+            if(kind==STORAGE_EMMC && pi<=1)rc=storage_sdhci_probe(bus,slot,fn);
+            if(kind==STORAGE_RAID)rc=storage_raid_probe(bus,slot,fn);
             c->initialized=rc>0;
             const char *reason=rc>0?"driver ready":
-              (kind==STORAGE_AHCI || kind==STORAGE_NVME)?
-              "driver initialization failed; see serial diagnostics":
-              "controller detected; data-path driver not yet available";
+              rc==DRV_ENOTSUP?
+              "unsupported interface, media or controller initialization failed":
+              "driver initialization failed; see serial diagnostics";
             strcpy(c->reason,reason);
         }
     }
@@ -136,7 +139,7 @@ static void append_number(char *out,size_t cap,uint32_t n) {
 void storage_status(char *out,size_t cap) {
     if(!out || !cap)return;
     out[0]=0;
-    append(out,"Storage: IDE, SATA/AHCI, NVMe + controller inventory\n",cap);
+    append(out,"Storage: IDE, SATA/AHCI, NVMe, USB/EHCI, SDHCI, MegaRAID MFI\n",cap);
     for(unsigned i=0;i<4;i++) {
         const DiskInfo *d=disk_info(i);
         if(!d || !d->present)continue;

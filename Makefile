@@ -248,7 +248,7 @@ test-lunafs2:
 	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=address,undefined -Itests/fs_mock -Ikernel kernel/fs.c tests/lunafs2.c -o build/lunafs2-test
 	./build/lunafs2-test
 
-.PHONY: test-storage test-storage-guest
+.PHONY: test-storage test-storage-guest test-storage-interfaces test-storage-install
 test-storage:
 	@mkdir -p build
 	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=address,undefined -Ikernel kernel/storage.c tests/storage.c -o build/storage-test
@@ -256,3 +256,9 @@ test-storage:
 
 test-storage-guest: all
 	$(PYTHON) tests/storage_guest.py
+
+test-storage-interfaces: all
+	$(PYTHON) tests/storage_interfaces.py
+
+test-storage-install: all
+	$(PYTHON) tests/storage_install.py
