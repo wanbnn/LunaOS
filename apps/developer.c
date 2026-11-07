@@ -67,12 +67,12 @@ static int hardware_command(int argc, char **argv, char *out, size_t cap) {
         for (unsigned i = 0; i < total && i < 48; i++) {
             LunaPciInfo d;
             if (lunasdk_pci_get(i, &d)) break;
-            show_num(out, cap, d.bus); put(out, cap, ":", cap);
-            show_num(out, cap, d.slot); put(out, cap, ".", cap);
+            show_num(out, cap, d.bus); put(out, cap, ":");
+            show_num(out, cap, d.slot); put(out, cap, ".");
             show_num(out, cap, d.function);
-            put(out, cap, " vendor:device=", cap);
+            put(out, cap, " vendor:device=");
             char h[16]; hex(h, (unsigned)d.vendor << 16 | d.device);
-            put(out, cap, h); put(out, cap, " class=", cap);
+            put(out, cap, h); put(out, cap, " class=");
             hex(h, d.class_code); put(out, cap, h); put(out, cap, "\n");
         }
         if (total > 48) put(out, cap, "(remaining devices: use luna.hardware.pci.get(index) in JS)\n");
