@@ -39,3 +39,5 @@ jobs:
         run: make -j2 all
       - name: Test non-destructive SATA/NVMe I/O inside LunaOS/QEMU
         run: make test-storage-guest
+      - name: Install on disposable SATA and NVMe images (write/readback verification)
+        run: python3 tests/storage_install.py
