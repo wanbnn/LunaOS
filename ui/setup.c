@@ -603,7 +603,7 @@ void setup_pointer(int x, int y, int buttons) {
         return;
     }
     if (setup_page == 4)
-        for (int i = 0; i < 8; i++);
+        for (int i = 0; i < 8; i++)
             if (hit(x, y, 158 + (i % 2) * 364, 282 + (i / 2) * 62, 344, 48))
                 selected_region = i;
     if (setup_page == 5) {
