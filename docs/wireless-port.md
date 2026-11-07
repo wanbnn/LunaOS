@@ -1,9 +1,11 @@
 # Porte de drivers Wi-Fi Linux para LunaOS
 
 É possível reutilizar os drivers sem usar o kernel Linux como kernel do LunaOS.
-O RTL8822BE possui agora um [scanner passivo nativo experimental](rtw8822be-native-port.md),
-com transporte PCIe/DMA e controle PHY/canal adaptados de rtw88. Ainda não houve
-validação em hardware e não há autenticação, associação ou tráfego IP Wi-Fi.
+O RTL8822BE possui [scanner passivo e estação TX/WPA2 experimentais](rtw8822be-native-port.md),
+com transporte PCIe/DMA, controle PHY/canal, autenticação/associação
+802.11, CCMP e DHCP integrados no código nativo. Os testes host e a build
+ISO não substituem a **validação real em hardware**: transmissão RF,
+handshake WPA2 e tráfego IP ainda precisam ser comprovados na placa.
 Os demais chips continuam apenas com identificação/preflight.
 
 O alvo prioritário fornecido pelo usuário é RTL8723BE PCI `10ec:b723`, subsistema
