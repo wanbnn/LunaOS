@@ -27,7 +27,9 @@ try:
     found=g.command("storage", "Storage:")
     sata_match=re.search(r"disk(\d+) SATA/AHCI ",found)
     nvme_match=re.search(r"disk(\d+) NVMe ",found)
-    assert sata_match and nvme_match,found
+    if not sata_match or not nvme_match:
+        print("CONTROLLER DIAGNOSTICS:",g.transcript[-4500:],flush=True)
+        assert sata_match and nvme_match,found
     assert "USB PCI" in found,found
     for target in (sata_match.group(1),nvme_match.group(1)):
         g.command("storage verify "+target,"two consistent physical reads",timeout=40)

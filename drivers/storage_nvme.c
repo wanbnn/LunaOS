@@ -135,19 +135,26 @@ int storage_nvme_probe(uint8_t bus,uint8_t slot,uint8_t fn) {
     uint32_t id=pci_read(bus,slot,fn,0);
     *n=(Nvme){.pci={.bus=bus,.slot=slot,.function=fn,
                     .vendor=(uint16_t)id,.device=(uint16_t)(id>>16)}};
-    if(drv_pci_claim(&n->pci))return DRV_EBUSY;
+    int stage=1;
+    if(drv_pci_claim(&n->pci))goto fail;
+    stage=2;
     if(drv_pci_map(&n->pci,0,&n->regs))goto fail;
+    stage=3;
     if(n->regs.size<0x2000)goto fail;
+    stage=4;
     if(drv_pci_enable(&n->pci,false,true)||
        drv_pci_master(&n->pci,true))goto fail;
+    stage=5;
     uint64_t cap=(uint64_t)r32(n,NVME_CAP)|
                  ((uint64_t)r32(n,NVME_CAP+4u)<<32);
     if((cap&0xffffu)<NVME_QUEUE_DEPTH-1u ||
        ((cap>>48)&15u)!=0 || !((cap>>37)&1u))goto fail;
+    stage=6;
     n->stride=4u<<(unsigned)((cap>>32)&15u);
     if(NVME_DOORBELLS+4u*n->stride>=n->regs.size)goto fail;
     w32(n,NVME_CC,r32(n,NVME_CC)&~1u);
     if(!wait_rdy(n,false))goto fail;
+    stage=7;
     if(init_queue(&n->admin,0))goto fail;
     if(init_queue(&n->io,1))goto fail;
     if(drv_dma_alloc(4096,4096,UINT32_MAX,0,&n->page))goto fail;
@@ -156,6 +163,7 @@ int storage_nvme_probe(uint8_t bus,uint8_t slot,uint8_t fn) {
     w32(n,NVME_ACQ,n->admin.cq.bus);w32(n,NVME_ACQ+4,0);
     w32(n,NVME_CC,(6u<<16)|(4u<<20)|1u);
     if(!wait_rdy(n,true))goto fail;
+    stage=8;
     if(identify(n,0,1))goto fail;  /* Identify Controller */
     const uint8_t *controller=n->page.cpu;
     uint32_t nn;
@@ -165,6 +173,7 @@ int storage_nvme_probe(uint8_t bus,uint8_t slot,uint8_t fn) {
     memcpy(model,controller+24,40);
     for(int i=39;i>=0 && (model[i]==' ' || !model[i]);i--)model[i]=0;
     n->nsid=1;
+    stage=9;
     if(identify(n,n->nsid,0))goto fail;  /* Identify Namespace */
     const uint8_t *namespace_data=n->page.cpu;
     uint64_t nsze;
@@ -173,6 +182,7 @@ int storage_nvme_probe(uint8_t bus,uint8_t slot,uint8_t fn) {
     if(format>=16 || namespace_data[128u+4u*format+2u]!=9u || nsze<8192u)
         goto fail; /* Only 512-byte logical sectors, no metadata formats. */
     n->sectors=nsze;
+    stage=10;
     /* Create I/O completion queue, then submission queue, physically contiguous. */
     if(cmd(n,&n->admin,5,0,n->io.cq.bus,
            ((NVME_QUEUE_DEPTH-1u)<<16)|1u,1u,0u))goto fail;
@@ -187,6 +197,9 @@ int storage_nvme_probe(uint8_t bus,uint8_t slot,uint8_t fn) {
     if(storage_register(&dev)<0)goto fail;
     return 1;
 fail:
+    serial_write("STORAGE NVMe probe failed at stage ");
+    char stage_text[16];number(stage_text,(uint32_t)stage);
+    serial_write(stage_text);serial_write("\n");
     cleanup(n);
     return DRV_ENOTSUP;
 }

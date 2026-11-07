@@ -167,15 +167,21 @@ int storage_ahci_probe(uint8_t bus,uint8_t slot,uint8_t fn) {
     *h=(AhciHost){0};
     h->pci=(DrvPci){.bus=bus,.slot=slot,.function=fn,
         .vendor=(uint16_t)id,.device=(uint16_t)(id>>16)};
-    if(drv_pci_claim(&h->pci))return DRV_EBUSY;
+    int stage=1;
+    if(drv_pci_claim(&h->pci))goto fail;
+    stage=2;
     if(drv_pci_map(&h->pci,5,&h->mmio))goto fail;
+    stage=3;
     if(h->mmio.size<0x1100)goto fail;
+    stage=4;
     if(drv_pci_enable(&h->pci,false,true)||drv_pci_master(&h->pci,true))goto fail;
+    stage=5;
     /* ACPI AHCI BIOS/OS ownership handoff, required by supported HBA. */
     if(rd(h,AHCI_CAP2)&1u) {
         wr(h,AHCI_BOHC,rd(h,AHCI_BOHC)|2u);
         if(!wait_reg(h,AHCI_BOHC,1u,0,1500))goto fail;
     }
+    stage=6;
     wr(h,AHCI_GHC,(rd(h,AHCI_GHC)|(1u<<31))&~2u);
     uint32_t pi=rd(h,AHCI_PI);
     for(unsigned p=0;p<32 && h->count<AHCI_PORTS_PER_HOST;p++) {
@@ -187,12 +193,21 @@ int storage_ahci_probe(uint8_t bus,uint8_t slot,uint8_t fn) {
            rd(h,off+PX_SIG)!=0x00000101u)continue;
         AhciDisk *d=&h->disk[h->count];
         *d=(AhciDisk){.host=h,.port=p};
-        if(port_memory(d)) {port_free(d);continue;}
-        if(!identify(d)) {port_stop(d);port_free(d);continue;}
+        if(port_memory(d)) {
+            serial_write("STORAGE AHCI: port DMA setup failed\n");
+            port_free(d);continue;
+        }
+        if(!identify(d)) {
+            serial_write("STORAGE AHCI: IDENTIFY failed\n");
+            port_stop(d);port_free(d);continue;
+        }
         h->count++;
     }
     if(h->count) {h->used=true;return (int)h->count;}
 fail:
+    serial_write("STORAGE AHCI probe failed at stage ");
+    char stage_text[16];number(stage_text,(uint32_t)stage);
+    serial_write(stage_text);serial_write("\n");
     if(h->pci.cookie) {
         drv_pci_master(&h->pci,false);
         if(h->mmio.base)drv_mmio_unmap(&h->mmio);
