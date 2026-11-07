@@ -3,15 +3,20 @@ on:
   push:
     branches:
       - feat/linux-wireless-port-foundation
+      - main
   pull_request:
     paths:
       - 'drivers/wifi*'
+      - 'net/wifi_ccmp.c'
+      - 'include/net/wifi_ccmp.h'
       - 'drivers/rtw8822b*'
       - 'ui/setup.c'
       - 'kernel/wifi.h'
       - 'tests/wifi*'
       - 'tests/rtw8822b*'
       - 'net/wireless/**'
+      - 'net/wpa2.c'
+      - 'include/net/wpa2.h'
       - 'Makefile'
       - '.github/workflows/wireless-smoke.yml'
 jobs:
@@ -20,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Unit tests (simulated PCI, firmware, scan and connect)
-        run: make test-wifi-port test-wireless-frames test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware test-wifi-scan test-rtw8822be-rx-dma
+        run: make test-wifi-port test-wireless-frames test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware test-wifi-scan test-rtw8822be-rx-dma test-wpa2 test-wifi-ccmp test-wifi-station
       - name: Build native sources in freestanding i386 mode
         run: |
           sudo apt-get update
@@ -28,6 +33,7 @@ jobs:
           mkdir -p build/ci
           gcc -m32 -std=gnu11 -O2 -ffreestanding -fno-builtin -fno-pie -mno-sse -msoft-float -Wall -Wextra -Werror -Ikernel -Ibuild -c drivers/wifi.c -o build/ci/wifi.o
           gcc -m32 -std=gnu11 -O2 -ffreestanding -fno-builtin -fno-pie -mno-sse -msoft-float -Wall -Wextra -Werror -Ikernel -Ibuild -c drivers/rtw8822be_diag.c -o build/ci/rtw8822be_diag.o
+          gcc -m32 -std=gnu11 -O2 -ffreestanding -fno-builtin -fno-pie -mno-sse -msoft-float -Wall -Wextra -Werror -Ikernel -Ibuild -c drivers/wifi_client.c -o build/ci/wifi_client.o
           gcc -m32 -std=gnu11 -O2 -ffreestanding -fno-builtin -fno-pie -mno-sse -msoft-float -Wall -Wextra -Werror -Ikernel -Ibuild -c ui/setup.c -o build/ci/setup.o
           gcc -m32 -std=gnu11 -O2 -ffreestanding -fno-builtin -fno-pie -mno-sse -msoft-float -Wall -Wextra -Werror -Ikernel -Ibuild -c kernel/main.c -o build/ci/main.o
   build-image:
@@ -43,10 +49,10 @@ jobs:
           python3 -m pip install --target .tools/python -r requirements-dev.txt
       - name: Build LunaOS experimental image and ISO
         run: make -j2 all
-      - name: Upload test image (NOT a working Wi-Fi driver)
+      - name: Upload experimental TX/WPA2 test image (hardware verification pending)
         uses: actions/upload-artifact@v4
         with:
-          name: LunaOS-rtl8822be-diagnostics-experimental
+          name: LunaOS-rtl8822be-tx-wpa2-experimental
           path: |
             dist/LunaOS.img
             dist/LunaOS.iso
