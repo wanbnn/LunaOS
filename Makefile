@@ -98,7 +98,7 @@ run-iso: all
 	LUNA_IMAGE=dist/LunaOS.iso tools/run-qemu.sh
 run: all
 	tools/run-qemu.sh
-test: all test-storage test-storage-sdhci test-lunafs2 test-lunasdk-hardware test-lunapy test-devkit test-motion test-pmm test-heap test-wpa2 test-wifi-ccmp test-dhcp test-wifi-station test-iwl-firmware test-iwl-pcie test-wifi-intel test-wifi-scan test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
+test: all test-storage test-storage-sdhci test-lunafs2 test-lunasdk-hardware test-lunapy test-devkit test-motion test-pmm test-heap test-wpa2 test-wifi-ccmp test-wifi-client test-rtw8822be-tx-dma test-dhcp test-wifi-station test-iwl-firmware test-iwl-pcie test-wifi-intel test-wifi-scan test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
 	$(PYTHON) tests/smoke.py
 	$(PYTHON) tests/multitask.py
 	$(PYTHON) tests/desktop.py
@@ -298,3 +298,13 @@ test-storage-matrix: all test-storage test-storage-sdhci
 	$(PYTHON) tools/storage/build-qemu.py
 	$(MAKE) build/emmc-acpi.aml
 	$(PYTHON) tests/storage_matrix.py
+
+.PHONY: test-wifi-client test-rtw8822be-tx-dma
+test-wifi-client: $(addprefix build/host-bearssl/,$(addsuffix .o,$(HOST_WPA_CRYPTO)))
+	@mkdir -p build
+	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -Ikernel -Ithird_party/bearssl/inc drivers/wifi_client.c net/wifi_ccmp.c net/wireless/frames.c tests/wifi_client.c $^ -o build/wifi-client-test
+	./build/wifi-client-test
+test-rtw8822be-tx-dma:
+	@mkdir -p build
+	$(CC) -std=c11 -O2 -ffunction-sections -fdata-sections -Wall -Wextra -Werror -Ikernel tests/rtw8822be_tx_dma.c -Wl,--gc-sections -o build/rtw8822be-tx-dma-test
+	./build/rtw8822be-tx-dma-test
