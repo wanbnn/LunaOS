@@ -22,15 +22,18 @@ void kmain(void) {
     memory_init();
     serial_write("CPU: protected mode / timer 1000 Hz / E820 memory map\n");
     disk_init();
+    /* Claim PCI/DMA early so a SATA/NVMe-installed LunaFS can be opened
+     * before loading user settings. BIOS/UEFI already supplied our kernel. */
+    task_init();
+    driver_services_init();
+    storage_pci_init();
+    disk_resolve_native_boot();
     fs_init();
     settings_init();
     clock_init();
     input_init();
     net_init();
     audio_init();
-    task_init();
-    driver_services_init();
-    storage_pci_init(); /* Discover SATA/NVMe disks before first setup display. */
     lunasdk_edu_init();
     rtw8822be_init();
     wifi_intel_init();

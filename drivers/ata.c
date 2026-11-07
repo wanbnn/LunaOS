@@ -219,6 +219,35 @@ const DiskInfo *disk_info(unsigned index) {
 unsigned disk_boot_index(void) {
     return boot_index;
 }
+/* Reconcile BIOS or UEFI boot MBR identity with native block devices after
+ * PCI DMA controllers are operational, but BEFORE mounting LunaFS.
+ * No match: keep the firmware-provided RAM/ATA fallback. Cloned IDs:
+ * reject ambiguous native selection. Never guess the first NVMe drive. */
+void disk_resolve_native_boot(void) {
+    uint32_t identity=*(volatile uint32_t *)0x6f04;
+    if(boot_is_uefi() && ram_source)
+        memcpy(&identity,ram_source+440,4);
+    if(!identity)return;
+    unsigned count=0,candidate=boot_index;
+    uint8_t sector[512];
+    for(unsigned i=0;i<STORAGE_DEVICE_COUNT;i++) {
+        if(i==4)continue;
+        const DiskInfo *d=disk_info(i);
+        if(!d || !d->present || !d->supported || d->optical || !d->sectors ||
+           !disk_read_on(i,0,sector) || sector[510]!=0x55 || sector[511]!=0xaa)continue;
+        uint32_t found=0;
+        memcpy(&found,sector+440,4);
+        if(found!=identity)continue;
+        count++;candidate=i;
+    }
+    if(count==1) {
+        boot_index=candidate;
+        serial_write("STORAGE: native boot volume matched MBR ID on disk ");
+        char n[16];number(n,candidate);
+        serial_write(n);serial_write("\n");
+    } else if(count>1)
+        serial_write("STORAGE: ambiguous boot disk identity; retained safe fallback\n");
+}
 void disk_init(void) {
     storage_reset();
     for (unsigned i = 0; i < 4; i++) {

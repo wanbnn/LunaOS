@@ -14,6 +14,12 @@ e proteção contra acesso fora dos limites. Os slots 0–3 continuam IDE, 4 é
 a cópia UEFI RAM ou mídia óptica, e 5–12 são dispositivos nativos descobertos.
 
 O acesso é síncrono e serializado, com comandos DMA em buffers limitados.
+Os serviços PCI/DMA agora são inicializados **antes** do `fs_init`, e
+`disk_resolve_native_boot` tenta localizar a unidade física pelo ID MBR
+fornecido no boot BIOS/UEFI. Sem correspondência única, continua usando a
+origem segura (IDE ou cópia UEFI RAM); IDs duplicados não são aceitos como
+seleção automática. O firmware UEFI ainda entrega a imagem de 66 MiB em RAM,
+mas o LunaFS já pode acessar a mídia nativa após encontrar o dispositivo.
 A origem de boot não deve ser apresentada como destino de instalação; o
 instalador também compara o identificador MBR para excluir clones.
 Armazenamento persistente continua sob LunaFS2, com 2 MiB por snapshot, mesmo

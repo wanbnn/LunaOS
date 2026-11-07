@@ -15,6 +15,7 @@ typedef struct {
 void disk_init(void);
 const DiskInfo *disk_info(unsigned);
 unsigned disk_boot_index(void);
+void disk_resolve_native_boot(void);
 bool disk_read_on(unsigned, uint32_t, void *);
 bool disk_write_on(unsigned, uint32_t, const void *);
 bool disk_read_blocks(unsigned, uint32_t, unsigned, void *);
