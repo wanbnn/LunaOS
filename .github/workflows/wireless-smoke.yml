@@ -1,0 +1,32 @@
+name: Wireless portability smoke tests
+on:
+  push:
+    branches:
+      - feat/linux-wireless-port-foundation
+  pull_request:
+    paths:
+      - 'drivers/wifi*'
+      - 'drivers/rtw8822be_diag.*'
+      - 'ui/setup.c'
+      - 'kernel/wifi.h'
+      - 'tests/wifi*'
+      - 'tests/rtw8822be_diag.c'
+      - 'net/wireless/**'
+      - 'Makefile'
+      - '.github/workflows/wireless-smoke.yml'
+jobs:
+  host-contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit tests (simulated PCI, firmware, scan and connect)
+        run: make test-wifi-port test-wireless-frames test-wifi-runtime test-rtw8822be-diag
+      - name: Build native sources in freestanding i386 mode
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib
+          mkdir -p build/ci
+          gcc -m32 -std=gnu11 -O2 -ffreestanding -fno-builtin -fno-pie -mno-sse -msoft-float -Wall -Wextra -Werror -Ikernel -Ibuild -c drivers/wifi.c -o build/ci/wifi.o
+          gcc -m32 -std=gnu11 -O2 -ffreestanding -fno-builtin -fno-pie -mno-sse -msoft-float -Wall -Wextra -Werror -Ikernel -Ibuild -c drivers/rtw8822be_diag.c -o build/ci/rtw8822be_diag.o
+          gcc -m32 -std=gnu11 -O2 -ffreestanding -fno-builtin -fno-pie -mno-sse -msoft-float -Wall -Wextra -Werror -Ikernel -Ibuild -c ui/setup.c -o build/ci/setup.o
+          gcc -m32 -std=gnu11 -O2 -ffreestanding -fno-builtin -fno-pie -mno-sse -msoft-float -Wall -Wextra -Werror -Ikernel -Ibuild -c kernel/main.c -o build/ci/main.o
