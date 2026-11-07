@@ -5,7 +5,7 @@
 struct rtw_hal {
     uint8_t cut_version, rf_type, rf_path_num, antenna_tx, antenna_rx, current_channel;
 };
-struct rtw_efuse { uint8_t rfe_option, crystal_cap, channel_plan; };
+struct rtw_efuse { uint8_t rfe_option, crystal_cap, channel_plan; uint8_t mac[6]; };
 struct rtw_dev {
     RtwRegisterIo *io;
     struct rtw_hal hal;
