@@ -91,7 +91,7 @@ static int rx_msdu(void *v,uint8_t *out,unsigned cap,unsigned *bytes,bool *encry
         if(rc<=0) return rc;
         if(rc!=1 || n>sizeof(f)) return INVALID;
         Luna80211Header h;
-        if(luna80211_header(f,n,&h) || h.type!=2 || h.subtype!=0 ||
+        if(luna80211_header(f,n,&h) || h.type!=2 || (h.subtype!=0 && h.subtype!=8) ||
            h.from_ds!=1 || h.to_ds || memcmp(h.bssid,c->ap.bssid,6) ||
            (memcmp(h.destination,c->mac,6) && !(h.destination[0]&1))) continue;
         bool crypted=h.protected_frame;
