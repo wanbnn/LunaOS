@@ -45,7 +45,7 @@ int main(void) {
     assert(wifi_client_link(&client)==WIFI_ASSOCIATING);
     reply(0xb0,0,2);wifi_client_poll(&client);
     assert(txcount==2 && sent[1][0]==0 && sent[1][28]==0);
-    assert(sent[1][30]==0 && sent[1][31]==4 && !memcmp(sent[1]+32,"Home",4));
+    assert(sent[1][28]==0 && sent[1][29]==4 && !memcmp(sent[1]+30,"Home",4));
     reply(0x10,0,42);wifi_client_poll(&client);
     assert(associations==1 && client.aid==42);
     assert(wifi_client_link(&client)==WIFI_ASSOCIATED);
