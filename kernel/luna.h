@@ -105,6 +105,9 @@ bool disk_write(uint32_t, const void *);
 #define MAX_FILES 64
 /* Scratch buffers for shell/UI text commands; NOT a file-size limit. */
 #define LUNA_TEXT_BUFFER 8192
+/* Existing editor/shell scratch arrays still have their own 8 KiB UI budget.
+ * This constant is NOT a LunaFS per-file limit. */
+#define FILE_CAP LUNA_TEXT_BUFFER
 #define PATH_CAP 128
 typedef struct {
     char path[PATH_CAP];
