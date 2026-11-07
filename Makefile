@@ -98,7 +98,7 @@ run-iso: all
 	LUNA_IMAGE=dist/LunaOS.iso tools/run-qemu.sh
 run: all
 	tools/run-qemu.sh
-test: all test-storage test-storage-sdhci test-lunafs2 test-lunasdk-hardware test-lunapy test-devkit test-motion test-pmm test-heap test-wpa2 test-dhcp test-wifi-station test-iwl-firmware test-iwl-pcie test-wifi-intel test-wifi-scan test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
+test: all test-storage test-storage-sdhci test-lunafs2 test-lunasdk-hardware test-lunapy test-devkit test-motion test-pmm test-heap test-wpa2 test-wifi-ccmp test-dhcp test-wifi-station test-iwl-firmware test-iwl-pcie test-wifi-intel test-wifi-scan test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
 	$(PYTHON) tests/smoke.py
 	$(PYTHON) tests/multitask.py
 	$(PYTHON) tests/desktop.py
@@ -203,6 +203,10 @@ test-wifi-intel:
 	$(CC) -std=c11 -O2 -ffunction-sections -fdata-sections -Wall -Wextra -Werror -Ikernel drivers/wifi_intel.c tests/wifi_intel.c -Wl,--gc-sections -o build/wifi-intel-test
 	./build/wifi-intel-test
 
+build/net/wifi_ccmp.o: net/wifi_ccmp.c third_party/musl/lib/libc.a
+	@mkdir -p build/net
+	$(CC) $(CFLAGS) $(MUSLINC) -Ithird_party/bearssl/inc -c $< -o $@
+
 build/net/wpa2.o: net/wpa2.c third_party/musl/lib/libc.a
 	@mkdir -p build/net
 	$(CC) $(CFLAGS) $(MUSLINC) -Ithird_party/bearssl/inc -c $< -o $@
@@ -216,7 +220,11 @@ test-iwl-firmware:
 build/host-bearssl/%.o: third_party/bearssl/src/%.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c11 -O2 -Ithird_party/bearssl/inc -Ithird_party/bearssl/src -c $< -o $@
-HOST_WPA_CRYPTO := codec/dec32be codec/enc32be codec/ccopy hash/sha1 mac/hmac mac/hmac_ct hash/dig_size symcipher/aes_ct symcipher/aes_ct_dec symcipher/aes_ct_cbcdec
+HOST_WPA_CRYPTO := codec/dec32be codec/enc32be codec/ccopy hash/sha1 mac/hmac mac/hmac_ct hash/dig_size symcipher/aes_ct symcipher/aes_ct_dec symcipher/aes_ct_cbcdec symcipher/aes_ct_enc symcipher/aes_ct_cbcenc
+test-wifi-ccmp: $(addprefix build/host-bearssl/,$(addsuffix .o,$(HOST_WPA_CRYPTO)))
+	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -Ithird_party/bearssl/inc net/wifi_ccmp.c tests/wifi_ccmp.c $^ -o build/wifi-ccmp-test
+	./build/wifi-ccmp-test
+
 test-wpa2: $(addprefix build/host-bearssl/,$(addsuffix .o,$(HOST_WPA_CRYPTO)))
 	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -Ithird_party/bearssl/inc net/wpa2.c tests/wpa2.c $^ -o build/wpa2-test
 	./build/wpa2-test
