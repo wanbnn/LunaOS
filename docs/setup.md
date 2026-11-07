@@ -14,10 +14,13 @@ A imagem de distribuição abre o assistente nativo. A interface usa Inter Tight
 4. Rede: mostra Ethernet RTL8139 e uma tela de Wi-Fi com botões Buscar redes,
    seleção de SSIDs, campo de senha e Conectar. A UI usa exclusivamente dados
    retornados pela API `kernel/wifi.h`; **nenhum SSID é inventado**.
-   A RTL8822BE possui apenas diagnóstico PCI/MMIO/firmware; não existe ainda
-   implementação de driver RF/MAC/WPA2 que se registre na API. Portanto, não há
-   scan, lista ou associação Wi-Fi funcional em hardware nesta versão.
-   O assistente mostra a indisponibilidade do driver e permite continuar offline.
+   O RTL8822BE possui scanner passivo nativo e um caminho **experimental**
+   de transmissão de quadros, autenticação/associação e WPA2-PSK/CCMP, ligado
+   ao DHCP da pilha de rede. O botão Conectar está disponível apenas quando
+   o rádio inicializa e a rede oferece um modo compatível. **Ainda não foi
+   validada uma conexão real em hardware**: o rádio pode não transmitir,
+   associar ou obter IP nesta versão. O assistente também permite continuar
+   offline. O diagnóstico detalhado está em `docs/rtw8822be-native-port.md`.
 5. País/região e preferência de zona de horário, salvos em `/etc/region`.
    Não há banco IANA/DST integrado; o relógio atual continua UTC.
 6. Usuário padrão, senha e confirmação. Nome: inicia com a-z e contém até 24
