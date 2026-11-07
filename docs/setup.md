@@ -11,8 +11,13 @@ A imagem de distribuição abre o assistente nativo. A interface usa Inter Tight
 2. Idioma do sistema/assistente: inglês ou português; teclado US ou ABNT2 básico,
    aplicado imediatamente, com campo para teste. A tradução do desktop é parcial.
 3. Identificação PCI do adaptador Wi-Fi e indicação real do estado do driver.
-4. Rede: mostra Ethernet RTL8139 quando disponível e permite continuar sem Wi-Fi.
-   **Não há scan, lista de SSIDs ou associação Wi-Fi funcional nesta versão.**
+4. Rede: mostra Ethernet RTL8139 e uma tela de Wi-Fi com botões Buscar redes,
+   seleção de SSIDs, campo de senha e Conectar. A UI usa exclusivamente dados
+   retornados pela API `kernel/wifi.h`; **nenhum SSID é inventado**.
+   A RTL8822BE possui apenas diagnóstico PCI/MMIO/firmware; não existe ainda
+   implementação de driver RF/MAC/WPA2 que se registre na API. Portanto, não há
+   scan, lista ou associação Wi-Fi funcional em hardware nesta versão.
+   O assistente mostra a indisponibilidade do driver e permite continuar offline.
 5. País/região e preferência de zona de horário, salvos em `/etc/region`.
    Não há banco IANA/DST integrado; o relógio atual continua UTC.
 6. Usuário padrão, senha e confirmação. Nome: inicia com a-z e contém até 24

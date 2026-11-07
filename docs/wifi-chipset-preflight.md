@@ -23,6 +23,7 @@ reference material.
 | RTL8188EE | 10ec:8179 | rtlwifi | rtlwifi/rtl8188efw.bin |
 | RTL8723DE | 10ec:d723 | rtw88 | rtw88/rtw8723d_fw.bin |
 | RTL8821CE | 10ec:c821, 10ec:b821 | rtw88 | rtw88/rtw8821c_fw.bin |
+| RTL8822BE | 10ec:b822 | rtw88/rtw8822be | rtw88/rtw8822b_fw.bin |
 | MT7612E PCIe | 14c3:7612 | mt76x2e | mt7662.bin and mt7662_rom_patch.bin |
 | QCA9377 PCIe | 168c:0042 | ath10k | ath10k/QCA9377/hw1.0/firmware-6.bin and board-2.bin (revision-dependent candidates) |
 
@@ -47,3 +48,17 @@ those limits. A readable blob does not establish correct revision/API.
 
 References: pinned Linux source in `assets/driver-sources/manifest.json`,
 upstream linux-firmware WHENCE and MT76x2 driver firmware definitions.
+
+## RTL8822BE hardware diagnostics and setup UI
+
+`wifidiag` in lunaSH performs a read-only `rtw88`-based diagnostic of PCI
+`10ec:b822`, BAR2, `REG_SYS_CFG1` and firmware presence. The test enables
+PCI memory decode temporarily; it never enables bus mastering or initializes
+Wi-Fi. For a missing firmware it returns an explicit failure. Consult its
+full output, not just the process exit status.
+
+`kernel/wifi.h` defines a native driver interface with scan, network results,
+connect, state and poll. The setup screen consumes it and only shows SSIDs
+actually returned by a registered radio driver. **There is currently no driver
+registered**, so the setup cannot connect and will display that Wi-Fi is
+unavailable. Host tests inject a mock driver to check the API contract only.

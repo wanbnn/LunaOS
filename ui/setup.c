@@ -3,6 +3,7 @@
 #include "settings.h"
 #include "task.h"
 #include "web.h"
+#include "wifi.h"
 #define INK 0x20344f
 #define SECONDARY 0x586d85
 #define BLUE 0x316ade
@@ -17,6 +18,12 @@ static bool detected, hashing, installed, login_busy;
 static bool eligible[4];
 static char username[25], password[65], confirmation[65], erase_text[32], layout_test[64];
 static char radio[512], message[192];
+static WifiAp wifi_aps[WIFI_MAX_APS];
+static WifiState wifi_link;
+static unsigned wifi_count, wifi_first;
+static int wifi_selected = -1, wifi_scan_rc, wifi_connect_rc, wifi_state_rc;
+static char wifi_password[WIFI_MAX_PASSWORD + 1];
+static uint32_t wifi_last_refresh;
 static uint8_t boot_sector[512], transfer[512], verify_sector[512];
 static uint8_t copy_buffer[64 * 512], readback_buffer[64 * 512];
 static File file_backup[MAX_FILES];
@@ -91,10 +98,28 @@ static void paragraph(int y, const char *s, uint32_t color) {
     }
 }
 static void change_page(int page) {
+    if (setup_page == 3 && page != 3)
+        secret_clear(wifi_password, sizeof(wifi_password));
     setup_page = page;
+    if (page == 3) {
+        wifi_count = wifi_first = 0;
+        wifi_selected = -1;
+        wifi_password[0] = 0;
+        wifi_connect_rc = 0;
+        wifi_scan_rc = wifi_scan_start();
+        wifi_state_rc = wifi_state(&wifi_link);
+        wifi_last_refresh = 0;
+    }
     page_started = frame_clock;
     message[0] = 0;
     field_index = 0;
+    ui_dirty = true;
+}
+static void setup_wifi_connect(void) {
+    if (wifi_selected < 0 || (unsigned)wifi_selected >= wifi_count)
+        return;
+    wifi_connect_rc = wifi_connect_ap(&wifi_aps[wifi_selected], wifi_password);
+    secret_clear(wifi_password, sizeof(wifi_password));
     ui_dirty = true;
 }
 static bool source_valid(void) {
@@ -317,25 +342,57 @@ void setup_draw(void) {
                   SECONDARY);
     } else if (setup_page == 3) {
         heading("Conecte-se ao seu mundo", "Connect to your world",
-                "Escolha uma conexão disponível ou continue offline.",
-                "Use an available connection or continue offline.");
+                "Selecione uma rede Wi-Fi real ou continue offline.",
+                "Select a real Wi-Fi network or continue offline.");
         row(158, 287, 708, "Ethernet / RTL8139",
-            net_ready ? tr("Driver disponível; perfil estático QEMU",
-                           "Driver available; static QEMU profile")
-                      : tr("Sem interface Ethernet suportada", "No supported Ethernet interface"),
-            false, net_ready);
-        round_rect(158, 357, 708, 158, 16, 0xffffff, 180);
-        icon(180, 378, ICON_WIFI, 28, SECONDARY);
-        text(225, 385, tr("Wi-Fi indisponível nesta versão", "Wi-Fi unavailable in this version"),
-             20, INK);
-        text(181, 437,
-             tr("Scan e conexão exigem um driver de rádio portado.",
-                "Scan and association require a ported radio driver."),
-             13, SECONDARY);
-        text(181, 468,
-             tr("Nenhuma rede ou conexão Wi-Fi é simulada.",
-                "No Wi-Fi networks or connections are simulated."),
-             13, SECONDARY);
+            net_ready ? tr("Perfil IPv4 estático (QEMU)", "Static IPv4 profile (QEMU)") :
+                        tr("Sem Ethernet compatível", "No compatible Ethernet"), false, net_ready);
+        text(160, 359, tr("Redes Wi-Fi", "Wi-Fi networks"), 16, INK);
+        if (wifi_count > 2) {
+            button(460, 350, 84, tr("Acima", "Prev"), wifi_first > 0, false);
+            button(554, 350, 84, tr("Abaixo", "Next"), wifi_first + 2 < wifi_count, false);
+        }
+        button(650, 350, 216, tr("Buscar redes", "Scan networks"), true, false);
+        for (unsigned i = 0; i < 2 && wifi_first + i < wifi_count; i++) {
+            const WifiAp *ap = &wifi_aps[wifi_first + i];
+            const char *security = ap->security == WIFI_OPEN ? "Open" :
+                                   ap->security == WIFI_WPA2_PSK ? "WPA2-PSK" :
+                                   "Security unsupported";
+            row(158, 396 + (int)i * 55, 708, ap->ssid, security,
+                wifi_selected == (int)(wifi_first + i), ap->security != WIFI_OTHER);
+        }
+        if (wifi_state_rc == 0 && wifi_link.link == WIFI_ONLINE) {
+            text(160, 518, tr("Wi-Fi conectado e IP configurado.", "Wi-Fi connected; IP configured."),
+                 13, 0x237746);
+        } else if (wifi_state_rc == 0 && wifi_link.link == WIFI_ASSOCIATING) {
+            text(160, 518, tr("Autenticando com o ponto de acesso...",
+                              "Authenticating with access point..."), 13, INK);
+        } else if (wifi_state_rc == 0 && wifi_link.link == WIFI_ASSOCIATED) {
+            text(160, 518, tr("Associado. Aguardando configuração IP...",
+                              "Associated. Awaiting IP configuration..."), 13, INK);
+        } else if (wifi_connect_rc) {
+            text(160, 518, tr("Falha na conexão; verifique a senha e o driver.",
+                              "Connection failed; check password and driver."), 13, RED);
+        } else if (wifi_scan_rc) {
+            text(160, 518, tr("Driver Wi-Fi não operacional. Não existem redes simuladas.",
+                              "Wi-Fi driver unavailable; no fabricated networks."), 13, RED);
+        } else if (!wifi_count) {
+            text(160, 518, tr("Aguardando resultados reais de varredura...",
+                              "Waiting for actual scan results..."), 13, SECONDARY);
+        } else {
+            text(160, 518, tr("Selecione uma rede para conectar.",
+                              "Select an access point to connect."), 13, SECONDARY);
+        }
+        if (wifi_selected >= 0 && (unsigned)wifi_selected < wifi_count) {
+            const WifiAp *chosen = &wifi_aps[wifi_selected];
+            if (chosen->security == WIFI_WPA2_PSK)
+                entry(557, tr("Senha Wi-Fi", "Wi-Fi password"), wifi_password, 0, true, 475);
+            else
+                text(160, 565, tr("Esta rede não exige senha.", "This network requires no password."),
+                     13, SECONDARY);
+            button(650, 558, 216, tr("Conectar", "Connect"),
+                   chosen->security != WIFI_OTHER, false);
+        }
     } else if (setup_page == 4) {
         heading("Sua região", "Your region", "Selecione o país e a zona de horário preferida.",
                 "Select your country and preferred timezone.");
@@ -476,7 +533,9 @@ void setup_draw(void) {
         button(158, 606, 108, tr("Voltar", "Back"), true, false);
     if (setup_page < 8 || setup_page == 9 || setup_page == 10) {
         const char *label = setup_page == 7    ? tr("Apagar e instalar", "Erase and install")
-                            : setup_page == 3  ? tr("Continuar sem Wi-Fi", "Continue without Wi-Fi")
+                            : setup_page == 3  ? (wifi_state_rc == 0 && wifi_link.link == WIFI_ONLINE ?
+                                                        tr("Continuar", "Continue") :
+                                                        tr("Continuar offline", "Continue offline"))
                             : setup_page == 9  ? tr("Reiniciar agora", "Restart now")
                             : setup_page == 10 ? tr("Entrar", "Sign in")
                                                : tr("Continuar", "Continue");
@@ -517,8 +576,34 @@ void setup_pointer(int x, int y, int buttons) {
             input_apply_settings();
         }
     }
+    if (setup_page == 3) {
+        if (hit(x, y, 650, 350, 216, 38)) {
+            wifi_scan_rc = wifi_scan_start();
+            wifi_count = wifi_first = 0;
+            wifi_selected = -1;
+            wifi_connect_rc = 0;
+            secret_clear(wifi_password, sizeof(wifi_password));
+        } else if (wifi_count > 2 && hit(x, y, 460, 350, 84, 38)) {
+            if (wifi_first) wifi_first--;
+        } else if (wifi_count > 2 && hit(x, y, 554, 350, 84, 38)) {
+            if (wifi_first + 2 < wifi_count) wifi_first++;
+        } else {
+            for (unsigned i = 0; i < 2 && wifi_first + i < wifi_count; i++) {
+                if (hit(x, y, 158, 396 + (int)i * 55, 708, 48)) {
+                    wifi_selected = (int)(wifi_first + i);
+                    secret_clear(wifi_password, sizeof(wifi_password));
+                    wifi_connect_rc = 0;
+                }
+            }
+            if (wifi_selected >= 0 &&
+                hit(x, y, 650, 558, 216, 38))
+                setup_wifi_connect();
+        }
+        ui_dirty = true;
+        return;
+    }
     if (setup_page == 4)
-        for (int i = 0; i < 8; i++)
+        for (int i = 0; i < 8; i++);
             if (hit(x, y, 158 + (i % 2) * 364, 282 + (i / 2) * 62, 344, 48))
                 selected_region = i;
     if (setup_page == 5) {
@@ -542,7 +627,10 @@ void setup_key(int key) {
         return;
     }
     if (c == 10) {
-        advance();
+        if (setup_page == 3 && wifi_selected >= 0)
+            setup_wifi_connect();
+        else
+            advance();
         return;
     }
     if (c == 9) {
@@ -568,11 +656,33 @@ void setup_key(int key) {
         ui_dirty = true;
         return;
     }
+    if (setup_page == 3 && (c == KEY_UP || c == KEY_DOWN)) {
+        if (wifi_count) {
+            if (wifi_selected < 0)
+                wifi_selected = 0;
+            else if (c == KEY_DOWN && (unsigned)wifi_selected + 1 < wifi_count)
+                wifi_selected++;
+            else if (c == KEY_UP && wifi_selected > 0)
+                wifi_selected--;
+            if ((unsigned)wifi_selected < wifi_first)
+                wifi_first = (unsigned)wifi_selected;
+            if ((unsigned)wifi_selected >= wifi_first + 2)
+                wifi_first = (unsigned)wifi_selected - 1;
+            secret_clear(wifi_password, sizeof(wifi_password));
+        }
+        ui_dirty = true;
+        return;
+    }
     char *value = 0;
     unsigned max = 0;
     if (setup_page == 1) {
         value = layout_test;
         max = 63;
+    }
+    if (setup_page == 3 && wifi_selected >= 0 &&
+        wifi_aps[wifi_selected].security == WIFI_WPA2_PSK) {
+        value = wifi_password;
+        max = WIFI_MAX_PASSWORD;
     }
     if (setup_page == 5) {
         value = field_index == 0 ? username : field_index == 1 ? password : confirmation;
@@ -609,6 +719,30 @@ void setup_poll(void) {
         wireless_status(radio, sizeof(radio));
         detected = true;
         ui_dirty = true;
+    }
+    if (setup_page == 3 && frame_clock - wifi_last_refresh >= 350) {
+        wifi_last_refresh = frame_clock;
+        WifiState link = {0};
+        int rc = wifi_state(&link);
+        if (rc != wifi_state_rc || (rc == 0 && (link.link != wifi_link.link ||
+                                                link.error != wifi_link.error))) {
+            wifi_state_rc = rc;
+            wifi_link = link;
+            ui_dirty = true;
+        }
+        if (!wifi_scan_rc) {
+            WifiAp results[WIFI_MAX_APS] = {0};
+            unsigned count = 0;
+            if (!wifi_scan_results(results, WIFI_MAX_APS, &count) &&
+                (count != wifi_count || memcmp(wifi_aps, results, sizeof(results)))) {
+                memcpy(wifi_aps, results, sizeof(results));
+                wifi_count = count;
+                wifi_first = 0;
+                wifi_selected = -1;
+                secret_clear(wifi_password, sizeof(wifi_password));
+                ui_dirty = true;
+            }
+        }
     }
     if (setup_page == 10 && login_busy && account_poll(1024)) {
         login_busy = false;

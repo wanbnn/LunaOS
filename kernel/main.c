@@ -1,5 +1,6 @@
 #include "boot.h"
 #include "driver.h"
+#include "wifi.h"
 #include "install.h"
 #include "luna.h"
 #include "settings.h"
@@ -47,6 +48,7 @@ void kmain(void) {
          * times per second just because the PIT ticks at 1 kHz. */
         if (frame_clock >= next_driver) {
             driver_services_poll(16);
+            wifi_poll();
             next_driver = frame_clock + 5;
         }
         if (frame_clock >= next_net) {
