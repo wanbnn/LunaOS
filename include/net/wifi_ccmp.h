@@ -3,7 +3,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include "../include/net/wpa2.h"
+#include "wpa2.h"
 /* Software WPA2 CCMP-128 (802.11i, non-QoS, single-MPDU only).
  * No TKIP, fragmentation, A-MSDU, QoS or rekeying. Not thread safe.
  * The caller MUST validate BSSID, transmitter and association state.
