@@ -620,7 +620,23 @@ static int execute(int argc, char **a, const char *input, char *out) {
         emit(out, "usage: wifidiag [power|intel] (MAC power cycle only; no scan/connect)\n");
         return 2;
     } else if (!strcmp(c, "storage")) {
-        storage_status(out,CAP);
+        if(argc==1)storage_status(out,CAP);
+        else if(argc==3 && !strcmp(a[1],"verify")) {
+            const char *p=a[2];
+            unsigned index=0;
+            if(!*p)return 2;
+            for(;*p;p++) {
+                if(*p<'0'||*p>'9'||index>1000u)return 2;
+                index=index*10u+(unsigned)(*p-'0');
+            }
+            if(storage_verify_read(index,out,CAP)) {
+                emit(out,"storage: disk not found or physical read failed\n");
+                return 1;
+            }
+        } else {
+            emit(out,"usage: storage [verify DISK_INDEX] (read-only)\n");
+            return 2;
+        }
         return 0;
     } else if (!strcmp(c, "drvinfo")) {
         driver_services_status(out, CAP);

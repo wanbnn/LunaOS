@@ -149,3 +149,24 @@ void storage_status(char *out,size_t cap) {
         append(out,c->reason,cap);append(out,"\n",cap);
     }
 }
+
+/* Non-destructive two-read check, never modifies the target's partition table. */
+int storage_verify_read(unsigned index, char *out, size_t cap) {
+    if(!out || !cap || index==4 || index>=STORAGE_DEVICE_COUNT)return DRV_EINVAL;
+    const DiskInfo *d=disk_info(index);
+    if(!d || !d->present || !d->supported)return DRV_ENOTSUP;
+    uint8_t first[512],second[512];
+    if(!disk_read_blocks(index,0,1,first) ||
+       !disk_read_blocks(index,0,1,second) ||
+       memcmp(first,second,sizeof(first)))return DRV_EIO;
+    uint32_t hash=2166136261u;
+    for(unsigned i=0;i<sizeof(first);i++)hash=(hash^first[i])*16777619u;
+    out[0]=0;
+    append(out,"Storage read-only verify: disk ",cap);
+    append_number(out,cap,index);
+    append(out," sector 0 FNV=",cap);
+    char number_buf[16];hex(number_buf,hash);
+    append(out,number_buf,cap);
+    append(out," (two consistent physical reads)\n",cap);
+    return 0;
+}

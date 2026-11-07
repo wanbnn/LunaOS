@@ -45,6 +45,7 @@ unsigned storage_device_count(void);
 const char *storage_disk_type(unsigned index);
 void storage_pci_init(void);
 void storage_status(char *out, size_t cap);
+int storage_verify_read(unsigned index, char *out, size_t cap);
 unsigned storage_controller_count(void);
 const StorageController *storage_controller(unsigned index);
 
