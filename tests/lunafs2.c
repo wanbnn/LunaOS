@@ -82,9 +82,9 @@ int main(void) {
     assert(!fs_write_bytes("/home/luna/big.bin",blob,256u*1024u,false));
     File *f=fs_find("/home/luna/big.bin");
     assert(f && f->size==256u*1024u && !memcmp(f->data,blob,f->size));
-    assert(!fs_save() && !fs_dirty);
+    assert(fs_save() && !fs_dirty);
     assert(!fs_remove("/home/luna/big.bin"));
-    assert(!fs_load());
+    assert(fs_load());
     f=fs_find("/home/luna/big.bin");
     assert(f && f->size==256u*1024u && !memcmp(f->data,blob,f->size));
     /* Deep copy backup: update the original, restore the prior data. */
