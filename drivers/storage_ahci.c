@@ -181,7 +181,7 @@ int storage_ahci_probe(uint8_t bus,uint8_t slot,uint8_t fn) {
     stage=2;
     if(drv_pci_map(&h->pci,5,&h->mmio))goto fail;
     stage=3;
-    if(h->mmio.size<0x1100)goto fail;
+    if(h->mmio.size<0x180)goto fail; /* QEMU AHCI exposes only its actual port aperture. */
     stage=4;
     if(drv_pci_enable(&h->pci,false,true)||drv_pci_master(&h->pci,true))goto fail;
     stage=5;
