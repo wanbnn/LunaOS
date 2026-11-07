@@ -8,6 +8,8 @@
 #include "rtw8822be_phy.h"
 #include "rtw8822b_firmware.h"
 #include "wifi_scan.h"
+#include "wifi_client.h"
+#include "web.h"
 #define RX_COUNT 16u
 #define RX_BYTES 11520u
 static struct {
@@ -16,12 +18,15 @@ static struct {
     int error;
     DrvPci pci;
     DrvMmio mmio;
-    DrvDma descriptors, payload, txbd, tx;
+    DrvDma descriptors, payload, txbd, tx, txframes;
     DrvFirmware firmware;
     RtwRegisterIo io;
     RtwFirmwareTransfer transfer;
     struct rtw_dev phy;
     WifiScanner scanner;
+    WifiClient client;
+    uint8_t mac[6];
+    unsigned txwp[8], tx_sent, tx_busy, tx_errors;
     unsigned rp, tag, received, dropped;
 } dev;
 static int rd(void *ctx,uint32_t reg,unsigned width,uint32_t *out) {
@@ -69,12 +74,15 @@ static int allocate_rings(void) {
     if(!rc) rc=drv_dma_alloc(RX_COUNT*RX_BYTES,4096,UINT32_MAX,0,&dev.payload);
     if(!rc) rc=drv_dma_alloc(8*32,256,UINT32_MAX,0,&dev.txbd);
     if(!rc) rc=drv_dma_alloc(4096+48,256,UINT32_MAX,0,&dev.tx);
+    /* Two 2-descriptor TX rings (BE and MGMT), each 2048-byte DMA slot. */
+    if(!rc) rc=drv_dma_alloc(4*2048,256,UINT32_MAX,0,&dev.txframes);
     return rc;
 }
 static int rings(void) {
     int rc=bits(0x303,1,0,0xf7);
     if(rc) return rc;
     dev.rp=dev.tag=0;
+    memset(dev.txwp,0,sizeof(dev.txwp));
     memset(dev.txbd.cpu,0,dev.txbd.size);
     for(unsigned i=0;i<RX_COUNT;i++) arm_rx(i);
     static const uint32_t bases[]={0x308,0x1320,0x310,0x330,0x328,0x320,0x318,0x340};
@@ -188,8 +196,94 @@ static int receive(void *ctx,uint8_t *out,unsigned capacity,unsigned *bytes,int1
     if(rc) { dev.error=rc; dev.ready=false; return rc; }
     return delivered;
 }
+/* Ordinary MGMT/BE PCIe TX uses distinct buffers from the firmware
+ * reserved-page beacon queue. Every accepted MPDU gets its own live DMA slot.
+ * The NIC advances its read index only after consuming a descriptor. */
+static int tx_mpdu(void *ctx,const uint8_t *mpdu,unsigned n,bool mgmt) {
+    (void)ctx;
+    if(!dev.ready || dev.error || !mpdu || n<24 || n>1540) return DRV_EINVAL;
+    unsigned queue=mgmt ? 6 : 2;
+    uint32_t idxreg=mgmt ? 0x384 : 0x380, index=0;
+    int rc=read32(idxreg,&index);
+    if(rc) {dev.tx_errors++;return rc;}
+    unsigned rp=(index>>16)&0xfffu;
+    if(rp>=2) {dev.tx_errors++;return DRV_EIO;}
+    unsigned wp=dev.txwp[queue], next=(wp+1)%2u;
+    if(next==rp) {dev.tx_busy++;return -16;}
+    unsigned slot=(mgmt?0:2)+wp;
+    uint8_t *pkt=(uint8_t *)dev.txframes.cpu+slot*2048u;
+    uint32_t bus=dev.txframes.bus+slot*2048u;
+    uint8_t *bd=(uint8_t *)dev.txbd.cpu+queue*32u+wp*16u;
+    memset(pkt,0,48);
+    memcpy(pkt+48,mpdu,n);
+    /* 48-byte Realtek TX packet descriptor. Software sequence, legacy rate
+     * 1 Mbps (2.4 GHz) / 6 Mbps (5 GHz), no undocumented HW security keys. */
+    le32(pkt,n|(48u<<16)|(1u<<26)|(1u<<31));
+    le32(pkt+4,(mgmt ? 0x12u : 0u)<<8);
+    le32(pkt+12,(1u<<8)|(1u<<10));
+    le32(pkt+16,dev.phy.hal.current_channel>14 ? 4 : 0);
+    unsigned checksum=0;
+    for(unsigned i=0;i<32;i+=2) checksum^=pkt[i]|((unsigned)pkt[i+1]<<8);
+    le16(pkt+28,checksum);
+    memset(bd,0,16);
+    le16(bd,48);
+    le16(bd+2,(48+n+127)/128);
+    le32(bd+4,bus);
+    le16(bd+8,n);
+    le32(bd+12,bus+48);
+    drv_memory_barrier();
+    rc=write(idxreg,2,next);
+    if(rc) {dev.tx_errors++;return rc;}
+    dev.txwp[queue]=next;
+    dev.tx_sent++;
+    return 0;
+}
+static int rx_mpdu(void *ctx,uint8_t *frame,unsigned capacity,unsigned *bytes) {
+    int16_t rssi=0;
+    return receive(ctx,frame,capacity,bytes,&rssi);
+}
+static int csprng(void *ctx,uint8_t *out,size_t bytes) {
+    (void)ctx;return random_bytes(out,bytes) ? 0 : DRV_EIO;
+}
+static int set_mac_bssid(const uint8_t mac[6],const uint8_t ap[6]) {
+    int rc=write(0x610,4,mac[0]|((uint32_t)mac[1]<<8)|
+           ((uint32_t)mac[2]<<16)|((uint32_t)mac[3]<<24));
+    if(!rc) rc=write(0x614,2,mac[4]|((uint32_t)mac[5]<<8));
+    if(!rc) rc=write(0x618,4,ap[0]|((uint32_t)ap[1]<<8)|
+           ((uint32_t)ap[2]<<16)|((uint32_t)ap[3]<<24));
+    if(!rc) rc=write(0x61c,2,ap[4]|((uint32_t)ap[5]<<8));
+    if(!rc) rc=bits(0x100,4,3u<<16,2u<<16); /* VIF0 infrastructure STA. */
+    return rc;
+}
+static int station_connect(void *ctx,const WifiAp *ap,const char *pass,
+                           const uint8_t *rsn,size_t rsn_len) {
+    (void)ctx;
+    if(!dev.ready || !ap) return DRV_EIO;
+    if(dev.client.stage!=WIFI_CLIENT_IDLE) return -16;
+    /* Block unsupported channels before any TX is queued. */
+    if(ap->channel<1 || (ap->channel>11 && ap->channel!=36 &&
+       ap->channel!=40 && ap->channel!=44 && ap->channel!=48)) return -95;
+    int rc=set_mac_bssid(dev.mac,ap->bssid);
+    if(rc) return rc;
+    WifiClientRadio radio={.ready=radio_ready,.now=now,.tune=tune,
+        .send=tx_mpdu,.recv=rx_mpdu,.random=csprng};
+    rc=wifi_client_start(&dev.client,&radio,dev.mac,ap,pass,rsn,rsn_len);
+    if(rc) dev.stage="station connect failed";
+    return rc;
+}
+static WifiLink station_link(void *ctx) {
+    (void)ctx;return wifi_client_link(&dev.client);
+}
+static int station_error(void *ctx) {
+    (void)ctx;return dev.client.error;
+}
+static void station_poll(void *ctx) {
+    (void)ctx;wifi_client_poll(&dev.client);
+}
+
 static void cleanup(void) {
     dev.ready=false;
+    wifi_client_disconnect(&dev.client);
     /* Never free a descriptor or payload while PCI bus mastering can continue. */
     if(dev.master) {
         int rc=drv_pci_master(&dev.pci,false);
@@ -207,6 +301,7 @@ static void cleanup(void) {
     if(dev.payload.cpu) drv_dma_free(&dev.payload);
     if(dev.descriptors.cpu) drv_dma_free(&dev.descriptors);
     if(dev.tx.cpu) drv_dma_free(&dev.tx);
+    if(dev.txframes.cpu) drv_dma_free(&dev.txframes);
     if(dev.txbd.cpu) drv_dma_free(&dev.txbd);
     if(dev.mmio.cookie) drv_mmio_unmap(&dev.mmio);
     if(dev.pci.cookie && !dev.mmio.cookie) drv_pci_release(&dev.pci);
@@ -249,6 +344,7 @@ void rtw8822be_init(void) {
     STEP("DMA pause",drv_pci_master(&dev.pci,false)); dev.master=false;
     STEP("DMA rings after firmware",rings());
     STEP("efuse/PHY tables",rtw8822be_phy_prepare(&dev.phy,&dev.io));
+    memcpy(dev.mac,dev.phy.efuse.mac,6);
     /* Chip FIFO split from rtw88's PCIe page table (2048 TX pages,
      * 52 reserved, four 64-page priority queues, one gap page). */
     STEP("queue map",write(0x10c,2,(2u<<4)|(2u<<6)|(1u<<8)|(1u<<10)|(0u<<12)|(3u<<14)));
@@ -276,7 +372,7 @@ void rtw8822be_init(void) {
     STEP("RX PHY status",write(0x60f,1,4));
     STEP("RX management filter",write(0x6a0,2,0xffff));
     STEP("RX control filter",write(0x6a2,2,0));
-    STEP("RX data filter",write(0x6a4,2,0));
+    STEP("RX data filter",write(0x6a4,2,0xffff));
     STEP("RX RCR",write(0x608,4,(1u<<31)|(1u<<28)|(1u<<13)|0x0f));
     STEP("interrupt mask",write(0xb0,4,0));
     STEP("interrupt mask",write(0xb8,4,0));
@@ -288,10 +384,11 @@ void rtw8822be_init(void) {
     /* Receive-only channels; no active probes or transmit-power assumptions. */
     static const uint8_t channels[]={1,2,3,4,5,6,7,8,9,10,11,36,40,44,48};
     WifiScanRadio radio={.ready=radio_ready,.now_ms=now,.set_channel=tune,
-        .receive=receive,.stop=stop};
+        .receive=receive,.stop=stop,.connect=station_connect,.link=station_link,
+        .connection_error=station_error,.poll_client=station_poll};
     STEP("scanner attach",wifi_scan_attach(&dev.scanner,&radio,channels,sizeof(channels)));
-    dev.stage="experimental passive RX ready"; dev.error=0;
-    serial_write("RTL8822BE: firmware booted; native DMA/PHY passive scanner registered\n");
+    dev.stage="experimental STA TX/RX ready"; dev.error=0;
+    serial_write("RTL8822BE: firmware booted; experimental native TX/RX STA registered\n");
 #undef STEP
     return;
 fail:
@@ -313,5 +410,8 @@ void rtw8822be_status(char *out,size_t cap) {
     if(dev.scanner.error) {
         append(out," scan error=",cap); number(n,(uint32_t)-dev.scanner.error); append(out,n,cap);
     }
-    append(out,"\nPassive scan only; association is not implemented.\n",cap);
+    append(out,"\nTX frames=",cap);number(n,dev.tx_sent);append(out,n,cap);
+    append(out," busy=",cap);number(n,dev.tx_busy);append(out,n,cap);
+    append(out," errors=",cap);number(n,dev.tx_errors);append(out,n,cap);
+    append(out,"\nExperimental STA TX/WPA2; no physical RF validation.\n",cap);
 }
