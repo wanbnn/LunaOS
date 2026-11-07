@@ -414,15 +414,15 @@ void rtw8822be_status(char *out,size_t cap) {
     }
     char n[20]; append(out,"\nRX frames=",cap); number(n,dev.received); append(out,n,cap);
     append(out," dropped=",cap); number(n,dev.dropped); append(out,n,cap);
-    append(out,"\\nRX DMA polls=",cap); number(n,dev.rx_dma_polls); append(out,n,cap);
+    append(out,"\nRX DMA polls=",cap); number(n,dev.rx_dma_polls); append(out,n,cap);
     append(out," pending=",cap); number(n,dev.rx_pending); append(out,n,cap);
     append(out," bad_tag=",cap); number(n,dev.rx_invalid_tag); append(out,n,cap);
     append(out," parse_fail=",cap); number(n,dev.rx_invalid_packet); append(out,n,cap);
     append(out," c2h=",cap); number(n,dev.rx_c2h); append(out,n,cap);
-    append(out,"\\nRX index=",cap); hex(n,dev.rx_last_index); append(out,n,cap);
+    append(out,"\nRX index=",cap); hex(n,dev.rx_last_index); append(out,n,cap);
     append(out," rp=",cap); number(n,dev.rp); append(out,n,cap);
     append(out," tag=",cap); number(n,dev.tag); append(out,n,cap);
-    append(out,"\\nScan active=",cap); number(n,dev.scanner.scanning ? 1u : 0u);append(out,n,cap);
+    append(out,"\nScan active=",cap); number(n,dev.scanner.scanning ? 1u : 0u);append(out,n,cap);
     append(out," channel_idx=",cap);number(n,dev.scanner.channel_index);append(out,n,cap);
     append(out," found=",cap);number(n,dev.scanner.count);append(out,n,cap);
     append(out," PHY channel=",cap);number(n,dev.phy.hal.current_channel);append(out,n,cap);
