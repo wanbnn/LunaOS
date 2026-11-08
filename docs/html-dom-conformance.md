@@ -53,3 +53,27 @@ por estados, tree builder por insertion modes e um modelo de propriedade/tempo d
 dos nós que respeite referências JavaScript após `removeChild`.
 A implementação existente de `removeChild` ainda libera o nó removido e não
 atende o contrato DOM. Isso é um bloqueador para declarar conformidade.
+
+## Iteração de 8 de novembro de 2026
+
+Esta PR agora contém o modelo **inicial** de DocumentFragment, ShadowRoot,
+`attachShadow({mode})`, `element.shadowRoot`, `template.content`,
+`document.createDocumentFragment()`, `Node.cloneNode(deep)`, inserção
+de filhos de DocumentFragment, namespaces básicos de SVG e MathML e fixtures
+novos. A CI `browser-dom.yml` executa `make test-webengine` com
+AddressSanitizer e UndefinedBehaviorSanitizer no GitHub Actions.
+
+**Não confundir o modelo inicial com implementações completas:** falta o
+algoritmo WHATWG de tokenizer e tree construction; os atributos SVG/MathML e
+integration points ainda são incompletos. ShadowRoot não oferece slotting,
+retargeting, `composedPath`, isolamento de estilos nem `adoptedStyleSheets`.
+Templates ainda não oferecem HTML fragment parser conforme especificação,
+clonagem/importação e adoção totalmente conformes. DOM Events e vida útil dos
+objetos após remoção ainda precisam ser reformulados, inclusive porque
+`removeChild` libera nós que o JavaScript deveria continuar podendo referenciar.
+O binding JS e a ISO não receberam validação completa neste pipeline.
+
+**Bloqueio de merge:** a intenção do PR original foi ampliada e a meta exigida
+é conformidade integral. Não fazer merge como se HTML/DOM estivessem 100%.
+Rodar WPT, html5lib-tests, `make check` e o browser no guest antes
+de promover o conjunto a release.
