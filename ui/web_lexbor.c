@@ -7,6 +7,7 @@
  * WebNode and do not propagate back into the Lexbor document.
  */
 #include "webengine.h"
+#ifdef LUNA_USE_LEXBOR
 #include "lexbor/html/html.h"
 #include "lexbor/dom/interfaces/character_data.h"
 #include "lexbor/dom/interfaces/document_fragment.h"
@@ -103,3 +104,5 @@ bool web_parse_lexbor(const char *html, size_t len, WebNode **root,
         append(error, "Lexbor HTML parse failed.", ecap);
     return *root != NULL;
 }
+
+#endif /* LUNA_USE_LEXBOR */
