@@ -4,11 +4,13 @@
 #include "../drivers/wifi_client.h"
 static uint8_t incoming[4][128],sent[8][160];static unsigned rx_len[4],rxhead,rxcount,txcount,txlen[8];
 static uint32_t clock_ms;
+static bool force_busy;
 static bool radio_ready(void *ctx){(void)ctx;return true;}
 static uint32_t now(void *ctx){(void)ctx;return clock_ms;}
 static int tune(void *ctx,uint8_t ch){(void)ctx;assert(ch==6);return 0;}
 static int send_frame(void *ctx,const uint8_t *f,unsigned n,bool mgmt) {
-    (void)ctx;assert(mgmt && txcount<8 && n<sizeof(sent[0]));
+    (void)ctx;if(force_busy)return -16;
+    assert(mgmt && txcount<8 && n<sizeof(sent[0]));
     memcpy(sent[txcount],f,n);txlen[txcount++]=n;return 0;
 }
 static int recv_frame(void *ctx,uint8_t *out,unsigned cap,unsigned *n) {
@@ -60,5 +62,14 @@ int main(void) {
     clock_ms+=3001;wifi_client_poll(&client);
     assert(client.error==-110 && client.failed_stage==WIFI_CLIENT_AUTH &&
            wifi_client_link(&client)==WIFI_IDLE);
+    assert(!wifi_client_start(&client,&r,sta,&ap,"",NULL,0));
+    force_busy=true;
+    clock_ms+=3001;wifi_client_poll(&client);
+    for(unsigned i=0;i<16 && client.stage!=WIFI_CLIENT_IDLE;i++) {
+        clock_ms+=251;wifi_client_poll(&client);
+    }
+    assert(client.error==-16 && client.failed_stage==WIFI_CLIENT_AUTH);
+    assert(client.tx_backpressure>=12);
+    force_busy=false;
     puts("PASS: native STA auth/association frames, BSSID/AID validation and timeout");
 }
