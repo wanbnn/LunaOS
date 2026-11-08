@@ -7,6 +7,7 @@ on:
       - 'third_party/litehtml'
       - 'ui/litehtml_bridge.h'
       - 'ui/litehtml_bridge.cpp'
+      - 'ui/web_view.c'
       - 'ui/litehtml_graphics.c'
       - 'lib/cxx_runtime.cpp'
       - 'lib/runtime.c'
