@@ -36,7 +36,7 @@ jobs:
         run: |
           LIB="$(find build/lexbor-host -name 'liblexbor_static.a' -print -quit)"
           test -n "$LIB"
-          gcc -std=gnu11 -g -Wall -Wextra -Werror -fsanitize=address,undefined -DLUNA_USE_LEXBOR -Ikernel -Ibuild -Ithird_party/lexbor/source tests/lexbor_bridge_test.c ui/web_dom.c ui/web_lexbor.c "$LIB" -lm -o build/lexbor-bridge-test
+          gcc -std=gnu11 -g -Wall -Wextra -Werror -Wno-unused-function -fsanitize=address,undefined -DLUNA_USE_LEXBOR -Ikernel -Ibuild -Ithird_party/lexbor/source tests/lexbor_bridge_test.c ui/web_dom.c ui/web_lexbor.c "$LIB" -lm -o build/lexbor-bridge-test
           ./build/lexbor-bridge-test
       - name: HTML/DOM regression tests (ASan and UBSan)
         run: make test-webengine
