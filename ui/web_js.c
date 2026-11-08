@@ -98,6 +98,8 @@ enum {
     PROP_LAST_CHILD,
     PROP_NEXT_SIBLING,
     PROP_PREVIOUS_SIBLING,
+    PROP_TEMPLATE_CONTENT,
+    PROP_SHADOW_ROOT,
     PROP_READY_STATE,
     PROP_BODY,
     PROP_DOCUMENT_ELEMENT,
@@ -336,7 +338,14 @@ static JSValue element_getter(JSContext *ctx, JSValueConst this_val, int magic) 
             return JS_NewString(ctx, title ? title : "");
         }
         case PROP_NODE_TYPE:
-            return JS_NewInt32(ctx, node->type == WEB_ELEMENT ? 1 : node->type == WEB_TEXT ? 3 : 8);
+            return JS_NewInt32(ctx, node->type == WEB_ELEMENT ? 1 :
+                                    node->type == WEB_TEXT ? 3 :
+                                    node->type == WEB_COMMENT ? 8 : 11);
+        case PROP_TEMPLATE_CONTENT:
+            return node->template_content ? make_element(ctx, node->template_content) : JS_UNDEFINED;
+        case PROP_SHADOW_ROOT:
+            return node->shadow_root && node->shadow_open ?
+                   make_element(ctx, node->shadow_root) : JS_NULL;
         case PROP_VALUE: {
             const char *value = web_attr(node, "value");
             return JS_NewString(ctx, value ? value : "");
@@ -592,6 +601,11 @@ static JSValue js_create_element(JSContext *ctx, JSValueConst this_val, int argc
     node->tag = web_strdup(name);
     return make_element(ctx, node);
 }
+static JSValue js_create_document_fragment(JSContext *ctx, JSValueConst this_val,
+                                             int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    return make_element(ctx, web_node_new(WEB_DOCUMENT_FRAGMENT));
+}
 static JSValue js_create_text_node(JSContext *ctx, JSValueConst this_val, int argc,
                                    JSValueConst *argv) {
     (void)this_val;
@@ -615,6 +629,25 @@ static JSValue js_append_child(JSContext *ctx, JSValueConst this_val, int argc,
         return JS_ThrowTypeError(ctx, "Invalid appendChild tree mutation");
     mark_dirty();
     return make_element(ctx, child);
+}
+static JSValue js_attach_shadow(JSContext *ctx, JSValueConst this_val, int argc,
+                                 JSValueConst *argv) {
+    WebNode *host = node_from_value(ctx, this_val);
+    if (!host || argc < 1)
+        return JS_ThrowTypeError(ctx, "attachShadow requires an options object");
+    JSValue mode_value = JS_GetPropertyStr(ctx, argv[0], "mode");
+    const char *mode = JS_ToCString(ctx, mode_value);
+    bool valid = mode && (!strcmp(mode, "open") || !strcmp(mode, "closed"));
+    bool open_mode = mode && !strcmp(mode, "open");
+    if (mode)
+        JS_FreeCString(ctx, mode);
+    JS_FreeValue(ctx, mode_value);
+    if (!valid)
+        return JS_ThrowTypeError(ctx, "ShadowRoot mode must be open or closed");
+    WebNode *root = web_attach_shadow(host, open_mode);
+    if (!root)
+        return JS_ThrowTypeError(ctx, "Cannot attach ShadowRoot to this element");
+    return make_element(ctx, root);
 }
 static JSValue js_clone_node(JSContext *ctx, JSValueConst this_val, int argc,
                              JSValueConst *argv) {
@@ -1023,6 +1056,7 @@ static const JSCFunctionListEntry element_functions[] = {
     JS_CFUNC_DEF("appendChild", 1, js_append_child),
     JS_CFUNC_DEF("insertBefore", 2, js_insert_before),
     JS_CFUNC_DEF("cloneNode", 1, js_clone_node),
+    JS_CFUNC_DEF("attachShadow", 1, js_attach_shadow),
     JS_CFUNC_DEF("removeChild", 1, js_remove_child),
     JS_CFUNC_DEF("setAttribute", 2, js_set_attribute),
     JS_CFUNC_DEF("getAttribute", 1, js_get_attribute),
@@ -1050,6 +1084,8 @@ static void install_element(JSContext *ctx, JSValue object) {
         JS_CGETSET_MAGIC_DEF("href", element_getter, element_setter, PROP_HREF),
         JS_CGETSET_MAGIC_DEF("title", element_getter, element_setter, PROP_TITLE),
         JS_CGETSET_MAGIC_DEF("nodeType", element_getter, 0, PROP_NODE_TYPE),
+        JS_CGETSET_MAGIC_DEF("content", element_getter, 0, PROP_TEMPLATE_CONTENT),
+        JS_CGETSET_MAGIC_DEF("shadowRoot", element_getter, 0, PROP_SHADOW_ROOT),
         JS_CGETSET_MAGIC_DEF("value", element_getter, element_setter, PROP_VALUE),
         JS_CGETSET_MAGIC_DEF("firstChild", element_getter, 0, PROP_FIRST_CHILD),
         JS_CGETSET_MAGIC_DEF("lastChild", element_getter, 0, PROP_LAST_CHILD),
@@ -1112,6 +1148,8 @@ static void build_document(JSContext *ctx, WebNode *root) {
                        JS_NewCFunction(ctx, js_create_element, "createElement", 1));
     JS_SetPropertyStr(ctx, document, "createTextNode",
                        JS_NewCFunction(ctx, js_create_text_node, "createTextNode", 1));
+    JS_SetPropertyStr(ctx, document, "createDocumentFragment",
+                       JS_NewCFunction(ctx, js_create_document_fragment, "createDocumentFragment", 0));
     JS_SetPropertyStr(ctx, document, "addEventListener",
                        JS_NewCFunction(ctx, js_add_event_listener, "addEventListener", 2));
     JS_SetPropertyStr(ctx, document, "removeEventListener",
