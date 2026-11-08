@@ -32,6 +32,11 @@ jobs:
         run: |
           cmake -S third_party/lexbor -B build/lexbor-host -DLEXBOR_BUILD_SHARED=OFF -DLEXBOR_BUILD_STATIC=ON -DLEXBOR_BUILD_TESTS=OFF -DLEXBOR_BUILD_EXAMPLES=OFF
           cmake --build build/lexbor-host --target lexbor_static --parallel 2
+      - name: Freestanding 32-bit Lexbor native archive and Luna adapter
+        run: |
+          make LUNA_LEXBOR=1 lexbor-native
+          make LUNA_LEXBOR=1 build/ui/web_dom.o build/ui/web_lexbor.o
+          file build/ui/web_dom.o build/ui/web_lexbor.o build/lexbor-native/liblexbor_static.a
       - name: Lexbor HTML5 parser adapter integration
         run: |
           LIB="$(find build/lexbor-host -name 'liblexbor_static.a' -print -quit)"
