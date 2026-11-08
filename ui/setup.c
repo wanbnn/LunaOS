@@ -388,9 +388,18 @@ void setup_draw(void) {
         } else if (wifi_state_rc == 0 && wifi_link.link == WIFI_ASSOCIATED) {
             text(160, 518, tr("Associado. Aguardando configuração IP...",
                               "Associated. Awaiting IP configuration..."), 13, INK);
-        } else if (wifi_connect_rc) {
-            text(160, 518, tr("Falha na conexão; verifique a senha e o driver.",
-                              "Connection failed; check password and driver."), 13, RED);
+        } else if (wifi_connect_rc || (wifi_state_rc == 0 && wifi_link.error)) {
+            int error = wifi_connect_rc ? wifi_connect_rc : wifi_link.error;
+            const char *reason = error == -110 ?
+                tr("Tempo esgotado: sem resposta do roteador.", "Timeout: no access point response.") :
+                error == -16 ?
+                tr("Fila de transmissão ocupada. Tente novamente.", "TX queue busy. Retry.") :
+                error == -22 ?
+                tr("Parâmetros WPA2/RSN inválidos.", "Invalid WPA2/RSN parameters.") :
+                error == -95 ?
+                tr("Segurança da rede não suportada.", "Unsupported network security.") :
+                tr("Conexão falhou. Consulte o wifidiag.", "Connection failed. Check wifidiag.");
+            text(160, 518, reason, 13, RED);
         } else if (wifi_scan_rc) {
             text(160, 518, tr("Driver Wi-Fi não operacional. Não existem redes simuladas.",
                               "Wi-Fi driver unavailable; no fabricated networks."), 13, RED);
