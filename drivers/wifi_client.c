@@ -41,7 +41,7 @@ static int auth(WifiClient *c) {
     uint8_t f[30];hdr(c,f,0xb0);
     put16(f+24,0);put16(f+26,1);put16(f+28,0);
     int rc=emit(c,f,sizeof(f),true);
-    if(!rc) c->attempts++;
+    if(!rc) { c->attempts++; c->tx_stalled_since=0; }
     if(!rc) {c->stage=WIFI_CLIENT_AUTH;c->deadline=c->radio.now(c->radio.context)+3000;}
     return rc;
 }
@@ -64,7 +64,7 @@ static int assoc(WifiClient *c) {
         copy(f+pos,selected,sizeof(selected));pos+=sizeof(selected);
     }
     int rc=emit(c,f,pos,true);
-    if(!rc) c->attempts++;
+    if(!rc) { c->attempts++; c->tx_stalled_since=0; }
     if(!rc) {c->stage=WIFI_CLIENT_ASSOC;c->deadline=c->radio.now(c->radio.context)+3000;}
     return rc;
 }
@@ -155,6 +155,7 @@ int wifi_client_start(WifiClient *c,const WifiClientRadio *radio,const uint8_t m
      * a new BSSID or silently downgrade an encrypted network to open. */
     c->radio=*radio;c->ap=*ap;copy(c->mac,mac,6);c->error=0;
     c->failed_stage=WIFI_CLIENT_IDLE;c->attempts=0;
+    c->tx_stalled_since=0;c->tx_backpressure=0;
     c->mgmt_rx=c->foreign_rx=c->auth_rx=c->assoc_rx=0;
     c->rsn_len=rsn_len;if(rsn_len) copy(c->rsn,rsn,rsn_len);
     if(n) copy(c->password,pass,n);
@@ -177,8 +178,17 @@ void wifi_client_poll(WifiClient *c) {
          * MAC TX completion is not equivalent to an AP response. */
         if(c->attempts<3) {
             int rc=c->stage==WIFI_CLIENT_AUTH ? auth(c) : assoc(c);
-            if(rc && rc!=BUSY) fail(c,rc);
-            else if(rc==BUSY) c->deadline=c->radio.now(c->radio.context)+250;
+            if(rc==BUSY) {
+                uint32_t now=c->radio.now(c->radio.context);
+                c->tx_backpressure++;
+                if(!c->tx_stalled_since) c->tx_stalled_since=now ? now : 1;
+                /* Do not wait forever on a DMA queue whose HW read pointer
+                 * never advances. This is a TX transport fault, not a bad PSK. */
+                if(c->tx_backpressure>=12 ||
+                   (uint32_t)(now-c->tx_stalled_since)>=3000)
+                    fail(c,BUSY);
+                else c->deadline=now+250;
+            } else if(rc) fail(c,rc);
         } else fail(c,TIMEOUT);
         return;
     }
