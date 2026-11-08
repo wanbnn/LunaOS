@@ -327,19 +327,19 @@ static void html_entities_full_regressions(void) {
     WebNode *named = web_find_by_id(root, "named");
     char value[256];
     web_node_text(named, value, sizeof(value));
-    check(strstr(value, "\\xe2\\x88\\xbe\\xcc\\xb3") != 0 &&
-          strstr(value, "\\xe2\\x88\\x89") != 0 &&
-          strstr(value, "\\xc3\\x81") != 0 &&
+    check(strstr(value, "\xe2\x88\xbe\xcc\xb3") != 0 &&
+          strstr(value, "\xe2\x88\x89") != 0 &&
+          strstr(value, "\xc3\x81") != 0 &&
           strstr(value, "fj") != 0,
           "named entities support two codepoints, legacy and uncommon references");
     WebNode *numeric = web_find_by_id(root, "numeric");
     web_node_text(numeric, value, sizeof(value));
-    check(strstr(value, "\\xe2\\x82\\xac") != 0 &&
-          strstr(value, "\\xf0\\x9f\\x98\\x80") != 0,
+    check(strstr(value, "\xe2\x82\xac") != 0 &&
+          strstr(value, "\xf0\x9f\x98\x80") != 0,
           "numeric references remap C1 characters and decode astral planes");
     WebNode *attr = web_find_by_id(root, "attr");
     check(attr && !strcmp(web_attr(attr, "data-ambiguous"), "&notit;") &&
-          !strcmp(web_attr(attr, "data-legacy"), "\\xc2\\xa9 text") &&
+          !strcmp(web_attr(attr, "data-legacy"), "\xc2\xa9 text") &&
           !strcmp(web_attr(attr, "data-escaped"), "a&b"),
           "attribute context refuses ambiguous semicolonless named references");
     web_free_tree(root);
