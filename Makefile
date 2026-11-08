@@ -11,8 +11,9 @@ SOURCES := $(wildcard kernel/*.c drivers/*.c lib/*.c ui/*.c apps/*.c net/*.c net
 MUSLINC := -nostdinc -isystem third_party/musl/include -isystem third_party/musl/arch/i386 -isystem third_party/musl/arch/generic -isystem third_party/musl/obj/include -isystem $(shell $(CC) -print-file-name=include)
 LIBGCC32 := $(firstword $(wildcard .tools/usr/lib/gcc/*/*/32/libgcc.a /usr/lib/gcc/*/*/32/libgcc.a))
 # Lexbor requires a vendored submodule and a separate 32-bit static build.
-# Use LUNA_LEXBOR=1 to opt in until the full image / hardware smoke suite passes.
-LUNA_LEXBOR ?= 0
+# Lexbor is the default HTML5 backend in LunaOS images; set LUNA_LEXBOR=0
+# explicitly for emergency legacy fallback builds.
+LUNA_LEXBOR ?= 1
 ifeq ($(LUNA_LEXBOR),1)
 CFLAGS += -DLUNA_USE_LEXBOR
 LEXBOR_NATIVE_LIB := build/lexbor-native/liblexbor_static.a
