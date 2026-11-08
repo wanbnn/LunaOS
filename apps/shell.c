@@ -22,7 +22,7 @@ static struct {
 static const char *commands[] = {
     "help",   "ls",    "cd",      "pwd",      "cat",     "echo",    "mkdir",    "touch", "write",
     "rm",     "rmdir", "cp",      "mv",       "head",    "tail",    "wc",       "grep",  "clear",
-    "uname",  "free",  "uptime",  "date",     "pci",     "net",     "ifconfig", "ping",  "wget",
+    "uname",  "free",  "uptime",  "date",     "pci",     "net",     "ifconfig", "dns", "ping",  "wget",
     "browse", "audio", "beep",    "sync",     "history", "source",  "set",      "env",   "true",
     "false",  "sleep", "reboot",  "poweroff", "about",   "ps",      "tasks",    "kill",  "ringtest",
     "js",     "dev",   "bench", "drvinfo", "whoami",   "setup",   "drvtest", "fwinfo",   "wifidiag", "wifi", "memtest", 0};
@@ -463,6 +463,18 @@ static int execute(int argc, char **a, const char *input, char *out) {
         emit(out, clock_auto() ? " (automatic)\n" : " (manual)\n");
     } else if (!strcmp(c, "pci"))
         pci_list(out, CAP);
+    else if (!strcmp(c, "dns")) {
+        if(argc==1) { net_status(out,CAP); return 0; }
+        if(argc!=2 || !net_set_dns(a[1])) {
+            emit(out,"usage: dns auto|IPV4 (e.g. dns 1.1.1.1)\n");
+            return 2;
+        }
+        strcpy(prefs.dns_server,!strcmp(a[1],"auto") ? "" : a[1]);
+        settings_network_refresh();
+        emit(out,"DNS applied. ");
+        if(!settings_save()) { emit(out,"Save failed; active until restart.\n"); return 1; }
+        emit(out,"Saved to disk.\n");
+    }
     else if (!strcmp(c, "net") || !strcmp(c, "ifconfig"))
         net_status(out, CAP);
     else if (!strcmp(c, "ping")) {

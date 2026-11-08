@@ -18,6 +18,11 @@ static unsigned pending_bytes;
 static bool peer_known;
 static uint8_t local_ip[4] = {10, 0, 2, 15}, gateway[4] = {10, 0, 2, 2},
                      dns_ip[4] = {10, 0, 2, 3};
+static uint8_t manual_dns[4];
+static bool dns_manual;
+static void apply_dns(const uint8_t automatic[4]) {
+    memcpy(dns_ip,dns_manual ? manual_dns : automatic,4);
+}
 static uint8_t rx[65536 + 2048] __attribute__((aligned(256))),
     tx[4][1536] __attribute__((aligned(256)));
 static int txslot;
@@ -357,7 +362,7 @@ static void external_input(void *ctx, uint8_t *p, unsigned n) {
     if (!net_ready || memcmp(local_ip,cfg->address,4) || memcmp(gateway,cfg->gateway,4))
         gateway_known=peer_known=false;
     memcpy(local_ip,cfg->address,4); memcpy(netmask,cfg->mask,4);
-    memcpy(gateway,cfg->gateway,4); memcpy(dns_ip,cfg->dns,4);
+    memcpy(gateway,cfg->gateway,4); apply_dns(cfg->dns);
     net_ready=true;
     receive(p,n); rxcount++;
 }
@@ -391,7 +396,7 @@ void net_poll(void) {
             if (!net_ready || memcmp(local_ip,cfg->address,4) || memcmp(gateway,cfg->gateway,4))
                 gateway_known=peer_known=false;
             memcpy(local_ip,cfg->address,4); memcpy(netmask,cfg->mask,4);
-            memcpy(gateway,cfg->gateway,4); memcpy(dns_ip,cfg->dns,4);
+            memcpy(gateway,cfg->gateway,4); apply_dns(cfg->dns);
             net_ready=true;
         } else { net_ready=false; gateway_known=peer_known=false; pending_bytes=0; tcp.state=0; }
         time_network_poll();
@@ -470,11 +475,18 @@ void net_status(char *out, size_t cap) {
             }
         }
     } else append(out,
-           net_ready ? "Ethernet: RTL8139 ready\nIPv4: 10.0.2.15/24 (static)\nGateway: 10.0.2.2 | "
-                       "DNS: 10.0.2.3\n"
+           net_ready ? "Ethernet: RTL8139 ready\nIPv4: 10.0.2.15/24 (static)\nGateway: 10.0.2.2\n"
                      : "Ethernet: no supported RTL8139 found\n",
            cap);
     if (net_ready) {
+        append(out,dns_manual ? "DNS mode: manual\n" : "DNS mode: automatic (DHCP)\n",cap);
+        if(!external_nic.started) {
+            append(out,"DNS: ",cap);
+            for(unsigned i=0;i<4;i++) {
+                char value[16]; number(value,dns_ip[i]); append(out,value,cap);
+                append(out,i==3 ? "\n" : ".",cap);
+            }
+        }
         append(out, gateway_known ? "Gateway ARP: resolved\n" : "Gateway ARP: unresolved\n", cap);
         const uint32_t values[]={arp_requests,arp_received,dns_requests,dns_answers,tcp_syns};
         const char *names[]={"ARP requests: ","ARP received: ","DNS requests: ","DNS responses: ","TCP SYN attempts: "};
@@ -517,6 +529,19 @@ static bool parse_ip(const char *s, uint8_t *out) {
         } else if (*s)
             return false;
     }
+    return true;
+}
+bool net_set_dns(const char *server) {
+    if(!server) return false;
+    bool automatic=!strcmp(server,"auto");
+    uint8_t address[4];
+    if(!automatic && (!parse_ip(server,address) || !address[0] ||
+       address[0]==127 || address[0]>=224 || equal(address,(const uint8_t[]){255,255,255,255},4)))
+        return false;
+    dns_manual=!automatic;
+    if(dns_manual) memcpy(manual_dns,address,4);
+    const uint8_t fallback[4]={10,0,2,3};
+    apply_dns(external_nic.started && external_nic.dhcp.configured ? external_nic.dhcp.config.dns : fallback);
     return true;
 }
 static void time_udp(const uint8_t dest[4], uint16_t local, uint16_t remote, const uint8_t *body,

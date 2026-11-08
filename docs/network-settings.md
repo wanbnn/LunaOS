@@ -1,5 +1,16 @@
 # Network settings and power status
 
+Settings → Network includes a DNS row. Click it to cycle through Cloudflare
+(`1.1.1.1`, the default), Google (`8.8.8.8`), and automatic DNS from DHCP.
+Changes apply immediately; use **Save settings** to persist them.
+
+LunaSH also accepts `dns 1.1.1.1`, `dns 8.8.8.8`, or another unicast IPv4
+address. `dns auto` restores DHCP DNS. The command applies and saves the
+preference to disk, reporting save failures; `dns` and `net` show the effective
+server when IPv4 is ready. The choice applies to browser, updater, ping name
+resolution, and network time, survives DHCP refreshes, and is stored as
+`dns_server` in `/etc/luna-settings` (empty for automatic mode).
+
 Settings → Network uses the native `wifi_*` API for scanning and connection.
 Three results are displayed per page; the arrow buttons show the remaining
 results. Open and WPA2-PSK networks can be selected; WPA2 passwords are masked,

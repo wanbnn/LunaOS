@@ -132,7 +132,8 @@ void settings_network_refresh(void) {
 static void network_draw(int a, int b, int width) {
     WifiState state;
     bool ready = !wifi_state(&state);
-    row(a, b + 83, width, "Ethernet", net_ready ? system_text("Connected", "Conectado") : system_text("Unavailable", "Indisponível"));
+    row(a, b + 83, width, system_text("DNS (click to change)", "DNS (clique para trocar)"),
+        *prefs.dns_server ? prefs.dns_server : system_text("Automatic (DHCP)", "Automático (DHCP)"));
     row(a, b + 146, width, *wifi_connection_ssid() ? wifi_connection_ssid() : "Wi-Fi", network_state());
     button(a, b + 215, 150, system_text("Scan networks", "Buscar redes"));
     if (network_count > 3) {
@@ -361,7 +362,14 @@ void settings_click(int x, int y, int width, int height) {
     if(page==7){time_settings_click(x-198,y);return;}
     int a = x - 198, w = width - 198;
     if (page == 5 && a >= 0 && a < w) {
-        if (y >= 215 && y < 247) {
+        if (y >= 83 && y < 138) {
+            const char *next=!strcmp(prefs.dns_server,"1.1.1.1") ? "8.8.8.8" :
+                             !strcmp(prefs.dns_server,"8.8.8.8") ? "" : "1.1.1.1";
+            strcpy(prefs.dns_server,next);
+            settings_changed();
+            network_message=system_text("DNS applied. Save settings to keep it.",
+                                        "DNS aplicado. Salve as configurações para manter.");
+        } else if (y >= 215 && y < 247) {
             if (a < 150) network_scan();
             else if (a >= w - 80 && network_first + 3 < network_count) network_first += 3;
             else if (a >= w - 170 && a < w - 90 && network_first >= 3) network_first -= 3;

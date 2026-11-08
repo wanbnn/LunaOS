@@ -5,7 +5,8 @@ Preferences prefs = {.mouse_speed = 100,
                      .repeat_rate = 30,
                      .brightness = 100,
                      .volume = 70,
-                     .frame_hz = 60};
+                     .frame_hz = 60,
+                     .dns_server = "1.1.1.1"};
 static void assign(const char *k, int v) {
 #define OPT(name, lo, hi)                                                                          \
     if (!strcmp(k, #name)) {                                                                       \
@@ -22,6 +23,7 @@ static void assign(const char *k, int v) {
 #undef OPT
 }
 void settings_init(void) {
+    net_set_dns(prefs.dns_server);
     File *f = fs_find("/etc/luna-settings");
     if (!f)
         return;
@@ -44,7 +46,10 @@ void settings_init(void) {
             p++;
         char stop = *p;
         *p = 0;
-        if (!strcmp(k, "wallpaper_path")) {
+        if (!strcmp(k, "dns_server")) {
+            if (net_set_dns(*v ? v : "auto"))
+                strcpy(prefs.dns_server,v);
+        } else if (!strcmp(k, "wallpaper_path")) {
             if (strlen(v) < PATH_CAP)
                 strcpy(prefs.wallpaper_path, v);
         } else
@@ -68,12 +73,16 @@ bool settings_write(void) {
         STORE(repeat_delay) STORE(repeat_rate) STORE(brightness) STORE(night_light) STORE(volume)
             STORE(balance) STORE(muted) STORE(wallpaper) STORE(dark) STORE(accent)
 #undef STORE
+    append(out, "dns_server=", sizeof(out));
+    append(out, prefs.dns_server, sizeof(out));
+    append(out, "\n", sizeof(out));
                 append(out, "wallpaper_path=", sizeof(out));
     append(out, prefs.wallpaper_path, sizeof(out));
     append(out, "\n", sizeof(out));
     return fs_write("/etc/luna-settings", out, false) == 0;
 }
 void settings_changed(void) {
+    net_set_dns(*prefs.dns_server ? prefs.dns_server : "auto");
     static int dark = -1, accent = -1, wallpaper = -1;
     input_apply_settings();
     audio_apply_settings();

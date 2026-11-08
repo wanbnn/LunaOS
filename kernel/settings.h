@@ -7,6 +7,7 @@ typedef struct {
     int wallpaper, dark, accent, frame_hz;
     char wallpaper_path[PATH_CAP];
     int language, developer, output_mode;
+    char dns_server[16]; /* Empty means automatic DHCP DNS. */
 } Preferences;
 extern Preferences prefs;
 void settings_init(void);

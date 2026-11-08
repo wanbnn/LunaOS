@@ -4,9 +4,12 @@
 #include <stdio.h>
 #include <string.h>
 #include "../drivers/wifi_station.h"
+#include "../kernel/net_time.h"
 #include "wpa2_vectors.h"
 extern bool net_ready;
 void net_poll(void);
+bool net_set_dns(const char *);
+bool random_bytes(void *p,size_t n) { memset(p,42,n);return true; }
 volatile uint32_t ticks,frame_clock;
 static unsigned sends, installs, clears;
 static uint8_t sent[1514], rx[16][1514];
@@ -111,6 +114,21 @@ int main(void) {
     assert(!memcmp(sent,peer,6));
     assert(sent[34]==0 && !sum(sent+14,20) && !sum(sent+34,8));
     assert(!memcmp(sent+26,"\xc0\xa8\x32\x09",4) && last_encrypted);
+    /* Manual DNS survives DHCP configuration refreshes in net_poll(). */
+    assert(!net_set_dns("256.1.1.1") && !net_set_dns("0.0.0.0"));
+    assert(!net_set_dns("127.0.0.1") && !net_set_dns("224.0.0.1"));
+    assert(!net_set_dns("1.1.1.1junk"));
+    assert(net_set_dns("8.8.8.8"));
+    net_poll();
+    uint8_t request[48]={0};
+    assert(!net_time_begin("time.example",123,request));
+    assert(sent[23]==17 && sent[36]==0 && sent[37]==53);
+    assert(!memcmp(sent+30,"\x08\x08\x08\x08",4));
+    net_time_cancel();
+    assert(net_set_dns("auto"));net_poll();
+    assert(!net_time_begin("time.example",123,request));
+    assert(!memcmp(sent+30,"\x01\x01\x01\x01",4));
+    net_time_cancel();
     eapol(m3,sizeof(m3));wifi_station_poll(&s,10);
     assert(installs==1 && net_ready && s.link==WIFI_ONLINE); /* no key/DHCP reset */
     ready=false;wifi_station_poll(&s,11);assert(!net_ready && s.link==WIFI_DOWN);
