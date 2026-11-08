@@ -10,6 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Verify filesystem, snapshots and migration
         run: make test-lunafs2
       - name: Build affected kernel sources for freestanding i386
@@ -24,6 +26,8 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Install LunaOS build toolchain
         run: |
           sudo apt-get update
