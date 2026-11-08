@@ -7,7 +7,7 @@ export PYTHONPATH := $(CURDIR)/.tools/python:$(PYTHONPATH)
 CFLAGS := -m32 -std=gnu11 -O2 -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -fno-asynchronous-unwind-tables -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Ikernel -Ibuild
 UACPI_FLAGS := -Ithird_party/uacpi/include -DUACPI_REDUCED_HARDWARE -DUACPI_DEFAULT_LOG_LEVEL=UACPI_LOG_WARN -DUACPI_DEFAULT_LOOP_TIMEOUT_SECONDS=3 -DUACPI_DEFAULT_MAX_CALL_STACK_DEPTH=64
 UACPI_OBJECTS := $(patsubst third_party/uacpi/source/%.c,build/uacpi/%.o,$(wildcard third_party/uacpi/source/*.c))
-SOURCES := $(wildcard kernel/*.c drivers/*.c lib/*.c ui/*.c apps/*.c net/*.c net/wireless/*.c)
+SOURCES := $(filter-out lib/cxx_glibc_compat.c,$(wildcard kernel/*.c drivers/*.c lib/*.c ui/*.c apps/*.c net/*.c net/wireless/*.c))
 MUSLINC := -nostdinc -isystem third_party/musl/include -isystem third_party/musl/arch/i386 -isystem third_party/musl/arch/generic -isystem third_party/musl/obj/include -isystem $(shell $(CC) -print-file-name=include)
 LIBGCC32 := $(firstword $(wildcard .tools/usr/lib/gcc/*/*/32/libgcc.a /usr/lib/gcc/*/*/32/libgcc.a))
 # Lexbor requires a vendored submodule and a separate 32-bit static build.
