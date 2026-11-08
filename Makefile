@@ -10,7 +10,18 @@ UACPI_OBJECTS := $(patsubst third_party/uacpi/source/%.c,build/uacpi/%.o,$(wildc
 SOURCES := $(wildcard kernel/*.c drivers/*.c lib/*.c ui/*.c apps/*.c net/*.c net/wireless/*.c)
 MUSLINC := -nostdinc -isystem third_party/musl/include -isystem third_party/musl/arch/i386 -isystem third_party/musl/arch/generic -isystem third_party/musl/obj/include -isystem $(shell $(CC) -print-file-name=include)
 LIBGCC32 := $(firstword $(wildcard .tools/usr/lib/gcc/*/*/32/libgcc.a /usr/lib/gcc/*/*/32/libgcc.a))
+# Lexbor requires a vendored submodule and a separate 32-bit static build.
+# Lexbor is the default HTML5 backend in LunaOS images; set LUNA_LEXBOR=0
+# explicitly for emergency legacy fallback builds.
+LUNA_LEXBOR ?= 1
+ifeq ($(LUNA_LEXBOR),1)
+CFLAGS += -DLUNA_USE_LEXBOR
+LEXBOR_NATIVE_LIB := build/lexbor-native/liblexbor_static.a
+endif
 NATIVEFLAGS := -fexcess-precision=standard -m32 -Os -ffreestanding -fno-builtin -fno-pie -fno-stack-protector -ffunction-sections -fdata-sections -mno-sse -mfpmath=387 $(MUSLINC) -Ikernel -Ibuild -Ithird_party/quickjs
+ifeq ($(LUNA_LEXBOR),1)
+NATIVEFLAGS += -DLUNA_USE_LEXBOR -Ithird_party/lexbor/source
+endif
 BEAR_SOURCES := $(shell find third_party/bearssl/src -name "*.c" | sort)
 BEAR_OBJECTS := $(patsubst third_party/bearssl/%.c,build/bearssl/%.o,$(BEAR_SOURCES))
 JS_OBJECTS := $(addprefix build/quickjs/,$(addsuffix .o,quickjs libregexp libunicode cutils dtoa))
@@ -21,7 +32,7 @@ $(patsubst %.c,build/%.o,$(SOURCES)): $(wildcard kernel/*.h ui/*.h drivers/*.h i
 all: dist/LunaOS.img dist/LunaOS.iso
 build/font.h: tools/fontgen.py assets/fonts/InterTight.ttf
 	$(PYTHON) tools/fontgen.py
-build/notices.h: tools/notices.py assets/fonts/OFL.txt assets/icons/lucide/LICENSE $(wildcard assets/licenses/*) third_party/quickjs/LICENSE third_party/musl/COPYRIGHT third_party/bearssl/LICENSE.txt third_party/stb/LICENSE third_party/uacpi/LICENSE
+build/notices.h: tools/notices.py assets/fonts/OFL.txt assets/icons/lucide/LICENSE $(wildcard assets/licenses/*) third_party/quickjs/LICENSE third_party/musl/COPYRIGHT third_party/bearssl/LICENSE.txt third_party/stb/LICENSE third_party/uacpi/LICENSE $(wildcard third_party/lexbor/LICENSE)
 	$(PYTHON) tools/notices.py
 build/uacpi/%.o: third_party/uacpi/source/%.c $(shell find third_party/uacpi/include -name '*.h')
 	@mkdir -p $(dir $@)
@@ -48,6 +59,19 @@ third_party/musl/config.mak: third_party/musl/configure
 third_party/musl/lib/libc.a: third_party/musl/config.mak
 	$(MAKE) -C third_party/musl -j4 AR=ar RANLIB=ranlib lib/libc.a
 $(JS_OBJECTS) build/lib/runtime.o build/apps/javascript.o build/ui/web_js.o build/drivers/tls.o $(BEAR_OBJECTS): third_party/musl/lib/libc.a
+ifeq ($(LUNA_LEXBOR),1)
+build/ui/web_lexbor.o: third_party/musl/lib/libc.a
+build/ui/web_lexbor.o: CFLAGS += $(MUSLINC) -Ithird_party/lexbor/source -Wno-unused-function
+build/ui/web_dom.o: CFLAGS += -Wno-unused-function
+# Build freestanding 32-bit Lexbor objects; the static archive does not
+# require running Lexbor utilities in the LunaOS target environment.
+$(LEXBOR_NATIVE_LIB): third_party/musl/lib/libc.a
+	@test -f third_party/lexbor/CMakeLists.txt || (echo "Run git submodule update --init --recursive" && exit 1)
+	cmake -S third_party/lexbor -B build/lexbor-native -DLEXBOR_BUILD_SHARED=OFF -DLEXBOR_BUILD_STATIC=ON -DLEXBOR_BUILD_EXAMPLES=OFF -DLEXBOR_BUILD_TESTS=OFF -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY -DCMAKE_C_FLAGS="$(subst -Ibuild,-I$(CURDIR)/build,$(subst -Ikernel,-I$(CURDIR)/kernel,$(subst third_party/,$(CURDIR)/third_party/,$(NATIVEFLAGS)))) -fno-pic -ffunction-sections -fdata-sections"
+	cmake --build build/lexbor-native --target lexbor_static --parallel 2
+.PHONY: lexbor-native
+lexbor-native: $(LEXBOR_NATIVE_LIB)
+endif
 build/kernel/account.o: kernel/account.c third_party/musl/lib/libc.a
 	@mkdir -p build/kernel
 	$(CC) $(CFLAGS) $(MUSLINC) -Ithird_party/bearssl/inc -c $< -o $@
@@ -80,8 +104,8 @@ build/apps/user.o: apps/user.S
 build/kernel/entry.o: kernel/entry.S
 	@mkdir -p $(dir $@)
 	$(CC) -m32 -c $< -o $@
-build/kernel.elf: $(OBJECTS) build/libbearssl.a kernel/link.ld
-	$(LD) -m elf_i386 -T kernel/link.ld --gc-sections -Map build/kernel.map -o $@ $(OBJECTS) build/libbearssl.a third_party/musl/lib/libc.a $(LIBGCC32)
+build/kernel.elf: $(OBJECTS) build/libbearssl.a $(LEXBOR_NATIVE_LIB) kernel/link.ld
+	$(LD) -m elf_i386 -T kernel/link.ld --gc-sections -Map build/kernel.map -o $@ $(OBJECTS) build/libbearssl.a $(LEXBOR_NATIVE_LIB) third_party/musl/lib/libc.a $(LIBGCC32)
 build/kernel.bin: build/kernel.elf
 	objcopy -O binary $< $@
 

@@ -2,7 +2,12 @@ name: Luna Browser HTML and DOM
 on:
   pull_request:
     paths:
+      - 'Makefile'
       - 'ui/web_dom.c'
+      - 'ui/web_lexbor.c'
+      - 'tests/lexbor_bridge_test.c'
+      - '.gitmodules'
+      - 'third_party/lexbor'
       - 'ui/web_js.c'
       - 'ui/webengine.h'
       - 'tests/webengine_test.c'
@@ -11,6 +16,7 @@ on:
     branches:
       - main
     paths:
+      - 'Makefile'
       - 'ui/web_dom.c'
       - 'ui/web_js.c'
       - 'ui/webengine.h'
@@ -22,5 +28,32 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Build pinned Lexbor v3.0.0 (host static library)
+        run: |
+          cmake -S third_party/lexbor -B build/lexbor-host -DLEXBOR_BUILD_SHARED=OFF -DLEXBOR_BUILD_STATIC=ON -DLEXBOR_BUILD_TESTS=OFF -DLEXBOR_BUILD_EXAMPLES=OFF
+          cmake --build build/lexbor-host --target lexbor_static --parallel 2
+      - name: Install 32-bit GCC libc development headers for kernel link
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gcc-multilib libc6-dev-i386
+      - name: Install LunaOS host build dependencies
+        run: python3 -m pip install --target .tools/python -r requirements-dev.txt
+      - name: Freestanding 32-bit Lexbor native archive and Luna adapter
+        run: |
+          make LUNA_LEXBOR=1 lexbor-native
+          make LUNA_LEXBOR=1 build/ui/web_dom.o build/ui/web_lexbor.o
+          make LUNA_LEXBOR=1 build/kernel.elf
+          make LUNA_LEXBOR=1 all
+          file build/ui/web_dom.o build/ui/web_lexbor.o build/lexbor-native/liblexbor_static.a
+      - name: Lexbor HTML5 parser adapter integration
+        run: |
+          LIB="$(find build/lexbor-host -name 'liblexbor_static.a' -print -quit)"
+          test -n "$LIB"
+          gcc -std=gnu11 -g -Wall -Wextra -Werror -Wno-unused-function -fsanitize=address,undefined -DLUNA_USE_LEXBOR -Ikernel -Ibuild -Ithird_party/lexbor/source tests/lexbor_bridge_test.c ui/web_dom.c ui/web_lexbor.c "$LIB" -lm -o build/lexbor-bridge-test
+          ./build/lexbor-bridge-test
       - name: HTML/DOM regression tests (ASan and UBSan)
         run: make test-webengine
+      - name: QuickJS DOM bindings compile syntax check
+        run: gcc -std=gnu11 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-missing-braces -Wno-missing-field-initializers -fsyntax-only -Ithird_party/quickjs -Ikernel -Ibuild ui/web_js.c

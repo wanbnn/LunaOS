@@ -112,6 +112,73 @@ bool web_node_insert_before(WebNode *parent, WebNode *child, WebNode *reference)
     }
     return true;
 }
+/* DOM Core helpers. Shadow roots are separate trees; normal parent links
+ * intentionally do not traverse to their host. */
+WebNode *web_node_root(WebNode *node) {
+    if (!node)
+        return 0;
+    while (node->parent)
+        node = node->parent;
+    return node;
+}
+WebNode *web_node_root_composed(WebNode *node) {
+    WebNode *root = web_node_root(node);
+    /* The shadow tree is separate, but composed traversal proceeds from
+     * ShadowRoot to its host, potentially through nested shadow trees. */
+    while (root && root->type == WEB_SHADOW_ROOT && root->host)
+        root = web_node_root(root->host);
+    return root;
+}
+bool web_node_is_connected(const WebNode *node) {
+    WebNode *root = web_node_root_composed((WebNode *)node);
+    return root && root->tag && !strcmp(root->tag, "#document");
+}
+bool web_node_replace_child(WebNode *parent, WebNode *replacement, WebNode *old_child) {
+    if (!parent || !replacement || !old_child || old_child->parent != parent)
+        return false;
+    if (replacement == old_child)
+        return true;
+    if (!web_node_insert_before(parent, replacement, old_child))
+        return false;
+    web_node_detach(old_child);
+    return true;
+}
+/* Merge adjacent text nodes and drop empty text nodes without losing text. */
+void web_node_normalize(WebNode *parent) {
+    if (!parent)
+        return;
+    WebNode *node = parent->first_child;
+    while (node) {
+        if (node->type == WEB_TEXT) {
+            while (node->next && node->next->type == WEB_TEXT) {
+                WebNode *other = node->next;
+                size_t a = node->text ? strlen(node->text) : 0;
+                size_t b = other->text ? strlen(other->text) : 0;
+                char *combined = web_malloc(a + b + 1);
+                if (a)
+                    memcpy(combined, node->text, a);
+                if (b)
+                    memcpy(combined + a, other->text, b);
+                combined[a + b] = 0;
+                web_free(node->text);
+                node->text = combined;
+                web_node_detach(other);
+                web_free_tree(other);
+            }
+            if (!node->text || !node->text[0]) {
+                WebNode *next = node->next;
+                web_node_detach(node);
+                web_free_tree(node);
+                node = next;
+                continue;
+            }
+        } else {
+            web_node_normalize(node);
+        }
+        node = node->next;
+    }
+}
+
 void web_node_append(WebNode *parent, WebNode *child) {
     (void)web_node_insert_before(parent, child, 0);
 }
@@ -267,32 +334,35 @@ static bool is_block_tag(const char *tag) {
     return false;
 }
 
-/* Named entities that appear in ordinary documents. */
+/* Full WHATWG-compatible named character reference data, including the
+ * legacy forms without a semicolon and two-codepoint references. */
 typedef struct {
     const char *name;
-    unsigned short code;
-} WebEntity;
-static const WebEntity entities[] = {
-    {"amp", 38},     {"lt", 60},      {"gt", 62},       {"quot", 34},     {"apos", 39},
-    {"nbsp", 160},   {"copy", 169},   {"reg", 174},     {"trade", 8482},   {"deg", 176},
-    {"plusmn", 177}, {"micro", 181},  {"para", 182},    {"middot", 183},   {"sect", 167},
-    {"laquo", 171},  {"raquo", 187},  {"times", 215},   {"divide", 247},   {"frac12", 189},
-    {"frac14", 188}, {"frac34", 190}, {"sup2", 178},    {"sup3", 179},     {"euro", 8364},
-    {"pound", 163},  {"yen", 165},    {"cent", 162},    {"bull", 8226},    {"hellip", 8230},
-    {"ndash", 8211}, {"mdash", 8212}, {"lsquo", 8216},  {"rsquo", 8217},   {"ldquo", 8220},
-    {"rdquo", 8221}, {"bull", 8226}, {"dagger", 8224}, {"permil", 8240},  {"larr", 8592},
-    {"rarr", 8594},  {"uarr", 8593},  {"darr", 8595},   {"harr", 8596},    {"check", 10003},
-    {"cross", 10007}, {"star", 9734}, {"hearts", 9829}, {"alpha", 945},    {"beta", 946},
-    {"gamma", 947},  {"delta", 948},  {"epsilon", 949}, {"theta", 952},    {"lambda", 955},
-    {"mu", 956},     {"pi", 960},     {"sigma", 963},   {"omega", 969},    {"Omega", 937},
-    {"infin", 8734}, {"ne", 8800},   {"le", 8804},     {"ge", 8805},      {"asymp", 8776},
-    {"prime", 8242}, {"Prime", 8243}, {"zwj", 8205},   {"shy", 173},      {"ensp", 8194},
-    {"emsp", 8195},  {"thinsp", 8201}, {0, 0}};
-static int entity_code(const char *name, size_t len) {
-    for (int i = 0; entities[i].name; i++)
-        if (strlen(entities[i].name) == len && !strncmp(entities[i].name, name, len))
-            return entities[i].code;
-    return -1;
+    uint32_t first, second;
+} WebNamedEntity;
+#include "web_entities.inc"
+static const WebNamedEntity *find_named_entity(const char *name, size_t n) {
+    if (!n || n > 32)
+        return 0;
+    char key[33];
+    memcpy(key, name, n);
+    key[n] = 0;
+    int lo = 0, hi = (int)(sizeof(web_named_entities) / sizeof(web_named_entities[0])) - 1;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        int cmp = strcmp(key, web_named_entities[mid].name);
+        if (!cmp)
+            return &web_named_entities[mid];
+        if (cmp < 0)
+            hi = mid - 1;
+        else
+            lo = mid + 1;
+    }
+    return 0;
+}
+static bool entity_alnum(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9');
 }
 static void utf8_encode(char *out, unsigned code) {
     if (code < 0x80) {
@@ -319,8 +389,13 @@ static bool is_hex(char c) {
     return (c >= '0' && c <= '9') || ((c | 32) >= 'a' && (c | 32) <= 'f');
 }
 /* Decodes entities in place into a fresh buffer. */
-static char *decode_entities(const char *src, size_t len, size_t *out_len) {
-    char *out = web_malloc(len + 1);
+static char *decode_entities(const char *src, size_t len, size_t *out_len,
+                             bool attribute_context) {
+    /* Some references expand into two UTF-8 codepoints and can be longer
+     * than their encoded spelling (e.g. &acE;). */
+    if (len > ((size_t)-1 - 1) / 2)
+        kernel_fault();
+    char *out = web_malloc(len * 2 + 1);
     size_t o = 0;
     for (size_t i = 0; i < len;) {
         if (src[i] != '&') {
@@ -357,6 +432,17 @@ static char *decode_entities(const char *src, size_t len, size_t *out_len) {
             if (overflow || !code || code > 0x10ffffu ||
                 (code >= 0xd800u && code <= 0xdfffu))
                 code = 0xfffdu;
+            /* Numeric references in the C1 range are remapped by HTML. */
+            if (code >= 0x80u && code <= 0x9fu) {
+                static const uint16_t c1[] = {
+                    8364,0,8218,402,8222,8230,8224,8225,
+                    710,8240,352,8249,338,0,381,0,
+                    0,8216,8217,8220,8221,8226,8211,8212,
+                    732,8482,353,8250,339,0,382,376
+                };
+                if (c1[code - 0x80u])
+                    code = c1[code - 0x80u];
+            }
             char tmp[5];
             utf8_encode(tmp, code);
             size_t n = strlen(tmp);
@@ -365,18 +451,38 @@ static char *decode_entities(const char *src, size_t len, size_t *out_len) {
             i = j;
             continue;
         }
-        size_t end = j;
-        while (end < len && src[end] != ';' && end - j < 12)
-            end++;
-        if (end < len && src[end] == ';' && end > j) {
-            int code = entity_code(src + j, end - j);
-            if (code > 0) {
+        const WebNamedEntity *matched = 0;
+        size_t matched_len = 0, limit = len - j;
+        if (limit > 32)
+            limit = 32;
+        for (size_t n = 1; n <= limit; n++) {
+            char c = src[j + n - 1];
+            if (!entity_alnum(c) && c != ';')
+                break;
+            const WebNamedEntity *candidate = find_named_entity(src + j, n);
+            if (candidate) {
+                matched = candidate;
+                matched_len = n;
+            }
+            if (c == ';')
+                break;
+        }
+        if (matched) {
+            bool semicolon = matched->name[matched_len - 1] == ';';
+            char after = j + matched_len < len ? src[j + matched_len] : 0;
+            if (!attribute_context || semicolon || (!entity_alnum(after) && after != '=')) {
                 char tmp[5];
-                utf8_encode(tmp, (unsigned)code);
+                utf8_encode(tmp, matched->first);
                 size_t n = strlen(tmp);
                 memcpy(out + o, tmp, n);
                 o += n;
-                i = end + 1;
+                if (matched->second) {
+                    utf8_encode(tmp, matched->second);
+                    n = strlen(tmp);
+                    memcpy(out + o, tmp, n);
+                    o += n;
+                }
+                i = j + matched_len;
                 continue;
             }
         }
@@ -421,7 +527,7 @@ static void add_text(WebParser *ps, const char *text, size_t len) {
     size_t value_len;
     /* Whitespace belongs to the DOM. CSS white-space decides how it is
      * painted, including text nodes between inline elements. */
-    char *value = decode_entities(text, len, &value_len);
+    char *value = decode_entities(text, len, &value_len, false);
     WebNode *node = web_node_new(WEB_TEXT);
     node->text = value;
     web_node_append(parent, node);
@@ -535,14 +641,14 @@ static void parse_attributes(WebParser *ps, WebNode *node) {
                 if (ps->p < ps->end)
                     ps->p++;
                 size_t decoded_len;
-                value = decode_entities(value_start, raw_len, &decoded_len);
+                value = decode_entities(value_start, raw_len, &decoded_len, true);
             } else {
                 const char *value_start = ps->p;
                 while (ps->p < ps->end && !is_space(*ps->p) && *ps->p != '>')
                     ps->p++;
                 size_t raw_len = (size_t)(ps->p - value_start);
                 size_t decoded_len;
-                value = decode_entities(value_start, raw_len, &decoded_len);
+                value = decode_entities(value_start, raw_len, &decoded_len, true);
             }
         } else {
             value = web_strdup("");
@@ -640,7 +746,7 @@ static void parse_start_tag(WebParser *ps) {
             size_t length = (size_t)(content_end - ps->p);
             if (!strcmp(node->tag, "textarea") || !strcmp(node->tag, "title")) {
                 size_t decoded_len;
-                text->text = decode_entities(ps->p, length, &decoded_len);
+                text->text = decode_entities(ps->p, length, &decoded_len, false);
             } else {
                 text->text = web_strndup(ps->p, length);
             }
@@ -670,7 +776,15 @@ static void parse_end_tag(WebParser *ps) {
     web_free(tag);
 }
 
+#ifdef LUNA_USE_LEXBOR
+/* The Lexbor tokenizer and tree builder are authoritative when enabled. */
+bool web_parse_lexbor(const char *html, size_t len, WebNode **root,
+                      char *error, size_t ecap);
+#endif
 bool web_parse(const char *html, size_t len, WebNode **root, char *error, size_t ecap) {
+#ifdef LUNA_USE_LEXBOR
+    return web_parse_lexbor(html, len, root, error, ecap);
+#else
     WebParser ps;
     memset(&ps, 0, sizeof(ps));
     ps.p = html;
@@ -723,4 +837,5 @@ bool web_parse(const char *html, size_t len, WebNode **root, char *error, size_t
     if (ps.failed && error)
         append(error, "Document structure was truncated.", ecap);
     return !ps.failed;
+#endif
 }

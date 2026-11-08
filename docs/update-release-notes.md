@@ -11,3 +11,8 @@ The updater preserves LunaFS user-data slots and installed disk identity.
 It requires a compatible installed writable disk, working internet and at
 least 256 MiB RAM. Keep the device powered: persistent power-loss rollback
 is not yet implemented.
+
+
+## HTML5 Browser — Lexbor backend
+
+This build enables the pinned Lexbor v3.0.0 HTML tokenizer and tree builder by default in the Luna Browser, including HTML5 recovery, templates and SVG/MathML parsing. The Lexbor tree is currently adapted into LunaOS's legacy DOM used for layout and QuickJS. DOM Events, Shadow DOM slotting and browser security isolation remain incomplete. This is a test build; preserve backups and use a writable installed disk for Luna Update Engine v2.

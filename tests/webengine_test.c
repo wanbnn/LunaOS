@@ -253,6 +253,14 @@ static void template_shadow_regressions(void) {
     web_node_append(shadow, span);
     check(!web_find_first(document, "span") && span->parent == shadow,
           "shadow descendants remain outside host light-DOM traversal");
+    check(web_node_root(span) == shadow &&
+          web_node_root_composed(span) == document &&
+          web_node_is_connected(span),
+          "shadow nodes use their own root but remain composed-connected to document");
+    web_node_detach(host);
+    check(!web_node_is_connected(span) && web_node_root_composed(span) == host,
+          "detaching shadow host disconnects composed subtree");
+    web_node_append(web_find_first(document, "body"), host);
     WebNode *fragment = web_node_new(WEB_DOCUMENT_FRAGMENT);
     WebNode *one = web_node_new(WEB_ELEMENT);
     one->tag = web_strdup("b");
@@ -266,6 +274,83 @@ static void template_shadow_regressions(void) {
           "inserting DocumentFragment moves children in document order");
     web_free_tree(fragment);
     web_free_tree(document);
+}
+
+
+static void dom_core_phase2_regressions(void) {
+    WebNode *document = web_node_new(WEB_ELEMENT);
+    document->tag = web_strdup("#document");
+    WebNode *parent = web_node_new(WEB_ELEMENT);
+    parent->tag = web_strdup("div");
+    WebNode *first = web_node_new(WEB_ELEMENT);
+    first->tag = web_strdup("first");
+    WebNode *replacement = web_node_new(WEB_ELEMENT);
+    replacement->tag = web_strdup("replacement");
+    web_node_append(document, parent);
+    web_node_append(parent, first);
+    check(web_node_root(first) == document &&
+          web_node_is_connected(first),
+          "getRootNode and isConnected follow attached tree");
+    check(web_node_replace_child(parent, replacement, first) &&
+          first->parent == 0 && parent->first_child == replacement &&
+          parent->last_child == replacement,
+          "replaceChild detaches old child without freeing it");
+    check(!web_node_is_connected(first) && web_node_root(first) == first,
+          "removed subtree remains independently accessible");
+    check(!web_node_replace_child(parent, parent, replacement) &&
+          replacement->parent == parent,
+          "replaceChild blocks ancestor cycles");
+    WebNode *a = web_node_new(WEB_TEXT);
+    a->text = web_strdup("alpha");
+    WebNode *empty = web_node_new(WEB_TEXT);
+    empty->text = web_strdup("");
+    WebNode *b = web_node_new(WEB_TEXT);
+    b->text = web_strdup("beta");
+    web_node_append(parent, a);
+    web_node_append(parent, empty);
+    web_node_append(parent, b);
+    web_node_normalize(parent);
+    check(a->next == 0 && !strcmp(a->text, "alphabeta"),
+          "normalize merges adjacent text nodes and removes empty nodes");
+    check(!web_node_is_connected(first), "removed node stays detached after normalization");
+    web_free_tree(first);
+    web_free_tree(document);
+}
+
+
+static void html_entities_full_regressions(void) {
+    const char *html =
+        "<html><body>"
+        "<p id='named'>&acE; &notin; &Aacute &fjlig; &CounterClockwiseContourIntegral;</p>"
+        "<p id='numeric'>&#128; &#x80; &#x1F600;</p>"
+        "<div id='attr' data-ambiguous='&notit;' data-legacy='&copy text' "
+        "data-escaped='a&amp;b'></div>"
+        "</body></html>";
+    WebNode *root = 0;
+    char error[128] = {0};
+    check(web_parse(html, strlen(html), &root, error, sizeof(error)),
+          "full named entity fixture parses");
+    if (!root)
+        return;
+    WebNode *named = web_find_by_id(root, "named");
+    char value[256];
+    web_node_text(named, value, sizeof(value));
+    check(strstr(value, "\xe2\x88\xbe\xcc\xb3") != 0 &&
+          strstr(value, "\xe2\x88\x89") != 0 &&
+          strstr(value, "\xc3\x81") != 0 &&
+          strstr(value, "fj") != 0,
+          "named entities support two codepoints, legacy and uncommon references");
+    WebNode *numeric = web_find_by_id(root, "numeric");
+    web_node_text(numeric, value, sizeof(value));
+    check(strstr(value, "\xe2\x82\xac") != 0 &&
+          strstr(value, "\xf0\x9f\x98\x80") != 0,
+          "numeric references remap C1 characters and decode astral planes");
+    WebNode *attr = web_find_by_id(root, "attr");
+    check(attr && !strcmp(web_attr(attr, "data-ambiguous"), "&notit;") &&
+          !strcmp(web_attr(attr, "data-legacy"), "\xc2\xa9 text") &&
+          !strcmp(web_attr(attr, "data-escaped"), "a&b"),
+          "attribute context refuses ambiguous semicolonless named references");
+    web_free_tree(root);
 }
 
 static void html_dom_regressions(void) {
@@ -430,6 +515,8 @@ int main(void) {
     dom_mutation_regressions();
     foreign_namespace_regressions();
     template_shadow_regressions();
+    dom_core_phase2_regressions();
+    html_entities_full_regressions();
     printf(failures ? "\n%d check(s) failed\n" : "\nall checks passed\n", failures);
     return failures ? 1 : 0;
 }

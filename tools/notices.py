@@ -15,6 +15,11 @@ extra = {
     "GCC-Runtime-Exception.txt": "assets/licenses/GCC-Runtime-Exception.txt",
     "GCC-GPL3.txt": "assets/licenses/GPL-3.txt",
 }
+# Include the vendored Lexbor attribution when the source submodule is present.
+# Keep the ordinary LunaOS build usable without initialized submodules.
+if Path("third_party/lexbor/LICENSE").is_file():
+    extra["Lexbor-Apache-2.0.txt"] = "third_party/lexbor/LICENSE"
+
 with Path("build/notices.h").open("w") as f:
     for name, path in pairs.items():
         f.write(
