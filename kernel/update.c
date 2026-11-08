@@ -243,7 +243,7 @@ static bool download_package(const char *url, const char *target, bool expect_de
             body_bytes == p.total && p.downloaded == p.total) {
             memcpy(included, p.selected, sizeof(included));
             progress = 50;
-            serial_write("LunaUpdate v2: bundle downloaded, all included SHA-256 checks passed.\\n");
+            serial_write("LunaUpdate v2: bundle downloaded, all included SHA-256 checks passed.\n");
             return true;
         }
         if (p.malformed) return false;  /* Never retry invalid authenticated content. */
@@ -271,7 +271,7 @@ void update_run(void) {
     running = true;
     owner = task_current()->pid;
     detail[0] = 0; progress = 0;
-    serial_write("LunaUpdate v2: checking latest main revision.\\n");
+    serial_write("LunaUpdate v2: checking latest main revision.\n");
     uint8_t mbr[512], *raw = 0, *verify = 0;
     char commit[41], url[256], base[192];
     unsigned disk = disk_boot_index();
@@ -314,7 +314,7 @@ void update_run(void) {
         append(url, "update-from-", sizeof(url));
         append(url, LUNA_BUILD_FULL_COMMIT, sizeof(url));
         append(url, ".pack", sizeof(url));
-        serial_write("LunaUpdate v2: checking an exact-base differential bundle.\\n");
+        serial_write("LunaUpdate v2: checking an exact-base differential bundle.\n");
         downloaded = download_package(url, commit, true, raw);
         got_delta = downloaded;
         /* Only absent differentials may fall back automatically; do not hide
@@ -328,7 +328,7 @@ void update_run(void) {
 full_download:
     if (!downloaded) {
         strcpy(url, base); append(url, "update.pack", sizeof(url));
-        serial_write("LunaUpdate v2: downloading single full update bundle.\\n");
+        serial_write("LunaUpdate v2: downloading single full update bundle.\n");
         if (!download_package(url, commit, false, raw)) {
             state("Update download failed. The installed system was not changed.",
                   "Falha no download. O sistema instalado não foi alterado.", 0);
@@ -375,7 +375,7 @@ full_download:
         }
     }
     if (wrong_base && got_delta) {
-        serial_write("LunaUpdate v2: differential baseline mismatch, selecting full bundle.\\n");
+        serial_write("LunaUpdate v2: differential baseline mismatch, selecting full bundle.\n");
         downloaded = false;
         cleanup();
         goto full_download;
@@ -394,7 +394,7 @@ full_download:
               "Não foi possível salvar os dados. Instalação cancelada.", 0);
         goto done;
     }
-    serial_write("LunaUpdate v2: backing up changed sectors in RAM.\\n");
+    serial_write("LunaUpdate v2: backing up changed sectors in RAM.\n");
     unsigned prepared = 0;
     for (unsigned i = 0; i < UPDATE_RECORDS; i++) {
         if (!changed[i]) continue;
@@ -418,6 +418,8 @@ full_download:
         unsigned batch[8], count = 0;
         while (walked < UPDATE_RECORDS && count < 8) {
             unsigned i = walked + 1 == UPDATE_RECORDS ? 0 : walked + 1;
+            /* The bootloader's first block must be its OWN final flushed batch. */
+            if (i == 0 && count) break;
             walked++;
             if (!changed[i]) continue;
             if (!decode(i, raw)) goto rollback;
@@ -442,14 +444,14 @@ full_download:
         update_show_blocks("Installed and verified: ", written, to_write);
         task_sleep(1);
     }
-    serial_write("LunaUpdate v2: verified installation complete. Rebooting.\\n");
+    serial_write("LunaUpdate v2: verified installation complete. Rebooting.\n");
     cleanup();
     state("Update installed. Restarting...", "Atualização instalada. Reiniciando...", 100);
     task_sleep(2000);
     reboot();
     goto done;
 rollback: {
-        serial_write("LunaUpdate v2: install error, rolling back changed sectors.\\n");
+        serial_write("LunaUpdate v2: install error, rolling back changed sectors.\n");
         state("Installation failed. Restoring the previous system...",
               "Instalação falhou. Restaurando o sistema anterior...", 0);
         bool restored = true;
@@ -465,7 +467,7 @@ rollback: {
         goto done;
     }
 memory_error:
-    serial_write("LunaUpdate v2: memory allocation failure.\\n");
+    serial_write("LunaUpdate v2: memory allocation failure.\n");
     state("Not enough free memory. Installation cancelled.",
           "Memória livre insuficiente. Instalação cancelada.", 0);
 done:

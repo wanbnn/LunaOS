@@ -54,7 +54,8 @@ assert delta[offset:offset + len(manifest)] == manifest
 offset += len(manifest)
 for i, (_, target) in enumerate(record_data):
     selected = bool(bitmap[i // 8] & (1 << (i % 8)))
-    expected_selected = i == 0 or target != previous[RECORD.unpack_from(manifest, HEADER.size + i * RECORD.size)[0] * 512:][:CHUNK]
+    sector = RECORD.unpack_from(manifest, HEADER.size + i * RECORD.size)[0]
+    expected_selected = i == 0 or target != previous[sector * 512:sector * 512 + CHUNK]
     assert selected == expected_selected
     if selected:
         compressed_bytes = RECORD.unpack_from(manifest, HEADER.size + i * RECORD.size)[1]
