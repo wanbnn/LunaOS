@@ -122,6 +122,22 @@ void web_set_attr(WebNode *node, const char *name, const char *value) {
     a->next = node->attrs;
     node->attrs = a;
 }
+/* Clone a node and, optionally, its descendants without sharing owned data.
+ * Layout, decoded image buffers and JavaScript state are intentionally not copied. */
+WebNode *web_node_clone(const WebNode *source, bool deep) {
+    if (!source)
+        return 0;
+    WebNode *copy = web_node_new(source->type);
+    copy->tag = web_strdup(source->tag);
+    copy->text = web_strdup(source->text);
+    for (const WebAttr *a = source->attrs; a; a = a->next)
+        web_set_attr(copy, a->name, a->value);
+    if (deep) {
+        for (const WebNode *child = source->first_child; child; child = child->next)
+            web_node_append(copy, web_node_clone(child, true));
+    }
+    return copy;
+}
 void web_free_tree(WebNode *node) {
     if (!node)
         return;
