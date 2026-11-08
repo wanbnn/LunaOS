@@ -413,7 +413,12 @@ void rtw8822be_init(void) {
     STEP("interrupt mask",write(0xb8,4,0));
     STEP("interrupt mask",write(0x10b8,4,0));
     dev.master=true; STEP("RX bus mastering",drv_pci_master(&dev.pci,true));
-    STEP("DMA resume",write(0x303,1,0));
+    /* The upstream rtw88 PCIe ring setup preserves PCI_CTRL+3 = 0xf7
+     * through normal operation. Clearing the byte here diverged from the
+     * reference driver and can leave the management TX engine unserviced.
+     * Do not clear these control bits when enabling the MAC.
+     */
+    STEP("PCIe queue control",bits(0x303,1,0,0xf7));
     /* Upstream REG_CR MAC_TRX_ENABLE = 0xff (all MAC/HCI DMA paths).
      * Do not leave TX DMA disabled or retain stale power-on bits. */
     STEP("MAC TRX enable",write(0x100,1,0xff));
