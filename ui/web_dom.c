@@ -144,6 +144,7 @@ WebNode *web_node_clone(const WebNode *source, bool deep) {
     if (!source)
         return 0;
     WebNode *copy = web_node_new(source->type);
+    web_free(copy->tag); /* fragment constructor installs a default tag */
     copy->tag = web_strdup(source->tag);
     copy->namespace_id = source->namespace_id;
     copy->text = web_strdup(source->text);
