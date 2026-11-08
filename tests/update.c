@@ -62,6 +62,7 @@ void append(char *out, const char *s, size_t cap) {
     memcpy(out + n, s, len); out[n + len] = 0;
 }
 int net_https(const char *url, char *out, size_t cap, char *error, size_t ecap) {
+    (void)ecap;
     requests++;
     error[0] = 0;
     assert(strstr(url, "/git/ref/heads/main") && cap > 80);
