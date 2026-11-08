@@ -12,7 +12,7 @@ else
   export QEMU_MODULE_DIR="$PWD/.tools/usr/lib/x86_64-linux-gnu/qemu"
   firmware=(-L "$PWD/.tools/usr/share/qemu" -bios "$PWD/.tools/usr/share/seabios/bios-256k.bin")
 fi
-ram=64
+ram=4096
 if [[ "${LUNA_UEFI:-0}" == 1 ]]; then
   ovmf="${LUNA_OVMF_DIR:-$PWD/.tools/uefi/usr/share/OVMF}"
   if [[ ! -f "$ovmf/OVMF_CODE_4M.fd" ]]; then ovmf=/usr/share/OVMF; fi
@@ -22,7 +22,6 @@ if [[ "${LUNA_UEFI:-0}" == 1 ]]; then
   vars=$(mktemp "$PWD/build/uefi-vars-XXXXXX.fd")
   cp "$ovmf/OVMF_VARS_4M.fd" "$vars"
   firmware=(-L "$PWD/.tools/usr/share/qemu" -drive "if=pflash,format=raw,readonly=on,file=$ovmf/OVMF_CODE_4M.fd" -drive "if=pflash,format=raw,file=$vars")
-  ram=256
 fi
 image_path="${LUNA_IMAGE:-dist/LunaOS.img}"
 if [[ ! -f "$image_path" ]]; then echo "LunaOS image not found: $image_path" >&2; exit 1; fi

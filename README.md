@@ -143,11 +143,13 @@ make run-iso
 LUNA_UEFI=1 make run
 ```
 
-O launcher inicia, por padrão, com **64 MiB de RAM em BIOS** e **256 MiB em UEFI**. Para alterar a RAM da VM:
+O launcher inicia com **4 GiB de RAM**, tanto em BIOS quanto em UEFI. A memória da VM pode ser ajustada conforme o teste:
 
 ```bash
-LUNA_RAM=256 make run
+LUNA_RAM=1024 make run
 ```
+
+O LunaOS dimensiona heap e buffers sob demanda usando a memória disponível. Rodar com poucos recursos é um objetivo de eficiência. Em hardware, a RAM utilizável vem do mapa do firmware. O kernel atual é i386 sem PAE e aloca memória física abaixo de 4 GiB, com reservas para firmware e dispositivos. Consulte [Memória física](docs/physical-memory.md).
 
 O QEMU usa KVM se estiver disponível, caso contrário usa emulação TCG. O launcher configura o adaptador gráfico virtual, Ethernet RTL8139, áudio AC97 e mídia IDE. O modo UEFI exige OVMF instalado/configurado. Para detalhes sobre boot e mídia, consulte [Arquitetura](docs/architecture.md) e [ISO](docs/iso.md).
 
