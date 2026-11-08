@@ -81,6 +81,10 @@ void wifi_station_poll(WifiStation *s,uint32_t now) {
     }
     uint8_t frame[1514]; const uint8_t broadcast[6]={255,255,255,255,255,255};
     for(unsigned budget=0;budget<16;budget++) {
+        /* Leave unread MPDUs with the radio when the IP queue is full.
+         * Receiving them would consume CCMP packet numbers before dropping
+         * their plaintext, turning a software queue limit into packet loss. */
+        if(s->count==8) break;
         unsigned bytes=0; bool encrypted=false;
         int rc=s->radio.receive(s->radio.context,frame,sizeof(frame),&bytes,&encrypted);
         if(!rc) break;
@@ -97,7 +101,7 @@ void wifi_station_poll(WifiStation *s,uint32_t now) {
             }
             continue;
         }
-        if(!authorized(s) || (s->security==WIFI_WPA2_PSK && !encrypted) || s->count==8) continue;
+        if(!authorized(s) || (s->security==WIFI_WPA2_PSK && !encrypted)) continue;
         unsigned tail=(s->head+s->count)%8;
         memcpy(s->queued[tail],frame,bytes); s->lengths[tail]=bytes; s->count++;
     }

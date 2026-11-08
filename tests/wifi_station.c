@@ -138,6 +138,16 @@ int main(void) {
     assert(!net_ready && sent[42+242]==3); /* request, still no configured IP */
     dhcp_reply(5,xid);wifi_station_poll(&s,5);frame_clock=5;net_poll();wifi_station_poll(&s,6);
     assert(net_ready && s.link==WIFI_ONLINE);
+    /* A burst larger than the eight-frame IP queue must remain at the radio
+     * until net_poll drains it, rather than being decrypted then discarded. */
+    unsigned burst_before=sends;
+    for(unsigned i=0;i<12;i++) enqueue(a,sizeof(a),true);
+    wifi_station_poll(&s,6);
+    assert(s.count==8 && count==4);
+    net_poll();
+    assert(sends==burst_before+8);
+    wifi_station_poll(&s,6);net_poll();
+    assert(!s.count && !count && sends==burst_before+12);
     unsigned before=sends;enqueue(a,sizeof(a),false);wifi_station_poll(&s,7);net_poll();
     assert(sends==before); /* plaintext injection after authorization blocked */
     /* A synchronous network caller must advance radio RX without a GUI tick. */
