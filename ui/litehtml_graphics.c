@@ -6,11 +6,6 @@
 #include "webengine.h"
 #include "litehtml_bridge.h"
 
-typedef struct {
-    int offset_x, offset_y;
-    int clip_depth;
-    int clips[16][4];
-} LunaLiteSurface;
 static int lw(void *p, const char *str, int size) {
     (void)p;
     return text_width(str, web_font_size(size));
