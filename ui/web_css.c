@@ -1,5 +1,6 @@
 /* CSS parser, selector matcher and cascade for the Luna Browser engine. */
 #include "webengine.h"
+#include <string.h>
 
 typedef struct {
     char *tag;
