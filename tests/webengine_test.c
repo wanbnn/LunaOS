@@ -75,6 +75,49 @@ static const char *document_html =
     "<script>var x = 1;</script>"
     "</body></html>";
 
+
+/* Regression from real LunaOS hardware: invisible Google form metadata was
+ * painted as ordinary input controls and corrupted the home-page layout. */
+static void hidden_form_layout_regressions(void) {
+    const char *html =
+        "<html><body><form id='search'>"
+        "<input id='charset' type='hidden' value='ISO-8859-1'>"
+        "<input id='language' type='HIDDEN' value='pt-BR'>"
+        "<input id='token' type='hidden' value='secret'>"
+        "<input id='query' type='text' value='hello'>"
+        "<button id='submit'>Search</button>"
+        "</form><template id='inert'><p>Invisible template</p></template>"
+        "<div id='hiddenattr' hidden>Hidden content</div>"
+        "</body></html>";
+    WebNode *root = 0;
+    char err[128] = {0};
+    check(web_parse(html, strlen(html), &root, err, sizeof(err)),
+          "Google-like form with hidden metadata parses");
+    if (!root) return;
+    css_apply(root, 0, 0);
+    web_layout(root, 600, 300);
+    WebNode *charset = web_find_by_id(root, "charset");
+    WebNode *language = web_find_by_id(root, "language");
+    WebNode *token = web_find_by_id(root, "token");
+    WebNode *query = web_find_by_id(root, "query");
+    WebNode *tmpl = web_find_by_id(root, "inert");
+    WebNode *hidden = web_find_by_id(root, "hiddenattr");
+    check(charset && language && token &&
+          charset->style.display == WEB_DISPLAY_NONE &&
+          language->style.display == WEB_DISPLAY_NONE &&
+          token->style.display == WEB_DISPLAY_NONE,
+          "input type=hidden is excluded from visual formatting");
+    check(query && query->style.display == WEB_DISPLAY_INLINE_BLOCK &&
+          query->w > 0,
+          "visible search input keeps its intrinsic layout");
+    check(hidden && hidden->style.display == WEB_DISPLAY_NONE,
+          "HTML hidden attribute excludes element from layout");
+    check(tmpl && tmpl->style.display == WEB_DISPLAY_NONE,
+          "template container is never rendered");
+    web_free_fragments();
+    web_free_tree(root);
+}
+
 static void layout_regressions(void) {
     const char *html =
         "<html><head></head><body>"
@@ -511,6 +554,7 @@ int main(void) {
     css_free_sheet(rules, count);
     web_free_tree(root);
     layout_regressions();
+    hidden_form_layout_regressions();
     html_dom_regressions();
     dom_mutation_regressions();
     foreign_namespace_regressions();
