@@ -29,6 +29,7 @@ static struct {
     uint8_t mac[6];
     unsigned txwp[8], tx_sent, tx_busy, tx_errors;
     uint32_t diag_tx_mgmt_idx, diag_tx_be_idx, diag_txdma_status;
+    uint32_t diag_tx_mgmt_base, diag_tx_mgmt_count, diag_tx_pause, diag_tx_offset;
     unsigned rp, tag, received, dropped, rx_invalid_tag, rx_invalid_packet, rx_c2h;
     unsigned rx_dma_polls, rx_pending, rx_last_index;
     uint32_t diag_cr, diag_rcr, diag_pcictrl, diag_rxfilter;
@@ -66,6 +67,12 @@ static int wait_reg(uint32_t reg,unsigned width,uint32_t mask,uint32_t value) {
         rc=us(NULL,10); if(rc) return rc;
     }
     dev.io.failed_register=reg; return DRV_ETIMEDOUT;
+}
+static void append_error(char *out,size_t cap,int err) {
+    char value[20];
+    if(err<0) {append(out,"-",cap);number(value,0u-(uint32_t)err);}
+    else number(value,(uint32_t)err);
+    append(out,value,cap);
 }
 static void le16(uint8_t *p,uint16_t v) { p[0]=v; p[1]=v>>8; }
 static void le32(uint8_t *p,uint32_t v) { le16(p,v); le16(p+2,v>>16); }
@@ -461,21 +468,30 @@ void rtw8822be_status(char *out,size_t cap) {
     }
     append(out,"\nMLME stage=",cap);number(n,dev.client.stage);append(out,n,cap);
     append(out," last_fail_stage=",cap);number(n,dev.client.failed_stage);append(out,n,cap);
-    append(out," error=",cap);number(n,(uint32_t)dev.client.error);append(out,n,cap);
+    append(out," error=",cap);append_error(out,cap,dev.client.error);
     append(out," attempts=",cap);number(n,dev.client.attempts);append(out,n,cap);
     append(out," mgmt_rx=",cap);number(n,dev.client.mgmt_rx);append(out,n,cap);
     append(out," foreign=",cap);number(n,dev.client.foreign_rx);append(out,n,cap);
     append(out," auth_rx=",cap);number(n,dev.client.auth_rx);append(out,n,cap);
     append(out," assoc_rx=",cap);number(n,dev.client.assoc_rx);append(out,n,cap);
     append(out,"\nWPA2 phase=",cap);number(n,dev.client.station.wpa.phase);append(out,n,cap);
-    append(out," WPA2 error=",cap);number(n,(uint32_t)dev.client.station.wpa.error);append(out,n,cap);
+    append(out," WPA2 error=",cap);append_error(out,cap,dev.client.station.wpa.error);
     append(out," link=",cap);number(n,wifi_client_link(&dev.client));append(out,n,cap);
     (void)read32(0x3b0,&dev.diag_tx_mgmt_idx);
     (void)read32(0x3a8,&dev.diag_tx_be_idx);
     (void)read32(0x210,&dev.diag_txdma_status);
+    (void)read32(0x310,&dev.diag_tx_mgmt_base);
+    (void)rd(NULL,0x380,2,&dev.diag_tx_mgmt_count);
+    (void)rd(NULL,0x522,1,&dev.diag_tx_pause);
+    (void)read32(0x20c,&dev.diag_tx_offset);
     append(out,"\nTX MGMT index=",cap);hex(n,dev.diag_tx_mgmt_idx);append(out,n,cap);
     append(out," BE index=",cap);hex(n,dev.diag_tx_be_idx);append(out,n,cap);
     append(out," TXDMA status=",cap);hex(n,dev.diag_txdma_status);append(out,n,cap);
+    append(out,"\nTX MGMT base=",cap);hex(n,dev.diag_tx_mgmt_base);append(out,n,cap);
+    append(out," count=",cap);number(n,dev.diag_tx_mgmt_count & 0xfffu);append(out,n,cap);
+    append(out," expected=",cap);hex(n,dev.txbd.bus+2*TX_RING_STRIDE);append(out,n,cap);
+    append(out,"\nTX pause=",cap);hex(n,dev.diag_tx_pause);append(out,n,cap);
+    append(out," offset_check=",cap);hex(n,dev.diag_tx_offset);append(out,n,cap);
     append(out,"\nTX ring MGMT wp=",cap);number(n,dev.txwp[2]);append(out,n,cap);
     append(out," BE wp=",cap);number(n,dev.txwp[4]);append(out,n,cap);
     append(out," client backpressure=",cap);number(n,dev.client.tx_backpressure);append(out,n,cap);
