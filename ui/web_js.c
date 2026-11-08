@@ -605,31 +605,24 @@ static JSValue js_create_text_node(JSContext *ctx, JSValueConst this_val, int ar
     JS_FreeCString(ctx, text);
     return make_element(ctx, node);
 }
+/* Tree mutations are centralized in web_dom.c. Reject moves that would
+ * make an ancestor its own descendant instead of corrupting the DOM. */
 static JSValue js_append_child(JSContext *ctx, JSValueConst this_val, int argc,
+                               JSValueConst *argv) {
+    WebNode *parent = node_from_value(ctx, this_val);
+    WebNode *child = argc ? node_from_value(ctx, argv[0]) : 0;
+    if (!parent || !child || !web_node_insert_before(parent, child, 0))
+        return JS_ThrowTypeError(ctx, "Invalid appendChild tree mutation");
+    mark_dirty();
+    return make_element(ctx, child);
+}
+static JSValue js_insert_before(JSContext *ctx, JSValueConst this_val, int argc,
                                 JSValueConst *argv) {
     WebNode *parent = node_from_value(ctx, this_val);
-    if (!parent || !argc)
-        return JS_UNDEFINED;
-    WebNode *child = node_from_value(ctx, argv[0]);
-    if (!child)
-        return JS_UNDEFINED;
-    if (child->parent) {
-        WebNode *old = child->parent;
-        WebNode **link = &old->first_child;
-        while (*link && *link != child)
-            link = &(*link)->next;
-        if (*link) {
-            *link = child->next;
-            if (child->next)
-                child->next->prev = child->prev;
-            else
-                old->last_child = child->prev;
-        }
-        child->parent = 0;
-        child->prev = 0;
-        child->next = 0;
-    }
-    web_node_append(parent, child);
+    WebNode *child = argc ? node_from_value(ctx, argv[0]) : 0;
+    WebNode *reference = argc > 1 ? node_from_value(ctx, argv[1]) : 0;
+    if (!parent || !child || !web_node_insert_before(parent, child, reference))
+        return JS_ThrowTypeError(ctx, "Invalid insertBefore tree mutation");
     mark_dirty();
     return make_element(ctx, child);
 }
@@ -1020,6 +1013,7 @@ static const JSCFunctionListEntry element_functions[] = {
     JS_CFUNC_DEF("querySelector", 1, js_query_selector),
     JS_CFUNC_DEF("querySelectorAll", 1, js_query_selector_all),
     JS_CFUNC_DEF("appendChild", 1, js_append_child),
+    JS_CFUNC_DEF("insertBefore", 2, js_insert_before),
     JS_CFUNC_DEF("removeChild", 1, js_remove_child),
     JS_CFUNC_DEF("setAttribute", 2, js_set_attribute),
     JS_CFUNC_DEF("getAttribute", 1, js_get_attribute),
