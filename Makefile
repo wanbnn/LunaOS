@@ -18,7 +18,7 @@ LUNA_LEXBOR ?= 1
 # GCC's host libstdc++.a must pass freestanding link checks before enabling.
 LUNA_LITEHTML ?= 0
 LITEHTML_CXX ?= g++
-LITEHTML_CXXFLAGS := -m32 -std=c++17 -Os -fexceptions -fno-rtti -fno-pie -fno-pic -fno-stack-protector -fno-threadsafe-statics -ffunction-sections -fdata-sections -mno-sse -mno-mmx -mfpmath=387 -Iui -Ithird_party/litehtml/include -Ithird_party/litehtml/src
+LITEHTML_CXXFLAGS := -m32 -std=c++17 -Os -fexceptions -frtti -fno-pie -fno-pic -fno-stack-protector -fno-threadsafe-statics -ffunction-sections -fdata-sections -mno-sse -mno-mmx -mfpmath=387 -Iui -Ithird_party/litehtml/include -Ithird_party/litehtml/src
 LITEHTML_LIBSTDCXX := $(shell $(LITEHTML_CXX) -m32 -print-file-name=libstdc++.a)
 LITEHTML_LIBSUPCXX := $(shell $(LITEHTML_CXX) -m32 -print-file-name=libsupc++.a)
 ifeq ($(LUNA_LEXBOR),1)
