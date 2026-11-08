@@ -1377,6 +1377,11 @@ static void release_states(WebNode *node) {
     }
     for (WebNode *c = node->first_child; c; c = c->next)
         release_states(c);
+    /* Template and shadow trees are separately owned, not light-DOM children. */
+    if (node->template_content)
+        release_states(node->template_content);
+    if (node->shadow_root)
+        release_states(node->shadow_root);
 }
 void web_js_release(void) {
     if (js_document)
