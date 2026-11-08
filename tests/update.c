@@ -65,7 +65,7 @@ int net_https(const char *url, char *out, size_t cap, char *error, size_t ecap) 
     requests++;
     error[0] = 0;
     assert(strstr(url, "/git/ref/heads/main") && cap > 80);
-    return snprintf(out, cap, "{\\"object\\":{\\"sha\\":\\"%.*s\\"}}", 40,
+    return snprintf(out, cap, "{\"object\":{\"sha\":\"%.*s\"}}", 40,
                     same_commit ? (const uint8_t *)"0000000000000000000000000000000000000000" :
                     source_manifest + 24);
 }
