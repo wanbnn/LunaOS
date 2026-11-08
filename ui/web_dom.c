@@ -101,18 +101,22 @@ void web_free_tree(WebNode *node) {
     web_free(node->text);
     web_free(node);
 }
+static void collect_text(WebNode *node, char *out, size_t cap) {
+    if (!node)
+        return;
+    if (node->type == WEB_TEXT) {
+        if (node->text)
+            append(out, node->text, cap);
+        return;
+    }
+    for (WebNode *c = node->first_child; c; c = c->next)
+        collect_text(c, out, cap);
+}
 void web_node_text(WebNode *node, char *out, size_t cap) {
     if (!cap)
         return;
     out[0] = 0;
-    if (!node)
-        return;
-    if (node->type == WEB_TEXT) {
-        append(out, node->text, cap);
-        return;
-    }
-    for (WebNode *c = node->first_child; c; c = c->next)
-        web_node_text(c, out, cap);
+    collect_text(node, out, cap);
 }
 WebNode *web_find_by_id(WebNode *root, const char *id) {
     if (!root || !id || !*id)
@@ -233,31 +237,38 @@ static char *decode_entities(const char *src, size_t len, size_t *out_len) {
         size_t j = i + 1;
         if (j < len && src[j] == '#') {
             j++;
-            unsigned code = 0;
+            bool hex = false, digits = false, overflow = false;
+            uint32_t code = 0;
             if (j < len && (src[j] == 'x' || src[j] == 'X')) {
+                hex = true;
                 j++;
-                while (j < len && is_hex(src[j])) {
-                    code = code * 16 + (unsigned)(src[j] <= '9' ? src[j] - '0' :
-                                                             (src[j] | 32) - 'a' + 10);
-                    j++;
-                }
-            } else {
-                while (j < len && src[j] >= '0' && src[j] <= '9') {
-                    code = code * 10 + (unsigned)(src[j] - '0');
-                    j++;
-                }
+            }
+            while (j < len && (hex ? is_hex(src[j]) : (src[j] >= '0' && src[j] <= '9'))) {
+                unsigned digit = (unsigned)(src[j] <= '9' ? src[j] - '0' :
+                                                  (src[j] | 32) - 'a' + 10);
+                unsigned base = hex ? 16u : 10u;
+                if (code > (0x10ffffu - digit) / base)
+                    overflow = true;
+                else if (!overflow)
+                    code = code * base + digit;
+                digits = true;
+                j++;
+            }
+            if (!digits) {
+                out[o++] = '&';
+                i++;
+                continue;
             }
             if (j < len && src[j] == ';')
                 j++;
-            if (code && code < 0x10000) {
-                char tmp[5];
-                utf8_encode(tmp, code);
-                size_t n = strlen(tmp);
-                memcpy(out + o, tmp, n);
-                o += n;
-            } else {
-                out[o++] = '&';
-            }
+            if (overflow || !code || code > 0x10ffffu ||
+                (code >= 0xd800u && code <= 0xdfffu))
+                code = 0xfffdu;
+            char tmp[5];
+            utf8_encode(tmp, code);
+            size_t n = strlen(tmp);
+            memcpy(out + o, tmp, n);
+            o += n;
             i = j;
             continue;
         }
@@ -386,7 +397,8 @@ static void parse_attributes(WebParser *ps, WebNode *node) {
         if (ps->p >= ps->end || *ps->p == '>' || (*ps->p == '/' && ps->p + 1 < ps->end && ps->p[1] == '>'))
             break;
         const char *name_start = ps->p;
-        while (ps->p < ps->end && !is_space(*ps->p) && *ps->p != '=' && *ps->p != '>')
+        while (ps->p < ps->end && !is_space(*ps->p) && *ps->p != '=' &&
+               *ps->p != '>' && *ps->p != '/')
             ps->p++;
         size_t name_len = (size_t)(ps->p - name_start);
         if (!name_len) {
@@ -423,9 +435,11 @@ static void parse_attributes(WebParser *ps, WebNode *node) {
                 value = decode_entities(value_start, raw_len, &decoded_len);
             }
         } else {
-            value = web_strdup(name);
+            value = web_strdup("");
         }
-        web_set_attr(node, name, value);
+        /* HTML uses the first occurrence of a duplicate attribute. */
+        if (!web_attr_has(node, name))
+            web_set_attr(node, name, value);
         web_free(name);
         web_free(value);
     }
@@ -462,42 +476,53 @@ static void parse_start_tag(WebParser *ps) {
     }
     if (ps->p < ps->end && *ps->p == '>')
         ps->p++;
-    if (web_is_void_tag(node->tag) || self_closing)
+    /* A trailing slash is ignored on non-void HTML elements. */
+    (void)self_closing;
+    if (web_is_void_tag(node->tag))
         return;
     if (is_raw_tag(node->tag)) {
-        /* Raw text elements keep their content verbatim until the end tag. */
-        char close_tag[16];
-        close_tag[0] = '<';
-        close_tag[1] = '/';
+        /* Raw script/style and RCDATA textarea/title end at a matching,
+         * ASCII-case-insensitive end tag; whitespace before '>' is allowed. */
+        const char *hit = 0, *after = 0;
         size_t n = strlen(node->tag);
-        memcpy(close_tag + 2, node->tag, n);
-        close_tag[2 + n] = '>';
-        close_tag[3 + n] = 0;
-        const char *start = ps->p;
-        const char *hit = 0;
-        while (start < ps->end) {
-            const char *found = start;
-            while (found < ps->end && *found != '<')
-                found++;
-            if (found >= ps->end)
-                break;
-            size_t remain = (size_t)(ps->end - found);
-            if (remain >= strlen(close_tag) && !strncmp(found, close_tag, strlen(close_tag))) {
-                hit = found;
+        for (const char *q = ps->p; q + n + 2 <= ps->end; q++) {
+            if (q[0] != '<' || q[1] != '/')
+                continue;
+            size_t k = 0;
+            while (k < n && q + 2 + k < ps->end) {
+                char ch = q[2 + k];
+                if (ch >= 'A' && ch <= 'Z')
+                    ch = (char)(ch + 32);
+                if (ch != node->tag[k])
+                    break;
+                k++;
+            }
+            if (k != n)
+                continue;
+            const char *tail = q + 2 + n;
+            if (tail < ps->end && *tail != '>' && !is_space(*tail))
+                continue;
+            while (tail < ps->end && is_space(*tail))
+                tail++;
+            if (tail < ps->end && *tail == '>') {
+                hit = q;
+                after = tail + 1;
                 break;
             }
-            start = found + 1;
         }
         const char *content_end = hit ? hit : ps->end;
         if (content_end > ps->p) {
             WebNode *text = web_node_new(WEB_TEXT);
-            text->text = web_strndup(ps->p, (size_t)(content_end - ps->p));
+            size_t length = (size_t)(content_end - ps->p);
+            if (!strcmp(node->tag, "textarea") || !strcmp(node->tag, "title")) {
+                size_t decoded_len;
+                text->text = decode_entities(ps->p, length, &decoded_len);
+            } else {
+                text->text = web_strndup(ps->p, length);
+            }
             web_node_append(node, text);
         }
-        ps->p = content_end;
-        if (hit) {
-            ps->p += strlen(close_tag);
-        }
+        ps->p = hit ? after : ps->end;
         return;
     }
     push(ps, node);
@@ -513,7 +538,9 @@ static void parse_end_tag(WebParser *ps) {
     for (char *q = tag; *q; q++)
         if (*q >= 'A' && *q <= 'Z')
             *q = (char)(*q + 32);
-    if (ps->p < ps->end && *ps->p == '>')
+    while (ps->p < ps->end && *ps->p != '>')
+        ps->p++;
+    if (ps->p < ps->end)
         ps->p++;
     close_to(ps, tag);
     web_free(tag);
