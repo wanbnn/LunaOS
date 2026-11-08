@@ -64,5 +64,8 @@ int main(void) {
         assert((get_le32(packet+36)>>12)==seq);
         assert(!memcmp(packet+48,mpdu,sizeof(mpdu)));
     }
-    puts("PASS: distinct MGMT/BE PCIe DMA rings, descriptor layout and TX backpressure");
+    uint8_t full_mtu[1601]={8};
+    assert(!tx_mpdu(NULL,full_mtu,1548,false));
+    assert(tx_mpdu(NULL,full_mtu,sizeof(full_mtu),false)==DRV_EINVAL);
+    puts("PASS: distinct MGMT/BE PCIe DMA rings, descriptor sequence, full encrypted MTU and TX backpressure");
 }

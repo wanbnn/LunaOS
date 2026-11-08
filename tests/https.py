@@ -9,7 +9,7 @@ import ssl
 import subprocess
 import threading
 
-from guest import ROOT, TEST, Guest
+from guest import ROOT, TEST, Guest, memory, symbol_address, wait_until
 
 
 def openssl(args):
@@ -73,13 +73,30 @@ openssl(
 )
 
 
+large_css = b"/*" + b" " * 350000 + b"*/\n#network-proof { color: #123456; }"
+extra_css = b"p { margin: 1px; }"
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        print("Fixture GET:", self.path, flush=True)
+        if self.path == "/style-page":
+            self.send_response(302)
+            self.send_header("Location", f"//luna.test:{self.server.server_port}/nested/style-page")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         body = (
             (TEST / "root.pem").read_bytes()
             if self.path == "/ca.pem"
             else b"<h1>NATIVE VERIFIED TLS WORKS</h1>"
         )
+        if self.path == "/nested/style-page":
+            body = (f'<html><head><link rel="stylesheet" href="large.css"><link rel="stylesheet" href="//luna.test:{self.server.server_port}/extra.css"></head><body><p id="network-proof">Large CSS received</p></body></html>').encode()
+        elif self.path == "/nested/large.css":
+            body = large_css
+        elif self.path == "/extra.css":
+            body = extra_css
         self.send_response(200)
         if self.path == "/chunked":
             self.send_header("Transfer-Encoding", "chunked")
@@ -118,6 +135,21 @@ try:
         f"wget https://luna.test:{secured.server_port}/chunked /tmp/chunk", "Saved", timeout=35
     )
     g.command("cat /tmp/chunk", "NATIVE VERIFIED TLS WORKS")
+    style_url = f"https://luna.test:{secured.server_port}/style-page"
+    g.command(f"browse {style_url}")
+    final_url = f"https://luna.test:{secured.server_port}/nested/style-page"
+    wait_until(lambda: memory(g, symbol_address("browser_url"), 256).split(b"\0")[0].decode() == final_url, 60)
+    wait_until(lambda: memory(g, symbol_address("browser_loading"), 1) == b"\0", 60)
+    css_size = int.from_bytes(memory(g, symbol_address("sheet_length"), 4), "little")
+    css_ptr = int.from_bytes(memory(g, symbol_address("sheet_text"), 4), "little")
+    expected_css = large_css + b"\n" + extra_css + b"\n"
+    if css_size != len(expected_css):
+        print(g.command("net"), flush=True)
+    assert css_size == len(expected_css), css_size
+    assert memory(g, css_ptr, len(expected_css)) == expected_css
+    print("PASS: browser receives a complete 350 KB linked stylesheet over TLS", flush=True)
+    g.command(f"wget https://luna.test:{secured.server_port}/ /tmp/after-css", "Saved", timeout=35)
+    g.command("ping 10.0.2.2", "Reply", timeout=15)
     g.command(
         f"wget https://luna.test:{secured.server_port}/truncated /tmp/bad", "incomplete", timeout=35
     )
@@ -135,11 +167,14 @@ try:
             "authenticated HTTPS download",
             "chunked transfer decoded",
             "truncated HTTP body rejected",
+            "complete 350 KB linked CSS transferred to the browser over TLS",
+            "subsequent HTTPS and ICMP after large CSS",
             "QuickJS native ECMAScript runtime",
             "BigInt and modern JS syntax",
             "bounded execution of infinite script",
         ],
-        "not_implemented": ["browser DOM/CSS engine", "TLS 1.3", "production browser sandbox"],
+        "not_implemented": ["TLS 1.3", "full browser standards compliance", "production browser sandbox"],
+        "not_validated": ["physical RTL8822BE ACK delivery and MitraStar link stability"],
     }
     (ROOT / "dist/web-foundation-report.json").write_text(json.dumps(report, indent=2) + "\n")
 finally:

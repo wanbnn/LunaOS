@@ -2,6 +2,8 @@
 #define LUNA_WEB_H
 #include "luna.h"
 #define WEB_CAP 524288
+bool net_url_resolve(const char *,const char *,char *,size_t);
+bool net_http_final_url(char *,size_t);
 int stream_connect(const char *, unsigned);
 int stream_read(void *, unsigned);
 int stream_write(const void *, unsigned);

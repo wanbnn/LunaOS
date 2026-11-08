@@ -245,7 +245,18 @@ test-dhcp:
 	$(CC) -std=c11 -O2 -Wall -Wextra -Werror net/dhcp.c tests/dhcp.c -o build/dhcp-test
 	./build/dhcp-test
 
-.PHONY: test-wifi-station
+.PHONY: test-wifi-station test-tcp test-url
+test check: test-tcp test-url
+test-url:
+	@mkdir -p build
+	$(CC) -std=c11 -O2 -Wall -Wextra -Werror lib/url.c tests/url.c -o build/url-test
+	./build/url-test
+
+test-tcp:
+	@mkdir -p build
+	$(CC) -std=c11 -O2 -ffunction-sections -fdata-sections -Wall -Wextra -Werror -Wno-pointer-to-int-cast -Ikernel tests/tcp.c net/time_dns.c -Wl,--gc-sections -o build/tcp-test
+	./build/tcp-test
+
 test-wifi-station: $(addprefix build/host-bearssl/,$(addsuffix .o,$(HOST_WPA_CRYPTO)))
 	$(CC) -std=c11 -O2 -ffunction-sections -fdata-sections -Wall -Wextra -Werror -Wno-pointer-to-int-cast -Ikernel -Ithird_party/bearssl/inc drivers/net.c drivers/wifi_station.c net/wpa2.c net/netif.c net/dhcp.c net/time_dns.c tests/wifi_station.c $^ -Wl,--gc-sections -o build/wifi-station-test
 	./build/wifi-station-test

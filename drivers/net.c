@@ -28,6 +28,8 @@ static uint32_t rxpos, rxcount, txcount;
 static uint16_t ipid, dnsid = 0x1234;
 static bool ping_done, dns_done;
 static const char *connect_error = "No connection attempted.";
+static char failed_http_url[256],failed_http_error[192];
+static char final_http_url[4096];
 static uint32_t arp_requests, arp_received, dns_requests, dns_answers, tcp_syns;
 /* The task that currently owns the network service; nobody else may poll it. */
 static uint32_t network_owner;
@@ -55,6 +57,10 @@ static struct {
 } time_query;
 static void time_network_poll(void);
 static void time_network_input(const uint8_t [4],const uint8_t *,unsigned);
+#define TCP_MSS 1200u
+#define TCP_REORDER 4u
+static const char *transport_error="No transfer attempted.";
+static uint32_t tcp_gaps,tcp_duplicates,tcp_queue_drops,tcp_resets,tcp_timeouts;
 static struct {
     int state;
     uint8_t ip[4];
@@ -62,7 +68,13 @@ static struct {
     uint32_t seq, ack, remote_ack;
     char data[65536];
     unsigned used;
-    bool overflow;
+    unsigned peer_mss;
+    struct {
+        bool valid, fin;
+        uint32_t seq;
+        unsigned bytes;
+        uint8_t data[1460];
+    } pending[TCP_REORDER];
 } tcp;
 static uint16_t be16(const void *p) {
     const uint8_t *b = p;
@@ -193,19 +205,75 @@ static void send_ip(const uint8_t *dest, int proto, const uint8_t *payload, unsi
 }
 static void send_tcp(int flags, const char *data, unsigned n) {
     uint8_t p[1460];
-    memset(p, 0, 20);
+    unsigned header=(flags&2) ? 24 : 20;
+    memset(p, 0, header);
     put16(p, tcp.port);
     put16(p + 2, tcp.remote_port);
     put32(p + 4, tcp.seq);
     put32(p + 8, tcp.ack);
-    p[12] = 0x50;
+    p[12] = (header/4)<<4;
     p[13] = flags;
     put16(p + 14, sizeof(tcp.data) - tcp.used - 1);
+    if(flags&2) { p[20]=2;p[21]=4;put16(p+22,TCP_MSS); }
     if (n)
-        memcpy(p + 20, data, n);
-    uint32_t s = be16(local_ip) + be16(local_ip + 2) + be16(tcp.ip) + be16(tcp.ip + 2) + 6 + 20 + n;
-    put16(p + 16, sum(p, 20 + n, s));
-    send_ip(tcp.ip, 6, p, 20 + n);
+        memcpy(p + header, data, n);
+    uint32_t s = be16(local_ip) + be16(local_ip + 2) + be16(tcp.ip) + be16(tcp.ip + 2) + 6 + header + n;
+    put16(p + 16, sum(p, header + n, s));
+    send_ip(tcp.ip, 6, p, header + n);
+}
+/* Consume only the contiguous suffix of a segment, trimming retransmitted
+ * prefixes. Comparisons use signed differences to survive sequence wrap. */
+static bool tcp_contiguous(uint32_t seq,const uint8_t *data,unsigned bytes,bool fin) {
+    if(tcp.state!=2) return true;
+    if((int32_t)(seq-tcp.ack)>0) return false;
+    uint32_t end=seq+bytes;
+    unsigned skip=tcp.ack-seq;
+    unsigned fresh=skip<bytes ? bytes-skip : 0;
+    if(fresh>sizeof(tcp.data)-tcp.used-1) return false;
+    if(fresh) {
+        memcpy(tcp.data+tcp.used,data+skip,fresh);
+        tcp.used+=fresh;tcp.ack+=fresh;tcp.data[tcp.used]=0;
+    } else if(bytes) tcp_duplicates++;
+    if(fin && end==tcp.ack) {
+        tcp.ack++;send_tcp(0x11,NULL,0);tcp.seq++;tcp.state=3;
+    }
+    return true;
+}
+static void tcp_drain_pending(void) {
+    for(unsigned pass=0;pass<TCP_REORDER;pass++) {
+        bool progress=false;
+        for(unsigned i=0;i<TCP_REORDER;i++) {
+            if(!tcp.pending[i].valid) continue;
+            if(tcp_contiguous(tcp.pending[i].seq,tcp.pending[i].data,
+                              tcp.pending[i].bytes,tcp.pending[i].fin)) {
+                tcp.pending[i].valid=false;progress=true;
+            }
+        }
+        if(!progress) break;
+    }
+}
+static void tcp_payload(uint32_t seq,const uint8_t *data,unsigned bytes,bool fin) {
+    if(tcp_contiguous(seq,data,bytes,fin)) {
+        tcp_drain_pending();
+    } else if((int32_t)(seq-tcp.ack)>0) {
+        tcp_gaps++;
+        unsigned gap=seq-tcp.ack,window=sizeof(tcp.data)-tcp.used-1;
+        if(bytes<=1460 && gap<window && bytes<=window-gap) {
+            for(unsigned i=0;i<TCP_REORDER;i++) {
+                if(tcp.pending[i].valid) {
+                    if(tcp.pending[i].seq==seq && tcp.pending[i].bytes==bytes &&
+                       tcp.pending[i].fin==fin) { tcp_duplicates++;send_tcp(0x10,NULL,0);return; }
+                    continue;
+                }
+                tcp.pending[i].seq=seq;tcp.pending[i].bytes=bytes;tcp.pending[i].fin=fin;
+                if(bytes) memcpy(tcp.pending[i].data,data,bytes);
+                tcp.pending[i].valid=true;send_tcp(0x10,NULL,0);return;
+            }
+        }
+        tcp_queue_drops++;
+    }
+    /* Cumulative ACK also advertises the gap when the bounded queue fills. */
+    if(bytes || fin) send_tcp(0x10,NULL,0);
 }
 static int skip_name(const uint8_t *p, int n, int pos) {
     for (int k = 0; k < 128 && pos < n; k++) {
@@ -332,15 +400,27 @@ static void receive(uint8_t *p, unsigned n) {
     if (sum(d, len, pseudo))
         return;
     uint8_t flags = d[13];
-    if (flags & 0x10)
-        tcp.remote_ack = be32(d + 8);
+    uint32_t seq = be32(d + 4), ack=be32(d+8);
     if (flags & 4) {
+        if(tcp.state==1 ? (!(flags&0x10) || ack!=tcp.seq+1) : seq!=tcp.ack) {
+            if(tcp.state>=2) send_tcp(0x10,NULL,0);
+            return;
+        }
+        tcp_resets++;transport_error="TCP reset by peer.";
         tcp.state = -1;
         return;
     }
-    uint32_t seq = be32(d + 4);
-    if (tcp.state == 1 && (flags & 0x12) == 0x12 && be32(d + 8) == tcp.seq + 1) {
+    if (tcp.state == 1 && (flags & 0x12) == 0x12 && ack == tcp.seq + 1) {
+        tcp.peer_mss=536; /* IPv4 default when the peer omits MSS. */
+        for(unsigned i=20;i<th;) {
+            unsigned kind=d[i++];if(!kind) break;if(kind==1) continue;
+            if(i>=th || d[i]<2 || d[i]>th-i+1) return;
+            unsigned count=d[i++];
+            if(kind==2 && count==4) { unsigned mss=be16(d+i);if(!mss) return;tcp.peer_mss=mss; }
+            i+=count-2;
+        }
         tcp.seq++;
+        tcp.remote_ack=ack;
         tcp.ack = seq + 1;
         tcp.state = 2;
         send_tcp(0x10, 0, 0);
@@ -348,26 +428,10 @@ static void receive(uint8_t *p, unsigned n) {
     }
     if (tcp.state < 2)
         return;
+    if(!(flags&0x10) || (int32_t)(ack-tcp.seq)>0) {send_tcp(0x10,NULL,0);return;}
+    if((int32_t)(ack-tcp.remote_ack)>0) tcp.remote_ack=ack;
     unsigned bytes = len - th;
-    if (bytes && seq == tcp.ack) {
-        unsigned copy = bytes;
-        if (copy > sizeof(tcp.data) - tcp.used - 1) {
-            send_tcp(0x10, 0, 0);
-            return;
-        }
-        memcpy(tcp.data + tcp.used, d + th, copy);
-        tcp.used += copy;
-        tcp.data[tcp.used] = 0;
-        tcp.ack += bytes;
-        send_tcp(0x10, 0, 0);
-    } else if (bytes)
-        send_tcp(0x10, 0, 0);
-    if ((flags & 1) && seq + bytes == tcp.ack) {
-        tcp.ack++;
-        send_tcp(0x11, 0, 0);
-        tcp.seq++;
-        tcp.state = 3;
-    }
+    tcp_payload(seq,d+th,bytes,(flags&1)!=0);
 }
 static void external_input(void *ctx, uint8_t *p, unsigned n) {
     (void)ctx;
@@ -517,6 +581,17 @@ void net_status(char *out, size_t cap) {
         append(out,"Last connection: ",cap); append(out,connect_error,cap); append(out,"\n",cap);
         char hits[16]; number(hits,dns_cache.hits);
         append(out,"DNS cache hits: ",cap); append(out,hits,cap); append(out,"\n",cap);
+        append(out,"Last transport: ",cap);append(out,transport_error,cap);append(out,"\n",cap);
+        const uint32_t counts[]={tcp_gaps,tcp_duplicates,tcp_queue_drops,tcp_resets,tcp_timeouts};
+        const char *fields[]={"TCP gaps: ","TCP duplicates: ","TCP reorder drops: ","TCP resets: ","TCP timeouts: "};
+        for(unsigned i=0;i<5;i++) {
+            char value[16];number(value,counts[i]);append(out,fields[i],cap);
+            append(out,value,cap);append(out,"\n",cap);
+        }
+        if(failed_http_url[0]) {
+            append(out,"Last HTTP failure: ",cap);append(out,failed_http_url,cap);append(out,"\n",cap);
+            append(out,failed_http_error,cap);append(out,"\n",cap);
+        }
         append(out, "MAC: ", cap);
         for (int i = 0; i < 6; i++) {
             char b[4] = {"0123456789abcdef"[mac[i] >> 4], "0123456789abcdef"[mac[i] & 15],
@@ -799,6 +874,7 @@ static bool ping_impl(const char *host, char *out, size_t cap) {
     return false;
 }
 int stream_connect(const char *host, unsigned port) {
+    static uint32_t connections;
     net_poll();
     connect_error="Network interface has no IPv4 configuration.";
     if (!net_ready)
@@ -812,9 +888,11 @@ int stream_connect(const char *host, unsigned port) {
         return -1;
     memset(&tcp, 0, sizeof(tcp));
     memcpy(tcp.ip, ip, 4);
-    tcp.port = 40000 + ticks % 20000;
+    tcp.port = 40000 + (++connections % 20000);
     tcp.remote_port = port;
-    tcp.seq = ticks * 7919 + 1000;
+    tcp.seq = ticks * 7919 + connections*65537u + 1000;
+    tcp.peer_mss=536;
+    transport_error="TCP connecting.";
     tcp.state = 1;
     for (int attempt = 0; attempt < 3 && tcp.state == 1; attempt++) {
         tcp_syns++;
@@ -831,6 +909,7 @@ int stream_connect(const char *host, unsigned port) {
         return -1;
     }
     connect_error="TCP connected.";
+    transport_error="TCP connected.";
     return 0;
 }
 int stream_write(const void *data, unsigned n) {
@@ -838,8 +917,8 @@ int stream_write(const void *data, unsigned n) {
     unsigned total = 0;
     while (total < n) {
         unsigned chunk = n - total;
-        if (chunk > 1200)
-            chunk = 1200;
+        if (chunk > TCP_MSS) chunk=TCP_MSS;
+        if (chunk > tcp.peer_mss) chunk=tcp.peer_mss;
         uint32_t seq = tcp.seq, next = seq + chunk;
         bool acked = false;
         for (int attempt = 0; attempt < 5 && !acked; attempt++) {
@@ -860,8 +939,10 @@ int stream_write(const void *data, unsigned n) {
                 task_yield();
             }
         }
-        if (!acked)
+        if (!acked) {
+            tcp_timeouts++;transport_error="TCP request ACK timed out.";
             return -1;
+        }
         total += chunk;
     }
     return total;
@@ -874,10 +955,18 @@ int stream_read(void *out, unsigned n) {
          * the last data: deliver what is buffered before honouring the close. */
         if (tcp.used)
             break;
-        if (tcp.state == 3)
+        if (tcp.state == 3) {
+            transport_error="TCP peer closed the connection.";
             return 0;
-        if (tcp.state < 2 || ticks - start > 1500)
+        }
+        if (tcp.state < 2) {
+            if(tcp.state!=-1) transport_error="Network link or IPv4 configuration lost.";
             return -1;
+        }
+        if(ticks-start>1500) {
+            tcp_timeouts++;transport_error="TCP receive timed out waiting for missing data.";
+            return -1;
+        }
         task_yield();
     }
     if (n > tcp.used)
@@ -885,6 +974,7 @@ int stream_read(void *out, unsigned n) {
     memcpy(out, tcp.data, n);
     tcp.used -= n;
     memmove(tcp.data, tcp.data + n, tcp.used);
+    tcp_drain_pending();
     send_tcp(0x10, 0, 0);
     return n;
 }
@@ -1008,7 +1098,7 @@ static int http_once(const char *url, char *out, size_t cap, char *error, size_t
     unsigned secure_error = secure ? tls_error() : 0;
     stream_close();
     if (used + 1 >= sizeof(response)) {
-        append(error, "Response exceeds the 128 KiB document limit.", ecap);
+        append(error, "Response exceeds the 512 KiB transport limit.", ecap);
         return -1;
     }
     char *body = 0;
@@ -1105,6 +1195,7 @@ static int http_once(const char *url, char *out, size_t cap, char *error, size_t
     if ((secure && secure_error == 31) || (!secure && n < 0)) {
         if (!chunked && (content_length < 0 || (unsigned)content_length > available)) {
             append(error, "Transport interrupted; incomplete response rejected.", ecap);
+            append(error," ",ecap);append(error,transport_error,ecap);
             return -1;
         }
     }
@@ -1165,83 +1256,11 @@ static int http_once(const char *url, char *out, size_t cap, char *error, size_t
 /* Builds an absolute address from a base document and a reference that may
  * be absolute, protocol relative, rooted or relative to the base directory. */
 static bool url_resolve(const char *base, const char *reference, char *out, size_t cap) {
-    char ref[4096];
-    size_t n = strlen(reference);
-    if (n >= sizeof(ref))
-        return false;
-    memcpy(ref, reference, n + 1);
-    for (char *p = ref; *p; p++)
-        if (*p == '#') {
-            *p = 0;
-            break;
-        }
-    if (!ref[0]) {
-        n = strlen(base);
-        if (n >= cap)
-            return false;
-        memcpy(out, base, n + 1);
-        return true;
-    }
-    if (!strncmp(ref, "http://", 7) || !strncmp(ref, "https://", 8)) {
-        n = strlen(ref);
-        if (n >= cap)
-            return false;
-        memcpy(out, ref, n + 1);
-        return true;
-    }
-    const char *scheme = !strncmp(base, "https://", 8) ? "https://" : "http://";
-    char authority[256];
-    const char *p = base;
-    if (!strncmp(p, "https://", 8))
-        p += 8;
-    else if (!strncmp(p, "http://", 7))
-        p += 7;
-    size_t i = 0;
-    while (p[i] && p[i] != '/' && p[i] != '?' && i < sizeof(authority) - 1) {
-        authority[i] = p[i];
-        i++;
-    }
-    authority[i] = 0;
-    if (!authority[0])
-        return false;
-    if (ref[0] == '/' && ref[1] == '/') {
-        /* Protocol relative reference keeps the scheme of the base address. */
-        if (strlen(scheme) + strlen(ref) >= cap)
-            return false;
-        strcpy(out, scheme);
-        strcat(out, ref);
-        return true;
-    }
-    if (ref[0] == '/') {
-        if (strlen(scheme) + strlen(authority) + strlen(ref) >= cap)
-            return false;
-        strcpy(out, scheme);
-        strcat(out, authority);
-        strcat(out, ref);
-        return true;
-    }
-    /* Relative reference: replace the last segment of the base path. */
-    char directory[4096];
-    n = strlen(base);
-    if (n >= sizeof(directory))
-        return false;
-    memcpy(directory, base, n + 1);
-    char *slash = 0;
-    for (char *q = directory; *q; q++)
-        if (*q == '/')
-            slash = q;
-    if (slash)
-        slash[1] = 0;
-    else
-        strcat(directory, "/");
-    if (strlen(directory) + strlen(ref) >= cap)
-        return false;
-    strcpy(out, directory);
-    strcat(out, ref);
-    return true;
+    return net_url_resolve(base,reference,out,cap);
 }
 
 static int http_impl(const char *url, char *out, size_t cap, char *error, size_t ecap, bool https_only) {
+    final_http_url[0]=0;
     char current[4096];
     size_t n = strlen(url);
     if (n >= sizeof(current)) {
@@ -1262,8 +1281,10 @@ static int http_impl(const char *url, char *out, size_t cap, char *error, size_t
         int result = http_once(current, out, cap, error, ecap, &status, location, sizeof(location));
         if (result < 0)
             return -1;
-        if (status < 300 || status >= 400)
+        if (status < 300 || status >= 400) {
+            strcpy(final_http_url,current);
             return result;
+        }
         char next[4096];
         if (!url_resolve(current, location, next, sizeof(next))) {
             append(error, "The redirect target could not be resolved.", ecap);
@@ -1275,6 +1296,13 @@ static int http_impl(const char *url, char *out, size_t cap, char *error, size_t
     return -1;
 }
 
+bool net_http_final_url(char *out,size_t cap) {
+    if(!out || !cap) return false;
+    out[0]=0;
+    size_t n=strlen(final_http_url);
+    if(!n || n>=cap) return false;
+    memcpy(out,final_http_url,n+1);return true;
+}
 void net_cancel_owner(uint32_t pid) {
     if (network_owner == pid) {
         network_owner = 0;
@@ -1300,6 +1328,11 @@ int net_http(const char *url, char *out, size_t cap, char *error, size_t ecap) {
     }
     network_owner = task_current()->pid;
     int result = http_impl(url, out, cap, error, ecap, false);
+    if(result<0) {
+        failed_http_url[0]=failed_http_error[0]=0;
+        append(failed_http_url,url,sizeof(failed_http_url));
+        append(failed_http_error,error,sizeof(failed_http_error));
+    }
     network_owner = 0;
     return result;
 }

@@ -84,10 +84,11 @@ static void lookup_reply(const uint8_t *p,unsigned n) {
         put16(reply+38,n-34);put16(reply+40,0);
     } else if(p[23]==1 && p[34]==8) {
         reply[34]=0;put16(reply+36,0);put16(reply+36,sum(reply+34,n-34));
-    } else if(p[23]==6 && n==54 && p[47]==2) {
+    } else if(p[23]==6 && n>=54 && p[47]==2) {
         lookup_syns++;
         memcpy(reply+34,p+36,2);memcpy(reply+36,p+34,2);
         uint32_t seq=(uint32_t)p[38]<<24 | (uint32_t)p[39]<<16 | (uint32_t)p[40]<<8 | p[41];
+        n=54;reply[46]=0x50;
         put32(reply+38,100);put32(reply+42,seq+1);reply[47]=0x12;
         put16(reply+50,0);
         uint8_t pseudo[32]={0};memcpy(pseudo,reply+26,8);

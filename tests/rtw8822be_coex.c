@@ -42,6 +42,20 @@ static void reset(void) {
     dev.phy.hal.current_channel=1;
 }
 int main(void) {
+    reset();
+    assert(!write(0x608,4,0xe400220fu));
+    assert(!receive_mode(true));
+    uint32_t rcr;
+    assert(!read32(0x608,&rcr) && rcr==0xe40022ceu);
+    assert(!receive_mode(false));
+    assert(!read32(0x608,&rcr) && rcr==0xe400220fu);
+    const uint8_t mac[6]={2,3,4,5,6,7},bssid[6]={8,9,10,11,12,13};
+    assert(!set_mac_bssid(mac,bssid));
+    assert(!memcmp(regs+0x610,mac,6) && !memcmp(regs+0x618,bssid,6));
+    assert((regs[0x102]&3)==2 && !read32(0x608,&rcr) && !(rcr&1));
+    assert(!response_rates(11) && !read32(0x440,&rcr) && rcr==0x15f);
+    assert(!response_rates(36) && !read32(0x440,&rcr) && rcr==0x150);
+    fail_reg=0x608;assert(receive_mode(true)==DRV_EIO);
     reset();assert(!wlan_only_init());
     assert(dev.coex_before==0xa55a8888 && dev.coex_after==0xa55a7708);
     assert(indirect[0xa0]==0x1357ffff && indirect[0xa4]==0x2468ffff);

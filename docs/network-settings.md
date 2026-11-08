@@ -16,6 +16,10 @@ TTL expires (at most five minutes), so a browser connection can reuse a name
 just resolved by ping. Zero-TTL answers are not cached. Changing DNS or
 reconnecting invalidates the cache. `net` reports cache hits; `wifidiag`
 separates CCMP format, key, replay and MIC drops for physical-radio diagnosis.
+`net` also reports TCP recovery counters, the last transport error and the last
+failed HTTP URL (including browser resources). See
+[network reliability](network-reliability.md) for regression coverage and the
+physical RTL8822BE validation procedure.
 
 Settings → Network uses the native `wifi_*` API for scanning and connection.
 Three results are displayed per page; the arrow buttons show the remaining

@@ -2,6 +2,7 @@
 #include "settings.h"
 #include "window.h"
 #include "webengine.h"
+#include "web.h"
 #include "motion.h"
 #include "memory.h"
 #include "luna_build_version.h"
@@ -155,64 +156,10 @@ static void html_escape(char *out, size_t cap, const char *text) {
     }
 }
 /* Turns a link target into an absolute address using the current page. */
-static void copy_bounded(char *out, size_t cap, const char *text) {
-    out[0] = 0;
-    size_t n = strlen(text);
-    if (n >= cap)
-        n = cap - 1;
-    memcpy(out, text, n);
-    out[n] = 0;
-}
 static void resolve_link(const char *base, const char *href, char *out, size_t cap) {
-    out[0] = 0;
-    if (!href || !*href || !cap)
-        return;
-    if (!strncmp(href, "http://", 7) || !strncmp(href, "https://", 8) || !strncmp(href, "file://", 7) ||
-        !strncmp(href, "luna://", 7) || !strncmp(href, "about:", 6)) {
-        copy_bounded(out, cap, href);
-        return;
-    }
-    if (href[0] == '/') {
-        const char *scheme = "http://";
-        const char *p = base;
-        if (!strncmp(p, "https://", 8)) {
-            scheme = "https://";
-            p += 8;
-        } else if (!strncmp(p, "http://", 7)) {
-            scheme = "http://";
-            p += 7;
-        }
-        if (href[1] == '/') {
-            /* Protocol relative reference keeps the scheme of the base page. */
-            copy_bounded(out, cap, scheme);
-            if (strlen(out) + strlen(href) + 1 < cap)
-                strcat(out, href);
-            return;
-        }
-        char host[256] = "";
-        size_t n = 0;
-        while (p[n] && p[n] != '/' && p[n] != ':' && n < sizeof(host) - 1) {
-            host[n] = p[n];
-            n++;
-        }
-        host[n] = 0;
-        copy_bounded(out, cap, scheme);
-        if (strlen(out) + strlen(host) + strlen(href) + 1 < cap) {
-            strcat(out, host);
-            strcat(out, href);
-        }
-        return;
-    }
-    copy_bounded(out, cap, base);
-    char *slash = 0;
-    for (char *p = out; *p; p++)
-        if (*p == '/')
-            slash = p;
-    if (slash)
-        slash[1] = 0;
-    if (strlen(out) + strlen(href) + 1 < cap)
-        strcat(out, href);
+    if (!net_url_resolve(base, href, out, cap) && cap) out[0] = 0;
 }
+
 static void browser_error_page(const char *message) {    char escaped[512];
     html_escape(escaped, sizeof(escaped), message);
     char page[3072];
@@ -305,13 +252,13 @@ static void browser_load(const char *url) {
         if (length < 0) {
             browser_error_page(error);
         } else {
-            strcpy(browser_url, request);
+            if(!net_http_final_url(browser_url,sizeof(browser_url))) strcpy(browser_url,request);
             char page_error[256];
             page_error[0] = 0;
-            web_load_document(request, browser_body, (size_t)length, page_error, sizeof(page_error));
+            web_load_document(browser_url, browser_body, (size_t)length, page_error, sizeof(page_error));
             if (page_error[0])
                 browser_error_page(page_error);
-            browser_load_stylesheets(request);
+            browser_load_stylesheets(browser_url);
         }
     }
     browser_loading = false;
