@@ -75,6 +75,7 @@ WebNode *web_node_new(unsigned char type);
 void web_node_append(WebNode *parent, WebNode *child);
 bool web_node_contains(const WebNode *ancestor, const WebNode *node);
 void web_node_detach(WebNode *node);
+WebNode *web_node_clone(const WebNode *source, bool deep);
 bool web_node_insert_before(WebNode *parent, WebNode *child, WebNode *reference);
 const char *web_attr(const WebNode *node, const char *name);
 void web_set_attr(WebNode *node, const char *name, const char *value);
