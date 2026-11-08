@@ -2,13 +2,13 @@
 #include <stdio.h>
 #include <string.h>
 #include "../drivers/wifi_client.h"
-static uint8_t incoming[4][128],sent[4][160];static unsigned rx_len[4],rxhead,rxcount,txcount,txlen[4];
+static uint8_t incoming[4][128],sent[8][160];static unsigned rx_len[4],rxhead,rxcount,txcount,txlen[8];
 static uint32_t clock_ms;
 static bool radio_ready(void *ctx){(void)ctx;return true;}
 static uint32_t now(void *ctx){(void)ctx;return clock_ms;}
 static int tune(void *ctx,uint8_t ch){(void)ctx;assert(ch==6);return 0;}
 static int send_frame(void *ctx,const uint8_t *f,unsigned n,bool mgmt) {
-    (void)ctx;assert(mgmt && txcount<4 && n<sizeof(sent[0]));
+    (void)ctx;assert(mgmt && txcount<8 && n<sizeof(sent[0]));
     memcpy(sent[txcount],f,n);txlen[txcount++]=n;return 0;
 }
 static int recv_frame(void *ctx,uint8_t *out,unsigned cap,unsigned *n) {
@@ -54,6 +54,11 @@ int main(void) {
     rxhead=rxcount=0;
     assert(!wifi_client_start(&client,&r,sta,&ap,"",NULL,0));
     clock_ms+=3001;wifi_client_poll(&client);
-    assert(client.error==-110 && wifi_client_link(&client)==WIFI_IDLE);
+    assert(client.stage==WIFI_CLIENT_AUTH && client.attempts==2);
+    clock_ms+=3001;wifi_client_poll(&client);
+    assert(client.stage==WIFI_CLIENT_AUTH && client.attempts==3);
+    clock_ms+=3001;wifi_client_poll(&client);
+    assert(client.error==-110 && client.failed_stage==WIFI_CLIENT_AUTH &&
+           wifi_client_link(&client)==WIFI_IDLE);
     puts("PASS: native STA auth/association frames, BSSID/AID validation and timeout");
 }
