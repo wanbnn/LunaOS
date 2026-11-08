@@ -12,7 +12,7 @@ char *web_strdup(const char *s);
 char *web_strndup(const char *s, size_t n);
 int web_strcasecmp(const char *a, const char *b);
 
-enum { WEB_ELEMENT, WEB_TEXT, WEB_COMMENT };
+enum { WEB_ELEMENT, WEB_TEXT, WEB_COMMENT, WEB_DOCUMENT_FRAGMENT, WEB_SHADOW_ROOT };
 enum { WEB_NS_HTML = 0, WEB_NS_SVG = 1, WEB_NS_MATHML = 2 };
 #define WEB_AUTO (-9999)
 enum { WEB_DISPLAY_BLOCK, WEB_DISPLAY_INLINE, WEB_DISPLAY_INLINE_BLOCK, WEB_DISPLAY_NONE };
@@ -50,6 +50,8 @@ typedef struct WebNode {
     char *text;
     WebAttr *attrs;
     struct WebNode *parent, *first_child, *last_child, *next, *prev;
+    struct WebNode *template_content, *shadow_root, *host;
+    bool shadow_open;
     WebStyle style;
     bool styled;
     int x, y, w, h;
@@ -78,6 +80,7 @@ void web_node_append(WebNode *parent, WebNode *child);
 bool web_node_contains(const WebNode *ancestor, const WebNode *node);
 void web_node_detach(WebNode *node);
 WebNode *web_node_clone(const WebNode *source, bool deep);
+WebNode *web_attach_shadow(WebNode *host, bool open_mode);
 bool web_node_insert_before(WebNode *parent, WebNode *child, WebNode *reference);
 const char *web_attr(const WebNode *node, const char *name);
 void web_set_attr(WebNode *node, const char *name, const char *value);
