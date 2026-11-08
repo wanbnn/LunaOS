@@ -10,6 +10,7 @@
 
 bool net_ready = true, setup_active;
 uint32_t memory_mb = 256;
+volatile uint32_t frame_clock;
 static Task current = {.pid = 9};
 static DiskInfo info = {.present = true, .supported = true, .sectors = LUNA_IMAGE_BYTES / 512};
 static uint8_t *disk, *original, *wanted;
