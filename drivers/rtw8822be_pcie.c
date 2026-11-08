@@ -12,6 +12,7 @@
 #include "web.h"
 #define RX_COUNT 16u
 #define RX_BYTES 11520u
+#define TX_RING_STRIDE 256u /* independently aligned PCIe TX queue rings */
 static struct {
     bool present, master, powered, ready, emulated;
     const char *stage;
@@ -76,7 +77,7 @@ static void arm_rx(unsigned index) {
 static int allocate_rings(void) {
     int rc=drv_dma_alloc(RX_COUNT*8,256,UINT32_MAX,0,&dev.descriptors);
     if(!rc) rc=drv_dma_alloc(RX_COUNT*RX_BYTES,4096,UINT32_MAX,0,&dev.payload);
-    if(!rc) rc=drv_dma_alloc(8*32,256,UINT32_MAX,0,&dev.txbd);
+    if(!rc) rc=drv_dma_alloc(8*TX_RING_STRIDE,256,UINT32_MAX,0,&dev.txbd);
     if(!rc) rc=drv_dma_alloc(4096+48,256,UINT32_MAX,0,&dev.tx);
     /* Two 2-descriptor TX rings (BE and MGMT), each 2048-byte DMA slot. */
     if(!rc) rc=drv_dma_alloc(4*2048,256,UINT32_MAX,0,&dev.txframes);
@@ -93,7 +94,7 @@ static int rings(void) {
     static const uint32_t counts[]={0,0x1328,0x380,0x38a,0x388,0x386,0x384,0x38c};
     rc=bits(0x303,1,0,0xf7); /* Stop ordinary TX DMA queues. Beacon reserved page remains usable. */
     for(unsigned i=0;i<8 && !rc;i++) {
-        rc=write(bases[i],4,dev.txbd.bus+i*32);
+        rc=write(bases[i],4,dev.txbd.bus+i*TX_RING_STRIDE);
         if(!rc && i) rc=write(counts[i],2,2);
     }
     if(!rc) rc=write(0x382,2,RX_COUNT);
@@ -237,7 +238,7 @@ static int tx_mpdu(void *ctx,const uint8_t *mpdu,unsigned n,bool mgmt) {
     unsigned slot=(mgmt?0:2)+wp;
     uint8_t *pkt=(uint8_t *)dev.txframes.cpu+slot*2048u;
     uint32_t bus=dev.txframes.bus+slot*2048u;
-    uint8_t *bd=(uint8_t *)dev.txbd.cpu+queue*32u+wp*16u;
+    uint8_t *bd=(uint8_t *)dev.txbd.cpu+queue*TX_RING_STRIDE+wp*16u;
     memset(pkt,0,48);
     memcpy(pkt+48,mpdu,n);
     /* 48-byte Realtek TX packet descriptor. Software sequence, legacy rate
