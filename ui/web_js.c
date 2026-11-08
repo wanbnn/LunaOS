@@ -727,9 +727,14 @@ static JSValue js_replace_child(JSContext *ctx, JSValueConst this_val, int argc,
 }
 static JSValue js_get_root_node(JSContext *ctx, JSValueConst this_val, int argc,
                                  JSValueConst *argv) {
-    (void)argc; (void)argv;
     WebNode *node = node_from_value(ctx, this_val);
-    WebNode *root = web_node_root(node);
+    bool composed = false;
+    if (argc > 0 && !JS_IsNull(argv[0]) && !JS_IsUndefined(argv[0])) {
+        JSValue option = JS_GetPropertyStr(ctx, argv[0], "composed");
+        composed = JS_ToBool(ctx, option) > 0;
+        JS_FreeValue(ctx, option);
+    }
+    WebNode *root = composed ? web_node_root_composed(node) : web_node_root(node);
     return root ? make_element(ctx, root) : JS_NULL;
 }
 static JSValue js_remove_element(JSContext *ctx, JSValueConst this_val, int argc,
