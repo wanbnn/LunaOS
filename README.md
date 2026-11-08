@@ -119,6 +119,8 @@ bash tools/bootstrap.sh
 make -j2 all
 ```
 
+A pipeline de [atualizações automáticas](docs/system-updates.md) publica releases com ISO, IMG e o pacote usado em **Configurações → Sistema → Verificar atualizações**.
+
 A build gera as imagens em `dist/`. As fontes incorporadas de musl, QuickJS e BearSSL já estão fixadas no repositório; o processo normal de compilação não depende de baixar esses códigos novamente.
 
 ### Executar em QEMU

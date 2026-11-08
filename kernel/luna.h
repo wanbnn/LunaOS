@@ -134,6 +134,7 @@ void net_poll(void);
 void net_status(char *, size_t);
 bool net_ping(const char *, char *, size_t);
 int net_http(const char *, char *, size_t, char *, size_t);
+int net_https(const char *, char *, size_t, char *, size_t);
 extern bool net_ready;
 void shell_init(void);
 void shell_run(const char *);

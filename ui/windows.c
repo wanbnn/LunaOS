@@ -1,3 +1,5 @@
+#include "wifi.h"
+#include "acpi.h"
 #include "calendar.h"
 #include "install.h"
 #include "settings.h"
@@ -578,7 +580,11 @@ static void draw_topbar(void) {
     text(126, 17, app_name(active_app), 13, 0xe9f3ff);
     text((W - text_width("Your apps. Their own space.", 13)) / 2, 17, "Your apps. Their own space.",
          13, 0xcde1f4);
-    icon(W - 265, 15, ICON_ETHERNET, 24, 0xffffff);
+    char battery[64];
+    acpi_battery_text(battery, sizeof(battery));
+    text(W - 335, 17, battery, 13, 0xffffff);
+    WifiState radio;
+    icon(W - 265, 15, !wifi_state(&radio) ? ICON_WIFI : ICON_ETHERNET, 24, 0xffffff);
     icon(W - 225, 15, ICON_VOLUME, 24, 0xffffff);
     icon(W - 185, 15, ICON_SLIDERS, 24, 0xffffff);
     char clock[48];

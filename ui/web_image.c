@@ -30,3 +30,8 @@ bool web_decode_image(WebNode *node, const unsigned char *data, size_t len) {
     node->image_h = height;
     return true;
 }
+
+/* Bounded decoder shared with the authenticated updater package format. */
+int update_inflate(char *out, int cap, const char *data, int bytes) {
+    return stbi_zlib_decode_buffer(out, cap, data, bytes);
+}

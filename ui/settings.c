@@ -1,4 +1,7 @@
+#include "update.h"
 #include "calendar.h"
+#include "wifi.h"
+#include "acpi.h"
 #include "settings.h"
 #include "window.h"
 #define WHITE 0xf2f7ff
@@ -86,6 +89,70 @@ static void button(int x, int y, int w, const char *s) {
     round_rect(x, y, w, 32, 13, settings_accent(), 210);
     text(x + (w - text_width(s, 13)) / 2, y + 7, s, 13, WHITE);
 }
+static WifiAp network_aps[WIFI_MAX_APS], network_selected;
+static unsigned network_count, network_first;
+static bool network_password;
+static char network_secret[WIFI_MAX_PASSWORD + 1];
+static const char *network_message = "";
+static const char *network_state(void) {
+    WifiState state;
+    if (wifi_state(&state)) return system_text("Wi-Fi unavailable", "Wi-Fi indisponível");
+    if (state.error) return system_text("Connection failed. Retry.", "Conexão falhou. Tente novamente.");
+    if (state.link == WIFI_SCANNING) return system_text("Scanning...", "Buscando...");
+    if (state.link == WIFI_ASSOCIATING) return system_text("Connecting...", "Conectando...");
+    if (state.link == WIFI_ASSOCIATED) return system_text("Waiting for IP...", "Aguardando IP...");
+    if (state.link == WIFI_ONLINE) return system_text("Connected", "Conectado");
+    if (!state.can_connect) return system_text("Passive scan only", "Somente busca passiva");
+    return system_text("Disconnected", "Desconectado");
+}
+static void network_scan(void) {
+    network_password = false;
+    memset(network_secret, 0, sizeof(network_secret));
+    int rc = wifi_scan_start();
+    network_message = rc ? system_text("Scan unavailable or busy. Retry.", "Busca indisponível ou ocupada. Tente novamente.") : "";
+    network_first = 0;
+}
+static void network_connect(void) {
+    int rc = wifi_connect_ap(&network_selected, network_secret);
+    memset(network_secret, 0, sizeof(network_secret));
+    network_password = false;
+    network_message = rc ? system_text("Cannot connect. Check password (8-63 characters) and retry.",
+                                       "Falha ao conectar. Verifique a senha (8-63 caracteres).") : "";
+}
+void settings_network_refresh(void) {
+    if (page == 5 && windows[APP_SETTINGS].open) gui_invalidate_app(APP_SETTINGS);
+    if (controls_open) gui_damage_quick();
+}
+static void network_draw(int a, int b, int width) {
+    WifiState state;
+    bool ready = !wifi_state(&state);
+    row(a, b + 83, width, "Ethernet", net_ready ? system_text("Connected", "Conectado") : system_text("Unavailable", "Indisponível"));
+    row(a, b + 146, width, *wifi_connection_ssid() ? wifi_connection_ssid() : "Wi-Fi", network_state());
+    button(a, b + 215, 150, system_text("Scan networks", "Buscar redes"));
+    if (network_count > 3) {
+        button(a + width - 170, b + 215, 80, "<");
+        button(a + width - 80, b + 215, 80, ">");
+    }
+    if (ready && state.link != WIFI_SCANNING) {
+        unsigned count = 0;
+        if (!wifi_scan_results(network_aps, WIFI_MAX_APS, &count)) network_count = count;
+    }
+    if (network_first >= network_count) network_first = 0;
+    for (unsigned i = 0; i < 3 && network_first + i < network_count; i++) {
+        WifiAp *ap = &network_aps[network_first + i];
+        row(a, b + 258 + i * 55, width, ap->ssid,
+            ap->security == WIFI_OPEN ? system_text("Open", "Aberta") :
+            ap->security == WIFI_WPA2_PSK ? "WPA2" : system_text("Unsupported security", "Segurança incompatível"));
+    }
+    if (!network_count) label(a + 12, b + 277, ready ? system_text("No networks found. Scan again.", "Nenhuma rede encontrada. Busque novamente.") : system_text("No operational Wi-Fi adapter.", "Nenhum adaptador Wi-Fi operacional."));
+    if (network_password) {
+        char masked[WIFI_MAX_PASSWORD + 1];
+        unsigned n = strlen(network_secret);
+        memset(masked, '*', n); masked[n] = 0;
+        row(a, b + 431, width - 125, system_text("Password", "Senha"), masked);
+        button(a + width - 115, b + 442, 115, system_text("Connect", "Conectar"));
+    } else label(a + 8, b + 440, network_message);
+}
 void settings_draw(int x, int y, int w, int h) {
     round_rect(x, y, 176, h, 15, 0x13283e, 95);
     text(x + 17, y + 14, system_text("Settings", "Configurações"), 20, WHITE);
@@ -98,7 +165,7 @@ void settings_draw(int x, int y, int w, int h) {
     button(x + 12, y + h - 46, 152, system_text("Save settings", "Salvar ajustes"));
     int a = x + 198, b = y, width = w - 198;
     text(a, b + 3, page_name(page), 28, WHITE);
-    label(a, b + 47, status);
+    label(a, b + 47, page == 5 ? system_text("Select a Wi-Fi network to connect.", "Selecione uma rede Wi-Fi para conectar.") : status);
     if (page == 7) { time_settings_draw(a,b,width); return; }
     if (page == 0) {
         row(a, b + 83, width, "Layout",
@@ -179,41 +246,19 @@ void settings_draw(int x, int y, int w, int h) {
         label(a + 14, b + 230,
               prefs.language ? "Idioma aplicado aos controles do sistema disponíveis."
                              : "Language applies to available system controls.");
+        char revision[96] = "";
+        append(revision, system_text("Installed commit: ", "Commit instalado: "), sizeof(revision));
+        append(revision, update_revision(), sizeof(revision));
+        label(a + 14, b + 291, revision);
+        button(a + 10, b + 318, 210, system_text("Check for updates", "Verificar atualizações"));
+        label(a + 14, b + 365, *update_status() ? update_status() : system_text("Updates from the official LunaOS repository.", "Atualizações do repositório oficial do LunaOS."));
+        label(a + 14, b + 390, update_detail());
+        if (update_busy()) range(a + 14, b + 420, width - 40, update_progress(), 0, 100);
         label(a + 14, b + 264,
               prefs.developer ? "Diagnostics enabled: composition timing and system details."
                               : "Enable developer mode to show rendering diagnostics.");
     } else {
-        char buf[1024];
-        net_status(buf, sizeof(buf));
-        int yy = b + 86;
-        char *start = buf;
-        while (*start) {
-            char *end = start;
-            while (*end && *end != '\n')
-                end++;
-            char stop = *end;
-            *end = 0;
-            text(a + 14, yy, start, 16, WHITE);
-            yy += 29;
-            if (!stop)
-                break;
-            start = end + 1;
-        }
-        wireless_status(buf, sizeof(buf));
-        char *line_start = buf;
-        int line_y = b + 270;
-        while (*line_start) {
-            char *end = line_start;
-            while (*end && *end != '\n')
-                end++;
-            char stop = *end;
-            *end = 0;
-            label(a + 14, line_y, line_start);
-            line_y += 24;
-            if (!stop)
-                break;
-            line_start = end + 1;
-        }
+        network_draw(a, b, width);
     }
     if (page == 2 && resolution_open) {
         int yy = b + 142;
@@ -228,6 +273,17 @@ void settings_draw(int x, int y, int w, int h) {
 void settings_key(int key) {
     if(page==7){time_settings_key(key);return;}
     int code = key & 0xfff;
+    if (page == 5 && network_password) {
+        unsigned n = strlen(network_secret);
+        if (code == 27) { network_password = false; memset(network_secret, 0, sizeof(network_secret)); }
+        else if (code == 10) network_connect();
+        else if (code == 8 && n) network_secret[n - 1] = 0;
+        else if (code >= 32 && code < 127 && n < WIFI_MAX_PASSWORD) {
+            network_secret[n] = code; network_secret[n + 1] = 0;
+        }
+        gui_invalidate_app(APP_SETTINGS);
+        return;
+    }
     if (!path_edit)
         return;
     int n = strlen(prefs.wallpaper_path);
@@ -287,7 +343,7 @@ void settings_click(int x, int y, int width, int height) {
     }
     if (x < 176) {
         if (y >= 62 && y < 438)
-            { page = (y - 62) / 47; if(page==7)time_settings_load(); }
+            { page = (y - 62) / 47; if(page==7)time_settings_load(); if(page==5)network_scan(); else { network_password=false; memset(network_secret,0,sizeof(network_secret)); } }
         if (y >= height - 46) {
             bool ok = settings_save();
             strcpy(status, ok ? "Settings saved to disk."
@@ -298,7 +354,27 @@ void settings_click(int x, int y, int width, int height) {
     }
     if(page==7){time_settings_click(x-198,y);return;}
     int a = x - 198, w = width - 198;
+    if (page == 5 && a >= 0 && a < w) {
+        if (y >= 215 && y < 247) {
+            if (a < 150) network_scan();
+            else if (a >= w - 80 && network_first + 3 < network_count) network_first += 3;
+            else if (a >= w - 170 && a < w - 90 && network_first >= 3) network_first -= 3;
+        } else if (y >= 258 && y < 423) {
+            unsigned i = network_first + (y - 258) / 55;
+            WifiState state;
+            if (i < network_count && !wifi_state(&state) && state.can_connect && network_aps[i].security != WIFI_OTHER) {
+                network_selected = network_aps[i];
+                memset(network_secret, 0, sizeof(network_secret));
+                network_password = network_selected.security == WIFI_WPA2_PSK;
+                network_message = "";
+                if (!network_password) network_connect();
+            }
+        } else if (y >= 442 && y < 474 && a >= w - 115 && network_password) network_connect();
+        gui_invalidate_app(APP_SETTINGS);
+        return;
+    }
     if (page == 6) {
+        if (y >= 318 && y < 350 && a >= 10 && a < 220) { update_run(); return; }
         if (y >= 83 && y < 138)
             prefs.language = !prefs.language;
         if (y >= 150 && y < 205)
@@ -370,10 +446,14 @@ void settings_drag(int x, int y, int width, int height) {
 void quick_draw(void) {
     gfx_set_origin(W - GFX_BOOT_W, 0);
     glass(688, 58, 316, 448, 25, 1);
-    text(710, 78, "Control Center", 20, WHITE);
+    text(710, 78, system_text("Control Center", "Central de controle"), 20, WHITE);
+    char battery[64];
+    acpi_battery_text(battery, sizeof(battery));
+    text(710, 103, battery, 13, MUTED);
     row(706, 122, 278, "Ethernet", net_ready ? "Connected" : "Unavailable");
     icon(716, 195, ICON_WIFI, 24, MUTED);
-    text(753, 199, "Wi-Fi: not implemented", 13, MUTED);
+    text(753, 199, *wifi_connection_ssid() ? wifi_connection_ssid() : "Wi-Fi", 13, WHITE);
+    text(753, 218, network_state(), 13, MUTED);
     icon(716, 237, ICON_BLUETOOTH, 24, MUTED);
     text(753, 241, "Bluetooth: not implemented", 13, MUTED);
     text(710, 291, "Brightness", 16, WHITE);
@@ -386,6 +466,13 @@ bool quick_click(int x, int y) {
     x -= W - GFX_BOOT_W;
     if (!in(x, y, 688, 58, 316, 448))
         return false;
+    if (in(x, y, 706, 182, 278, 54)) {
+        page = 5;
+        network_scan();
+        controls_open = false;
+        gui_open(APP_SETTINGS);
+        gui_invalidate_app(APP_SETTINGS);
+    }
     if (y >= 452 && y < 486) {
         controls_open = false;
         gui_open(APP_SETTINGS);
@@ -400,7 +487,7 @@ void quick_pointer(int x, int y, bool pressed, bool released) {
         return;
     }
     if (pressed) {
-        if (!quick_click(x, y)) {
+        if (!quick_click(x + W - GFX_BOOT_W, y)) {
             controls_open = false;
             gui_damage_quick();
             return;

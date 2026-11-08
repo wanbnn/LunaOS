@@ -40,7 +40,8 @@ FORCE:
 build/luna_build_version.h: FORCE
 	@mkdir -p build
 	$(PYTHON) tools/build-version.py
-build/ui/desktop.o: build/luna_build_version.h
+build/ui/desktop.o build/kernel/update.o: build/luna_build_version.h
+build/kernel/update_format.o: CFLAGS += -Ithird_party/bearssl/inc
 
 third_party/musl/config.mak: third_party/musl/configure
 	cd third_party/musl && ./configure --target=i386 --prefix=/luna CC='gcc -m32' CFLAGS='-O2 -fno-pie -fno-stack-protector' --disable-shared
@@ -330,3 +331,9 @@ test-rtw8822be-coex:
 	@mkdir -p build
 	$(CC) -std=c11 -O2 -ffunction-sections -fdata-sections -Wall -Wextra -Werror -Ikernel tests/rtw8822be_coex.c -Wl,--gc-sections -o build/rtw8822be-coex-test
 	./build/rtw8822be-coex-test
+
+.PHONY: test-update
+test-update: all build/host-bearssl/hash/sha2small.o build/host-bearssl/codec/enc32be.o build/host-bearssl/codec/dec32be.o
+	$(PYTHON) tests/updatepack.py
+	$(CC) -std=c11 -O2 -ffunction-sections -fdata-sections -Wall -Wextra -Werror -Ikernel -Iui -Itests/update_mock -Ithird_party/bearssl/inc kernel/update.c kernel/update_format.c ui/web_image.c tests/update.c build/host-bearssl/hash/sha2small.o build/host-bearssl/codec/enc32be.o build/host-bearssl/codec/dec32be.o -Wl,--gc-sections -o build/update-test-engine
+	./build/update-test-engine

@@ -12,10 +12,13 @@ def git(*args):
 
 
 try:
-    revision = git('rev-parse', '--short=12', 'HEAD').decode().strip()
+    full_revision = git('rev-parse', 'HEAD').decode().strip()
+    revision = full_revision[:12]
+    dirty = False
     changes = git('diff', 'HEAD', '--binary', '--no-ext-diff')
     untracked = sorted(filter(None, git('ls-files', '--others', '--exclude-standard', '-z').split(b'\0')))
     if changes or untracked:
+        dirty = True
         digest = hashlib.sha256(changes)
         for name in untracked:
             path = root / name.decode()
@@ -24,10 +27,13 @@ try:
                 digest.update(name + b'\0' + str(len(data)).encode() + b'\0' + data)
         revision += '-local-' + digest.hexdigest()[:10]
 except (subprocess.CalledProcessError, FileNotFoundError):
-    revision = 'unknown'
+    revision = full_revision = 'unknown'
+    dirty = True
 
 header = ('#ifndef LUNA_BUILD_VERSION_H\n#define LUNA_BUILD_VERSION_H\n'
-          f'#define LUNA_BUILD_COMMIT "{revision}"\n#endif\n')
+          f'#define LUNA_BUILD_COMMIT "{revision}"\n'
+          f'#define LUNA_BUILD_FULL_COMMIT "{full_revision}"\n'
+          f'#define LUNA_BUILD_DIRTY {int(dirty)}\n#endif\n')
 output = root / 'build/luna_build_version.h'
 output.parent.mkdir(exist_ok=True)
 if not output.exists() or output.read_text() != header:

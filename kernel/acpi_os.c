@@ -3,7 +3,7 @@
 #include "memory.h"
 #include <uacpi/kernel_api.h>
 
-/* Single CPU, boot-time AML only. SCI/GPE ownership is deliberately compiled
+/* Single CPU, serialized AML queries. SCI/GPE ownership is deliberately compiled
  * out; native device drivers retain their interrupts and PCI ownership. */
 static bool checksum(const uint8_t *p,unsigned len) {
     uint8_t sum=0;while(len--)sum+=*p++;return sum==0;

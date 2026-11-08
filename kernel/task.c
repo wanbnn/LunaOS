@@ -1,3 +1,4 @@
+#include "update.h"
 #include "task.h"
 #include "driver.h"
 #include "heap.h"
@@ -231,6 +232,7 @@ static void finish(Task *t, unsigned code) {
     gui_damage_all();
 }
 bool task_kill(uint32_t pid) {
+    if (update_busy() && update_owner() == pid) return false;
     Task *t = task_by_pid(pid);
     if (!t || t->system || t->state == TASK_EXITED || t->state == TASK_UNUSED)
         return false;

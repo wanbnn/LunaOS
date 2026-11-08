@@ -825,7 +825,7 @@ static int http_once(const char *url, char *out, size_t cap, char *error, size_t
         append(error, "Expected an http:// or https:// address.", ecap);
         return -1;
     }
-    char host[224], path[768];
+    char host[224], path[4096];
     const char *s = url + (secure ? 8 : 7);
     unsigned k = 0;
     while (*s && *s != '/' && *s != ':' && *s != '?' && *s != '#') {
@@ -879,7 +879,7 @@ static int http_once(const char *url, char *out, size_t cap, char *error, size_t
         stream_close();
         return -1;
     }
-    char request[1200] = "GET ";
+    char request[4608] = "GET ";
     append(request, path, sizeof(request));
     append(request, " HTTP/1.0\r\nHost: ", sizeof(request));
     append(request, host, sizeof(request));
@@ -1072,7 +1072,7 @@ static int http_once(const char *url, char *out, size_t cap, char *error, size_t
 /* Builds an absolute address from a base document and a reference that may
  * be absolute, protocol relative, rooted or relative to the base directory. */
 static bool url_resolve(const char *base, const char *reference, char *out, size_t cap) {
-    char ref[512];
+    char ref[4096];
     size_t n = strlen(reference);
     if (n >= sizeof(ref))
         return false;
@@ -1128,7 +1128,7 @@ static bool url_resolve(const char *base, const char *reference, char *out, size
         return true;
     }
     /* Relative reference: replace the last segment of the base path. */
-    char directory[512];
+    char directory[4096];
     n = strlen(base);
     if (n >= sizeof(directory))
         return false;
@@ -1148,8 +1148,8 @@ static bool url_resolve(const char *base, const char *reference, char *out, size
     return true;
 }
 
-static int http_impl(const char *url, char *out, size_t cap, char *error, size_t ecap) {
-    char current[512];
+static int http_impl(const char *url, char *out, size_t cap, char *error, size_t ecap, bool https_only) {
+    char current[4096];
     size_t n = strlen(url);
     if (n >= sizeof(current)) {
         out[0] = 0;
@@ -1159,15 +1159,19 @@ static int http_impl(const char *url, char *out, size_t cap, char *error, size_t
     }
     memcpy(current, url, n + 1);
     for (int hop = 0; hop < 8; hop++) {
+        if (https_only && strncmp(current, "https://", 8)) {
+            append(error, "HTTPS downgrade refused.", ecap);
+            return -1;
+        }
         int status = 0;
-        char location[512];
+        char location[4096];
         location[0] = 0;
         int result = http_once(current, out, cap, error, ecap, &status, location, sizeof(location));
         if (result < 0)
             return -1;
         if (status < 300 || status >= 400)
             return result;
-        char next[512];
+        char next[4096];
         if (!url_resolve(current, location, next, sizeof(next))) {
             append(error, "The redirect target could not be resolved.", ecap);
             return -1;
@@ -1202,7 +1206,18 @@ int net_http(const char *url, char *out, size_t cap, char *error, size_t ecap) {
         return -1;
     }
     network_owner = task_current()->pid;
-    int result = http_impl(url, out, cap, error, ecap);
+    int result = http_impl(url, out, cap, error, ecap, false);
+    network_owner = 0;
+    return result;
+}
+
+/* Updater transport authenticates every redirect and never permits HTTP. */
+int net_https(const char *url, char *out, size_t cap, char *error, size_t ecap) {
+    if (!cap || !ecap) return -1;
+    out[0] = error[0] = 0;
+    if (network_owner) { append(error, "Network service busy.", ecap); return -1; }
+    network_owner = task_current()->pid;
+    int result = http_impl(url, out, cap, error, ecap, true);
     network_owner = 0;
     return result;
 }

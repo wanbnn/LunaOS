@@ -88,6 +88,9 @@ void kmain(void) {
         if (ticks - last_clock >= 100) {
             last_clock = ticks;
             calendar_refresh();
+            acpi_battery_poll();
+            settings_network_refresh();
+            gui_damage(W - 340, 8, 330, 37);
             gui_invalidate_app(APP_TASKS);
             gui_damage(W - 136, 8, 130, 28); /* the clock in the top bar */
         }

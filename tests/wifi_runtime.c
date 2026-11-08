@@ -38,6 +38,7 @@ int main(void) {
     assert(wifi_channel_band(177)==WIFI_BAND_5GHZ);
     assert(wifi_channel_band(0)==WIFI_BAND_UNKNOWN);
     assert(wifi_state(&s) == -95 && s.link == WIFI_DOWN);
+    assert(!*wifi_connection_ssid());
     assert(wifi_scan_start() == -95);
     assert(wifi_scan_results(aps, WIFI_MAX_APS, &n) == -95 && n == 0);
     assert(wifi_register_driver(&ops, &starts) == 0);
@@ -45,6 +46,12 @@ int main(void) {
     assert(wifi_scan_results(aps, WIFI_MAX_APS, &n) == 0 && n == 1);
     assert(wifi_connect_ap(aps, "bad") == -22);
     assert(wifi_connect_ap(aps, "12345678") == 0 && connects == 1);
+    link = WIFI_ASSOCIATING;
+    assert(!strcmp(wifi_connection_ssid(), "test-ap"));
+    link = WIFI_ONLINE;
+    assert(!strcmp(wifi_connection_ssid(), "test-ap"));
+    link = WIFI_IDLE;
+    assert(!*wifi_connection_ssid());
     WifiAp bad = aps[0];
     bad.channel = 15;
     assert(wifi_connect_ap(&bad, "12345678")==-22);
@@ -62,5 +69,6 @@ int main(void) {
     wifi_poll();
     wifi_unregister_driver(&ops);
     assert(wifi_scan_start() == -95);
+    assert(!*wifi_connection_ssid());
     return 0;
 }

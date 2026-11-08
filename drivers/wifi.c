@@ -5,6 +5,11 @@
 #define WIFI_EBUSY (-16)
 #define WIFI_EINVAL (-22)
 #define WIFI_ENOTSUP (-95)
+static char connection_ssid[WIFI_MAX_SSID + 1];
+const char *wifi_connection_ssid(void) {
+    WifiState s;
+    return !wifi_state(&s) && s.link >= WIFI_ASSOCIATING ? connection_ssid : "";
+}
 static const WifiDriverOps *backend;
 static void *backend_context;
 unsigned wifi_channel_frequency(uint8_t channel) {
@@ -46,7 +51,7 @@ int wifi_register_driver(const WifiDriverOps *ops, void *context) {
     return 0;
 }
 void wifi_unregister_driver(const WifiDriverOps *ops) {
-    if (backend == ops) { backend = 0; backend_context = 0; }
+    if (backend == ops) { backend = 0; backend_context = 0; connection_ssid[0] = 0; }
 }
 int wifi_state(WifiState *out) {
     if (!out) return WIFI_EINVAL;
@@ -94,8 +99,12 @@ int wifi_connect_ap(const WifiAp *ap, const char *password) {
     if (rc) return rc;
     if (!s.can_connect) return WIFI_ENOTSUP;
     if (s.link == WIFI_SCANNING || s.link == WIFI_ASSOCIATING) return WIFI_EBUSY;
-    return backend->connect(backend_context, ap,
-                            ap->security == WIFI_OPEN ? "" : password);
+    rc = backend->connect(backend_context, ap,
+                          ap->security == WIFI_OPEN ? "" : password);
+    if (!rc) {
+        for (unsigned i = 0; i <= ap->ssid_len; i++) connection_ssid[i] = ap->ssid[i];
+    }
+    return rc;
 }
 void wifi_poll(void) {
     if (backend && backend->poll) backend->poll(backend_context);

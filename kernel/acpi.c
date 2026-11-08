@@ -5,6 +5,7 @@
 #include <uacpi/utilities.h>
 
 static char status_text[2048];
+static bool battery_namespace;
 static bool attempted;
 static unsigned found;
 void acpi_storage_status(char *out,size_t cap){append(out,status_text,cap);}
@@ -94,6 +95,7 @@ void acpi_storage_init(void) {
     if(rc){record_error("ACPI storage: table initialization failed: ",rc);return;}
     rc=uacpi_namespace_load();
     if(rc){record_error("ACPI storage: AML namespace failed: ",rc);return;}
+    battery_namespace = true;
     /* Evaluate only storage devices. No global _INI, _PIC, GPE/SCI takeover. */
     const char *const ids[]={"80860F14","80865ACC","AMDI0040","AMDI0041","PNP0D40",0};
     rc=uacpi_find_devices_at(uacpi_namespace_root(),ids,device,0);
@@ -101,4 +103,60 @@ void acpi_storage_init(void) {
     uacpi_status work=uacpi_kernel_wait_for_work_completion();
     if(work)record_error("ACPI storage: deferred work failed: ",work);
     if(!found)record("ACPI storage: no supported present SDHCI device in namespace\n");
+}
+
+/* Aggregate capacities only when firmware uses the same units for every pack. */
+static uint64_t battery_full, battery_remaining;
+static unsigned battery_units, battery_packs;
+static bool battery_charging, battery_invalid;
+static char battery_text[64];
+static bool battery_package(uacpi_namespace_node *node, const char *method,
+                            unsigned offset, uint64_t *values, unsigned count) {
+    uacpi_object *object = 0;
+    if (uacpi_eval_simple(node, method, &object)) return false;
+    uacpi_object_array array;
+    bool ok = !uacpi_object_get_package(object, &array) && array.count >= offset + count;
+    for (unsigned i = 0; ok && i < count; i++) {
+        uacpi_u64 v;
+        ok = !uacpi_object_get_integer(array.objects[offset + i], &v) && v <= UINT32_MAX;
+        if (ok) values[i] = v;
+    }
+    uacpi_object_unref(object);
+    return ok;
+}
+static uacpi_iteration_decision battery_device(void *user, uacpi_namespace_node *node,
+                                              uacpi_u32 depth) {
+    (void)user; (void)depth;
+    uint64_t info[3], state[3];
+    /* _BIX adds a revision before the _BIF capacity fields. */
+    if (!battery_package(node, "_BIX", 1, info, 3) &&
+        !battery_package(node, "_BIF", 0, info, 3)) return UACPI_ITERATION_DECISION_CONTINUE;
+    if (!battery_package(node, "_BST", 0, state, 3) || !info[2] || info[2] == UINT32_MAX || state[0] == UINT32_MAX ||
+        state[2] == UINT32_MAX || info[0] > 1)
+        return UACPI_ITERATION_DECISION_CONTINUE;
+    if (battery_packs && battery_units != info[0]) battery_invalid = true;
+    battery_units = info[0]; battery_packs++;
+    battery_full += info[2]; battery_remaining += state[2];
+    battery_charging |= (state[0] & 2) != 0;
+    return UACPI_ITERATION_DECISION_CONTINUE;
+}
+void acpi_battery_poll(void) {
+    static uint32_t next;
+    if (!battery_namespace || (int32_t)(frame_clock - next) < 0) return;
+    next = frame_clock + 10000;
+    battery_full = battery_remaining = battery_packs = 0;
+    battery_invalid = battery_charging = false;
+    const char *const ids[] = {"PNP0C0A", 0};
+    uacpi_find_devices_at(uacpi_namespace_root(), ids, battery_device, 0);
+    battery_text[0] = 0;
+    if (!battery_packs || battery_invalid || !battery_full) return;
+    uint64_t percent = battery_remaining * 100 / battery_full;
+    if (percent > 100) percent = 100;
+    number(battery_text, (unsigned)percent);
+    append(battery_text, battery_charging ? "% +" : "%", sizeof(battery_text));
+}
+void acpi_battery_text(char *out, size_t cap) {
+    if (!cap) return;
+    out[0] = 0;
+    append(out, battery_text, cap);
 }

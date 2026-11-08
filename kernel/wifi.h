@@ -44,4 +44,5 @@ int wifi_scan_results(WifiAp *out, unsigned cap, unsigned *count);
 int wifi_connect_ap(const WifiAp *ap, const char *password);
 int wifi_state(WifiState *out);
 void wifi_poll(void);
+const char *wifi_connection_ssid(void);
 #endif

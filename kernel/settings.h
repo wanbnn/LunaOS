@@ -10,6 +10,7 @@ typedef struct {
 } Preferences;
 extern Preferences prefs;
 void settings_init(void);
+void settings_network_refresh(void);
 bool settings_save(void);
 bool settings_write(void);
 void settings_changed(void);
