@@ -2,10 +2,13 @@
 #include "luna.h"
 #include "notices.h"
 #include "heap.h"
-File files[MAX_FILES];
+#include "fs_volume.h"
+File *files;
+int fs_file_capacity;
 char cwd[PATH_CAP] = "/home/luna";
 bool fs_dirty;
-static File staging[MAX_FILES];
+static FileState staging;
+static size_t data_limit = (4096u - 1u) * 512u;
 static uint32_t generation;
 bool fs_path(const char *in, char *out) {
     char raw[256];
@@ -53,18 +56,16 @@ File *fs_find(const char *path) {
     char p[PATH_CAP];
     if (!fs_path(path, p))
         return 0;
-    for (int i = 0; i < MAX_FILES; i++)
+    for (int i = 0; i < fs_file_capacity; i++)
         if (files[i].used && !strcmp(files[i].path, p))
             return &files[i];
     return 0;
 }
-/* LunaFS2: bounded, binary-safe copy-on-write snapshots. Unlike v1, the
- * in-memory directory contains dynamic buffers; the disk snapshot serializes
- * only bytes belonging to live files. The image has two 2 MiB slots, and the
- * archive must fit in one slot. This is a volume budget, not a per-file 8K cap. */
+/* Snapshot records retain the LunaFS2 layout. Directory storage and the
+ * data volume grow independently of the historical 64-entry/2 MiB defaults. */
 #define FS_SLOT_START 8192u
 #define FS_SLOT_SECTORS 4096u
-#define FS_DATA_BYTES ((FS_SLOT_SECTORS-1u)*512u)
+#define LEGACY_FILES 64u
 #define FS_V1_FILE_BYTES (PATH_CAP+12u+8192u)
 typedef struct {
     char magic[8];
@@ -85,105 +86,180 @@ _Static_assert(sizeof(Snapshot)==512, "LunaFS header");
 _Static_assert(sizeof(Record)==140, "LunaFS2 entry layout");
 _Static_assert(sizeof(LegacyFile)==FS_V1_FILE_BYTES, "LunaFS1 legacy entry layout");
 
-static void drop_state(File *state) {
-    for (unsigned i=0; i<MAX_FILES; i++) {
-        if (state[i].data) heap_release(state[i].data);
-        memset(&state[i],0,sizeof(state[i]));
+static void drop_state(FileState *state) {
+    for (int i = 0; i < state->capacity; i++) {
+        if (state->files[i].data)
+            heap_release(state->files[i].data);
     }
+    if (state->files)
+        heap_release(state->files);
+    *state = (FileState){0};
+}
+static bool reserve_state(FileState *state, unsigned required) {
+    if (required <= (unsigned)state->capacity)
+        return true;
+    unsigned capacity = state->capacity ? (unsigned)state->capacity : LEGACY_FILES;
+    while (capacity < required) {
+        if (capacity > UINT32_MAX / sizeof(File) / 2u)
+            return false;
+        capacity *= 2u;
+    }
+    File *next = heap_allocate_owned(capacity * sizeof(File), 1);
+    if (!next)
+        return false;
+    memset(next, 0, capacity * sizeof(File));
+    if (state->files) {
+        memcpy(next, state->files, state->capacity * sizeof(File));
+        heap_release(state->files);
+    }
+    state->files = next;
+    state->capacity = (int)capacity;
+    return true;
+}
+static bool reserve_files(unsigned required) {
+    FileState live = {files, fs_file_capacity};
+    if (!reserve_state(&live, required))
+        return false;
+    files = live.files;
+    fs_file_capacity = live.capacity;
+    return true;
 }
 static char *allocate_data(size_t bytes) {
-    if (bytes >= FS_DATA_BYTES) return 0;
-    return heap_allocate_owned(bytes+1u,1);
+    if (bytes == SIZE_MAX)
+        return 0;
+    return heap_allocate_owned(bytes + 1u, 1);
 }
 static bool has_nul(const char *s, size_t size) {
-    for (size_t i=0; i<size; i++) if (!s[i]) return true;
+    for (size_t i = 0; i < size; i++)
+        if (!s[i])
+            return true;
     return false;
 }
-static bool valid_state(const File *state) {
+static bool valid_state(const File *state, int capacity, size_t limit) {
     bool root = false;
-    for (unsigned i=0; i<MAX_FILES; i++) {
-        const File *f=&state[i];
-        if (!f->used) continue;
-        if (f->used != 1 || f->dir>1 || f->size>FS_DATA_BYTES ||
-            !has_nul(f->path,PATH_CAP) || f->path[0]!='/') return false;
-        if (f->dir && (f->size || f->data)) return false;
-        if (!f->dir && (!f->data || f->data[f->size])) return false;
-        if (!strcmp(f->path,"/")) {
-            if (root || !f->dir) return false;
-            root=true;
+    for (unsigned i = 0; i < (unsigned)capacity; i++) {
+        const File *f = &state[i];
+        if (!f->used)
+            continue;
+        if (f->used != 1 || f->dir > 1 || f->size > limit || !has_nul(f->path, PATH_CAP) ||
+            f->path[0] != '/')
+            return false;
+        if (f->dir && (f->size || f->data))
+            return false;
+        if (!f->dir && (!f->data || f->data[f->size]))
+            return false;
+        if (!strcmp(f->path, "/")) {
+            if (root || !f->dir)
+                return false;
+            root = true;
         }
-        for (unsigned j=0; j<i; j++)
-            if (state[j].used && !strcmp(f->path,state[j].path)) return false;
+        for (unsigned j = 0; j < i; j++)
+            if (state[j].used && !strcmp(f->path, state[j].path))
+                return false;
     }
     return root;
 }
-static size_t state_bytes(const File *state, uint32_t *entries) {
-    size_t total=0;
-    uint32_t count=0;
-    for (unsigned i=0; i<MAX_FILES; i++) if (state[i].used) {
-        size_t additional=sizeof(Record)+(state[i].dir ? 0u : state[i].size);
-        if (additional>FS_DATA_BYTES-total) return 0;
-        total+=additional;
-        count++;
-    }
-    if(entries)*entries=count;
+static size_t state_bytes(const File *state, int capacity, size_t limit, uint32_t *entries) {
+    size_t total = 0;
+    uint32_t count = 0;
+    for (unsigned i = 0; i < (unsigned)capacity; i++)
+        if (state[i].used) {
+            size_t bytes = state[i].dir ? 0u : state[i].size;
+            if (limit < sizeof(Record) || bytes > limit - sizeof(Record))
+                return 0;
+            size_t additional = sizeof(Record) + bytes;
+            if (additional > limit - total)
+                return 0;
+            total += additional;
+            count++;
+        }
+    if (entries)
+        *entries = count;
     return total;
 }
-int fs_clone(File *dest, const File *source) {
-    if (!dest || !source || dest==source) return -1;
-    /* Destination is an empty state or a previously discarded backup. */
-    memset(dest,0,MAX_FILES*sizeof(File));
-    for (unsigned i=0; i<MAX_FILES; i++) {
-        dest[i]=source[i];
-        dest[i].data=0;
+int fs_clone(FileState *dest, const File *source) {
+    if (!dest || source != files || dest->files == files)
+        return -1;
+    drop_state(dest);
+    if (!reserve_state(dest, (unsigned)fs_file_capacity))
+        return -1;
+    for (int i = 0; i < fs_file_capacity; i++) {
+        dest->files[i] = source[i];
+        dest->files[i].data = 0;
         if (source[i].used && !source[i].dir) {
-            dest[i].data=allocate_data(source[i].size);
-            if (!dest[i].data) { drop_state(dest);return -1; }
-            memcpy(dest[i].data,source[i].data,source[i].size+1u);
+            dest->files[i].data = allocate_data(source[i].size);
+            if (!dest->files[i].data) {
+                drop_state(dest);
+                return -1;
+            }
+            memcpy(dest->files[i].data, source[i].data, source[i].size + 1u);
         }
     }
     return 0;
 }
-void fs_discard_state(File *state) { if(state)drop_state(state); }
-void fs_restore_state(File *backup) {
-    if (!backup) return;
-    drop_state(files);
-    memcpy(files,backup,sizeof(files));
-    memset(backup,0,sizeof(files)); /* Ownership moved, never free twice. */
-    fs_dirty=true;
+void fs_discard_state(FileState *state) {
+    if (state)
+        drop_state(state);
+}
+void fs_restore_state(FileState *backup) {
+    if (!backup || !backup->files)
+        return;
+    FileState live = {files, fs_file_capacity};
+    drop_state(&live);
+    files = backup->files;
+    fs_file_capacity = backup->capacity;
+    *backup = (FileState){0};
+    fs_dirty = true;
 }
 
 int fs_create(const char *path, bool dir) {
-    char p[PATH_CAP],parent[PATH_CAP];
-    if (!fs_path(path,p))return -1;
-    if(fs_find(p))return -2;
-    strcpy(parent,p);
-    char *last=0;
-    for(char *s=parent;*s;s++)if(*s=='/')last=s;
-    if(last==parent)parent[1]=0;
-    else if(last)*last=0;
-    File *parent_file=fs_find(parent);
-    if(!parent_file || !parent_file->dir)return -3;
-    if(state_bytes(files,0)+sizeof(Record)>FS_DATA_BYTES)return -4;
-    for(unsigned i=0;i<MAX_FILES;i++)if(!files[i].used) {
-        char *buffer=dir?0:allocate_data(0);
-        if(!dir && !buffer)return -4;
-        memset(&files[i],0,sizeof(File));
-        strcpy(files[i].path,p);
-        files[i].used=1;
-        files[i].dir=dir;
-        files[i].data=buffer;
-        if(buffer)buffer[0]=0;
-        fs_dirty=true;
-        return 0;
-    }
+    char p[PATH_CAP], parent[PATH_CAP];
+    if (!fs_path(path, p))
+        return -1;
+    if (fs_find(p))
+        return -2;
+    strcpy(parent, p);
+    char *last = 0;
+    for (char *s = parent; *s; s++)
+        if (*s == '/')
+            last = s;
+    if (last == parent)
+        parent[1] = 0;
+    else if (last)
+        *last = 0;
+    File *parent_file = fs_find(parent);
+    if (!parent_file || !parent_file->dir)
+        return -3;
+    size_t used = state_bytes(files, fs_file_capacity, data_limit, 0);
+    if (data_limit < sizeof(Record) || used > data_limit - sizeof(Record))
+        return -4;
+    unsigned slot = 0;
+    while (slot < (unsigned)fs_file_capacity && files[slot].used)
+        slot++;
+    if (slot == (unsigned)fs_file_capacity && !reserve_files(slot + 1u))
+        return -4;
+    for (unsigned i = slot; i < (unsigned)fs_file_capacity; i++)
+        if (!files[i].used) {
+            char *buffer = dir ? 0 : allocate_data(0);
+            if (!dir && !buffer)
+                return -4;
+            memset(&files[i], 0, sizeof(File));
+            strcpy(files[i].path, p);
+            files[i].used = 1;
+            files[i].dir = dir;
+            files[i].data = buffer;
+            if (buffer)
+                buffer[0] = 0;
+            fs_dirty = true;
+            return 0;
+        }
     return -4;
 }
 int fs_remove(const char *path) {
     File *f=fs_find(path);
     if(!f || !strcmp(f->path,"/") || !strcmp(f->path,cwd))return -1;
     size_t n=strlen(f->path);
-    for(unsigned i=0;i<MAX_FILES;i++)
+    for(int i=0;i<fs_file_capacity;i++)
         if(files[i].used && !strncmp(files[i].path,f->path,n) && files[i].path[n]=='/')
             return -2;
     if(f->data)heap_release(f->data);
@@ -192,15 +268,15 @@ int fs_remove(const char *path) {
     return 0;
 }
 int fs_write_bytes(const char *path, const void *data, size_t n, bool add) {
-    if((n && !data) || n>FS_DATA_BYTES)return -1;
+    if((n && !data) || n>data_limit || n>UINT32_MAX)return -1;
     File *f=fs_find(path);
     if(f && f->dir)return -1;
     size_t old=f?f->size:0u, off=add?old:0u;
-    if(off>FS_DATA_BYTES-n)return -2;
-    size_t wanted=off+n, used=state_bytes(files,0);
+    if(off>data_limit-n)return -2;
+    size_t wanted=off+n, used=state_bytes(files,fs_file_capacity,data_limit,0);
     if(!used)return -2;
     size_t overhead=used-old+(f?0u:sizeof(Record));
-    if(overhead>FS_DATA_BYTES || wanted>FS_DATA_BYTES-overhead)return -2;
+    if(overhead>data_limit || wanted>data_limit-overhead)return -2;
     char *new_data=allocate_data(wanted);
     if(!new_data)return -3;
     if(off)memcpy(new_data,f->data,off);
@@ -229,22 +305,25 @@ static uint32_t hash_more(uint32_t h, const void *ptr, size_t n) {
 }
 typedef struct {
     unsigned disk;
-    uint32_t base, sector;
+    uint32_t base, sector, sectors;
+    size_t limit;
     uint8_t buffer[512];
     size_t pos, total;
     unsigned cursor;
     uint32_t hash;
     bool ok, writing;
 } Stream;
-static void writer_init(Stream *s,unsigned disk,uint32_t base) {
-    *s=(Stream){.disk=disk,.base=base,.sector=1,.hash=2166136261u,.ok=true,.writing=true};
+static void writer_init(Stream *s,unsigned disk,uint32_t base,const FsVolume *volume) {
+    *s=(Stream){.disk=disk,.base=base,.sector=1,.hash=2166136261u,.ok=true,.writing=true,
+        .sectors=volume->slot_sectors,.limit=fs_volume_bytes(volume)};
 }
-static void reader_init(Stream *s,unsigned disk,uint32_t base,size_t bytes) {
+static void reader_init(Stream *s,unsigned disk,uint32_t base,size_t bytes,const FsVolume *volume) {
     *s=(Stream){.disk=disk,.base=base,.sector=1,.total=bytes,.cursor=512,
-                 .hash=2166136261u,.ok=true,.writing=false};
+                 .hash=2166136261u,.ok=true,.writing=false,
+        .sectors=volume->slot_sectors,.limit=fs_volume_bytes(volume)};
 }
 static bool put(Stream *s,const void *data,size_t n) {
-    if(!s->ok || s->pos+n>FS_DATA_BYTES)return false;
+    if(!s->ok || n>s->limit-s->pos)return false;
     const uint8_t *p=data;
     s->hash=hash_more(s->hash,data,n);
     s->pos+=n;
@@ -255,7 +334,7 @@ static bool put(Stream *s,const void *data,size_t n) {
         s->cursor+=count;
         p+=count;n-=count;
         if(s->cursor==512) {
-            if(s->sector>=FS_SLOT_SECTORS ||
+            if(s->sector>=s->sectors ||
                !disk_write_on(s->disk,s->base+s->sector++,s->buffer))
                 return s->ok=false;
             s->cursor=0;
@@ -267,7 +346,7 @@ static bool writer_finish(Stream *s) {
     if(!s->ok)return false;
     if(s->cursor) {
         memset(s->buffer+s->cursor,0,512-s->cursor);
-        if(s->sector>=FS_SLOT_SECTORS ||
+        if(s->sector>=s->sectors ||
            !disk_write_on(s->disk,s->base+s->sector++,s->buffer))
             return false;
     }
@@ -279,7 +358,7 @@ static bool take(Stream *s,void *data,size_t n) {
     size_t pending=n;
     while(pending) {
         if(s->cursor==512) {
-            if(s->sector>=FS_SLOT_SECTORS ||
+            if(s->sector>=s->sectors ||
                !disk_read_on(s->disk,s->base+s->sector++,s->buffer))
                 return s->ok=false;
             s->cursor=0;
@@ -294,114 +373,164 @@ static bool take(Stream *s,void *data,size_t n) {
     }
     return true;
 }
-static bool read_slot(unsigned device,uint32_t base,uint32_t *gen) {
-    drop_state(staging);
+static bool read_slot(unsigned device,const FsVolume *volume,unsigned slot,uint32_t *gen) {
+    drop_state(&staging);
+    uint32_t base = volume->start + slot * volume->slot_sectors;
+    size_t limit = fs_volume_bytes(volume);
     Snapshot header;
-    if(!disk_read_on(device,base,&header))return false;
-    bool legacy=!memcmp(header.magic,"LUNAFS1",7) && header.version==1;
-    bool modern=!memcmp(header.magic,"LUNAFS2",7) && header.version==2;
-    if(!legacy && !modern)return false;
-    if(!header.bytes || header.bytes>FS_DATA_BYTES ||
-       (legacy && header.bytes!=MAX_FILES*sizeof(LegacyFile)) ||
-       (modern && (!header.entries || header.entries>MAX_FILES)))return false;
+    if (!disk_read_on(device, base, &header))
+        return false;
+    bool legacy = !memcmp(header.magic, "LUNAFS1", 7) && header.version == 1;
+    bool modern = !memcmp(header.magic, "LUNAFS2", 7) && header.version == 2;
+    if (!legacy && !modern)
+        return false;
+    if (!header.bytes || header.bytes > limit ||
+        (legacy && header.bytes != LEGACY_FILES * sizeof(LegacyFile)) ||
+        (modern && (!header.entries || header.entries > header.bytes / sizeof(Record))))
+        return false;
+    if (!reserve_state(&staging, legacy ? LEGACY_FILES : header.entries))
+        return false;
     Stream stream;
-    reader_init(&stream,device,base,header.bytes);
-    if(legacy) {
+    reader_init(&stream, device, base, header.bytes, volume);
+    if (legacy) {
         LegacyFile record;
-        for(unsigned i=0;i<MAX_FILES;i++) {
-            if(!take(&stream,&record,sizeof(record)))goto bad;
-            if(record.used>1 || record.dir>1 ||
-               (record.used && (record.size>=sizeof(record.data) ||
-                                record.data[record.size])))goto bad;
-            if(!record.used)continue;
-            File *f=&staging[i];
-            memcpy(f->path,record.path,PATH_CAP);
-            f->used=1;f->dir=record.dir;f->size=record.size;
-            if(!f->dir) {
-                f->data=allocate_data(f->size);
-                if(!f->data)goto bad;
-                memcpy(f->data,record.data,f->size+1u);
+        for (unsigned i = 0; i < LEGACY_FILES; i++) {
+            if (!take(&stream, &record, sizeof(record)))
+                goto bad;
+            if (record.used > 1 || record.dir > 1 ||
+                (record.used && (record.size >= sizeof(record.data) || record.data[record.size])))
+                goto bad;
+            if (!record.used)
+                continue;
+            File *f = &staging.files[i];
+            memcpy(f->path, record.path, PATH_CAP);
+            f->used = 1;
+            f->dir = record.dir;
+            f->size = record.size;
+            if (!f->dir) {
+                f->data = allocate_data(f->size);
+                if (!f->data)
+                    goto bad;
+                memcpy(f->data, record.data, f->size + 1u);
             }
         }
     } else {
-        for(unsigned i=0;i<header.entries;i++) {
+        unsigned indices = header.entries < LEGACY_FILES ? LEGACY_FILES : header.entries;
+        for (unsigned i = 0; i < header.entries; i++) {
             Record record;
-            if(!take(&stream,&record,sizeof(record)) ||
-               record.index>=MAX_FILES || staging[record.index].used ||
-               record.dir>1 || record.size>FS_DATA_BYTES ||
-               (record.dir && record.size))goto bad;
-            File *f=&staging[record.index];
-            memcpy(f->path,record.path,PATH_CAP);
-            f->used=1;f->dir=record.dir;f->size=record.size;
-            if(!f->dir) {
-                f->data=allocate_data(f->size);
-                if(!f->data || !take(&stream,f->data,f->size))goto bad;
-                f->data[f->size]=0;
+            if (!take(&stream, &record, sizeof(record)) || record.index >= indices ||
+                record.dir > 1 || record.size > limit || (record.dir && record.size))
+                goto bad;
+            if (!reserve_state(&staging, record.index + 1u) || staging.files[record.index].used)
+                goto bad;
+            File *f = &staging.files[record.index];
+            memcpy(f->path, record.path, PATH_CAP);
+            f->used = 1;
+            f->dir = record.dir;
+            f->size = record.size;
+            if (!f->dir) {
+                f->data = allocate_data(f->size);
+                if (!f->data || !take(&stream, f->data, f->size))
+                    goto bad;
+                f->data[f->size] = 0;
             }
         }
     }
-    if(stream.pos!=stream.total || stream.hash!=header.hash ||
-       !valid_state(staging))goto bad;
-    *gen=header.generation;
+    if (stream.pos != stream.total || stream.hash != header.hash ||
+        !valid_state(staging.files, staging.capacity, limit))
+        goto bad;
+    *gen = header.generation;
     return true;
 bad:
-    drop_state(staging);
+    drop_state(&staging);
     return false;
 }
 bool fs_load(void) {
-    uint32_t best=0,g=0;
-    bool found=false;
-    for(unsigned i=0;i<2;i++) {
-        if(!read_slot(disk_boot_index(),FS_SLOT_START+i*FS_SLOT_SECTORS,&g))continue;
-        if(!found || (int32_t)(g-best)>0) {
-            drop_state(files);
-            memcpy(files,staging,sizeof(files));
-            memset(staging,0,sizeof(staging));
-            best=g;found=true;
-        } else drop_state(staging);
+    FsVolume volume;
+    if (!fs_volume(disk_boot_index(), false, &volume))
+        return false;
+    data_limit = fs_volume_bytes(&volume);
+    FsVolume legacy = {FS_SLOT_START, FS_SLOT_SECTORS, false, true};
+    uint32_t best = 0, g = 0;
+    bool found = false;
+    for (unsigned area = 0; area < 2; area++) {
+        const FsVolume *current = area ? &volume : &legacy;
+        if (area && (!volume.extended || !volume.exists))
+            continue;
+        for (unsigned slot = 0; slot < 2; slot++) {
+            if (!read_slot(disk_boot_index(), current, slot, &g))
+                continue;
+            if (!found || (int32_t)(g - best) > 0) {
+                FileState live = {files, fs_file_capacity};
+                drop_state(&live);
+                files = staging.files;
+                fs_file_capacity = staging.capacity;
+                staging = (FileState){0};
+                best = g;
+                found = true;
+            } else
+                drop_state(&staging);
+        }
     }
-    generation=best;
-    fs_dirty=false;
+    generation = best;
+    fs_dirty = false;
     return found;
 }
 bool fs_save_to(unsigned destination) {
-    if(!valid_state(files))return false;
-    uint32_t entries=0;
-    size_t n=state_bytes(files,&entries);
-    if(!n || n>FS_DATA_BYTES)return false;
-    uint32_t next=generation+1u;
-    uint32_t base=FS_SLOT_START+(next&1u)*FS_SLOT_SECTORS;
-    Snapshot header;
-    memset(&header,0,sizeof(header));
-    /* An interrupted write cannot be mistaken for a committed snapshot. */
-    if(!disk_write_on(destination,base,&header))return false;
-    Stream stream; writer_init(&stream,destination,base);
-    for(unsigned i=0;i<MAX_FILES;i++)if(files[i].used) {
-        Record record={0};
-        record.index=i;
-        memcpy(record.path,files[i].path,PATH_CAP);
-        record.size=files[i].dir?0:files[i].size;
-        record.dir=files[i].dir;
-        if(!put(&stream,&record,sizeof(record)) ||
-           (!files[i].dir && !put(&stream,files[i].data,files[i].size)))
-            return false;
-    }
-    if(!writer_finish(&stream) || stream.pos!=n)return false;
-    memcpy(header.magic,"LUNAFS2",7);
-    header.version=2; header.generation=next;
-    header.entries=entries;header.bytes=(uint32_t)n;header.hash=stream.hash;
-    if(!disk_write_on(destination,base,&header) || !disk_flush(destination))
+    FsVolume volume;
+    if (!fs_volume(destination, false, &volume))
         return false;
-    generation=next;fs_dirty=false;
+    size_t limit = fs_volume_bytes(&volume);
+    if (!valid_state(files, fs_file_capacity, limit))
+        return false;
+    uint32_t entries = 0;
+    size_t n = state_bytes(files, fs_file_capacity, limit, &entries);
+    if (!n || n > UINT32_MAX || !fs_volume(destination, true, &volume))
+        return false;
+    uint32_t next = generation + 1u;
+    uint32_t base = volume.start + (next & 1u) * volume.slot_sectors;
+    Snapshot header = {0};
+    if (!disk_write_on(destination, base, &header))
+        return false;
+    Stream stream;
+    writer_init(&stream, destination, base, &volume);
+    unsigned packed = 0;
+    for (int i = 0; i < fs_file_capacity; i++)
+        if (files[i].used) {
+            Record record = {0};
+            record.index = packed++;
+            memcpy(record.path, files[i].path, PATH_CAP);
+            record.size = files[i].dir ? 0 : files[i].size;
+            record.dir = files[i].dir;
+            if (!put(&stream, &record, sizeof(record)) ||
+                (!files[i].dir && !put(&stream, files[i].data, files[i].size)))
+                return false;
+        }
+    if (!writer_finish(&stream) || stream.pos != n || !disk_flush(destination))
+        return false;
+    memcpy(header.magic, "LUNAFS2", 7);
+    header.version = 2;
+    header.generation = next;
+    header.entries = entries;
+    header.bytes = (uint32_t)n;
+    header.hash = stream.hash;
+    if (!disk_write_on(destination, base, &header) || !disk_flush(destination))
+        return false;
+    generation = next;
+    fs_dirty = false;
     return true;
 }
-bool fs_save(void) { return fs_save_to(disk_boot_index()); }
+bool fs_save(void) {
+    return fs_save_to(disk_boot_index());
+}
 void fs_init(void) {
     if (fs_load()) {
         serial_write("LunaFS: restored snapshot\n");
         return;
     }
-    memset(files, 0, sizeof(files));
+    FileState old={files,fs_file_capacity};drop_state(&old);
+    files=0;fs_file_capacity=0;
+    if (!reserve_files(LEGACY_FILES)) return;
     files[0].used = files[0].dir = 1;
     strcpy(files[0].path, "/");
     fs_create("/home", true);
@@ -434,20 +563,34 @@ void fs_init(void) {
 }
 
 bool fs_verify_on(unsigned device) {
-    uint32_t gen=0;
-    for(unsigned i=0;i<2;i++) {
-        if(!read_slot(device,FS_SLOT_START+i*FS_SLOT_SECTORS,&gen))continue;
-        bool same=true;
-        for(unsigned j=0;j<MAX_FILES;j++) {
-            const File *a=&files[j],*b=&staging[j];
-            if(a->used!=b->used || a->dir!=b->dir || a->size!=b->size ||
-               (a->used && (strcmp(a->path,b->path) ||
-                (!a->dir && memcmp(a->data,b->data,a->size))))) {
-                same=false;break;
+    FsVolume volume;
+    if (!fs_volume(device, false, &volume) || !volume.exists)
+        return false;
+    uint32_t gen = 0;
+    for (unsigned slot = 0; slot < 2; slot++) {
+        if (!read_slot(device, &volume, slot, &gen))
+            continue;
+        bool same = true;
+        uint32_t live_entries = 0, staged_entries = 0;
+        state_bytes(files, fs_file_capacity, data_limit, &live_entries);
+        state_bytes(staging.files, staging.capacity, fs_volume_bytes(&volume), &staged_entries);
+        if (live_entries != staged_entries)
+            same = false;
+        for (int i = 0; same && i < fs_file_capacity; i++)
+            if (files[i].used) {
+                const File *match = 0;
+                for (int j = 0; j < staging.capacity; j++)
+                    if (staging.files[j].used && !strcmp(files[i].path, staging.files[j].path)) {
+                        match = &staging.files[j];
+                        break;
+                    }
+                if (!match || files[i].dir != match->dir || files[i].size != match->size ||
+                    (!files[i].dir && memcmp(files[i].data, match->data, match->size)))
+                    same = false;
             }
-        }
-        drop_state(staging);
-        if(same)return true;
+        drop_state(&staging);
+        if (same)
+            return true;
     }
     return false;
 }

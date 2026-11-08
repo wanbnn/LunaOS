@@ -1,6 +1,7 @@
 /* Native RTL8139 + Ethernet/ARP/IPv4/ICMP/UDP DNS/TCP HTTP.
  * One synchronous TCP connection, static QEMU user-network profile. */
 #include "luna.h"
+#include "heap.h"
 #include "task.h"
 #include "web.h"
 #include "netif.h"
@@ -996,8 +997,194 @@ static bool equals_ci(const char *a, const char *b, size_t n) {
     }
     return true;
 }
+static int http_response(char *response, unsigned used, char *out, size_t cap,
+                         char *error, size_t ecap, int *status_out, char *location,
+                         size_t locap, bool secure, unsigned secure_error, int n) {
+    char *body = 0;
+    for (unsigned i = 0; i + 3 < used; i++)
+        if (!strncmp(response + i, "\r\n\r\n", 4)) {
+            body = response + i + 4;
+            break;
+        }
+    if (!body || strncmp(response, "HTTP/1.", 7) || used < 12) {
+        append(error, "Invalid HTTP response.", ecap);
+        return -1;
+    }
+    unsigned code = (response[9] - '0') * 100 + (response[10] - '0') * 10 + response[11] - '0';
+    /* The redirect target is read from the headers before the status is judged. */
+    for (char *h = response; h < body;) {
+        char *end = h;
+        while (end < body && *end != '\r')
+            end++;
+        if (equals_ci(h, "Location:", 9)) {
+            char *p = h + 9;
+            while (p < end && (*p == ' ' || *p == '\t'))
+                p++;
+            size_t n = (size_t)(end - p);
+            while (n && (p[n - 1] == ' ' || p[n - 1] == '\t'))
+                n--;
+            if (location && n && n < locap) {
+                memcpy(location, p, n);
+                location[n] = 0;
+            }
+        }
+        h = end + 2;
+    }
+    if (status_out)
+        *status_out = (int)code;
+    if (code >= 300 && code < 400) {
+        if (!location || !location[0]) {
+            append(error, "The server sent a redirect without a target address.", ecap);
+            return -1;
+        }
+        /* The body of a redirect is not the document. */
+        unsigned redirect_body = used - (unsigned)(body - response);
+        if (redirect_body >= cap)
+            redirect_body = cap - 1;
+        memmove(out, body, redirect_body);
+        out[redirect_body] = 0;
+        return (int)redirect_body;
+    }
+    if (code < 200 || code >= 300) {
+        append(error, "HTTP status ", ecap);
+        char b[16];
+        number(b, code);
+        append(error, b, ecap);
+        append(error, ".", ecap);
+        return -1;
+    }
+    bool chunked = false;
+    int content_length = -1;
+    for (char *h = response; h < body;) {
+        char *end = h;
+        while (end < body && *end != '\r')
+            end++;
+        if (equals_ci(h, "Transfer-Encoding:", 18)) {
+            for (char *p = h + 18; p + 7 <= end; p++)
+                if (equals_ci(p, "chunked", 7))
+                    chunked = true;
+        }
+        if (equals_ci(h, "Content-Length:", 15)) {
+            const char *p = h + 15;
+            while (*p == ' ')
+                p++;
+            content_length = atoi(p);
+        }
+        if (equals_ci(h, "Content-Encoding:", 17)) {
+            char *p = h + 17;
+            while (*p == ' ')
+                p++;
+            if (p < end && !equals_ci(p, "identity", 8)) {
+                append(error, "Compressed HTTP responses are not supported.", ecap);
+                return -1;
+            }
+        }
+        h = end + 2;
+    }
+    unsigned available = used - (body - response), written = 0;
+    /* Complete, authenticated HTTP framing can finish before TLS close_notify. */
+    if (secure && secure_error && secure_error != 31) {
+        append(error, "TLS response authentication failed (code ", ecap);
+        char b[16];
+        number(b, secure_error);
+        append(error, b, ecap);
+        append(error, ").", ecap);
+        return -1;
+    }
+    if ((secure && secure_error == 31) || (!secure && n < 0)) {
+        if (!chunked && (content_length < 0 || (unsigned)content_length > available)) {
+            append(error, "Transport interrupted; incomplete response rejected.", ecap);
+            append(error," ",ecap);append(error,transport_error,ecap);
+            return -1;
+        }
+    }
+
+    if (chunked) {
+        unsigned pos = 0;
+        for (;;) {
+            unsigned size = 0, digits = 0;
+            while (pos < available) {
+                char c = body[pos];
+                int v = c >= '0' && c <= '9'   ? c - '0'
+                        : c >= 'a' && c <= 'f' ? c - 'a' + 10
+                        : c >= 'A' && c <= 'F' ? c - 'A' + 10
+                                               : -1;
+                if (v < 0)
+                    break;
+                if (++digits > 8 || size > (UINT32_MAX - (unsigned)v) / 16u) {
+                    append(error, "Malformed chunked response size.", ecap);
+                    return -1;
+                }
+                size = size * 16 + v;
+                pos++;
+            }
+            if (!digits) {
+                append(error, "Malformed chunked response size.", ecap);
+                return -1;
+            }
+            while (pos + 1 < available && !(body[pos] == '\r' && body[pos + 1] == '\n'))
+                pos++;
+            if (pos + 1 >= available) {
+                append(error, "Incomplete chunked response.", ecap);
+                return -1;
+            }
+            pos += 2;
+            if (!size) {
+                /* A complete zero chunk includes the final empty trailer
+                 * line. Preserve truncation detection even after all data. */
+                for (;;) {
+                    unsigned end = pos;
+                    while (end + 1 < available && !(body[end] == '\r' && body[end + 1] == '\n'))
+                        end++;
+                    if (end + 1 >= available) {
+                        append(error, "Incomplete chunked response trailers.", ecap);
+                        return -1;
+                    }
+                    bool last = end == pos;
+                    pos = end + 2;
+                    if (last) break;
+                }
+                break;
+            }
+            if (size > available - pos) {
+                append(error, "Incomplete chunked response.", ecap);
+                return -1;
+            }
+            if (size >= cap - written) {
+                append(error, "Chunked document exceeds the destination size limit.", ecap);
+                return -1;
+            }
+            memmove(out + written, body + pos, size);
+            written += size;
+            pos += size;
+            if (pos + 1 >= available) {
+                append(error, "Incomplete chunked response.", ecap);
+                return -1;
+            }
+            if (body[pos] != '\r' || body[pos + 1] != '\n') {
+                append(error, "Malformed chunked response delimiter.", ecap);
+                return -1;
+            }
+            pos += 2;
+        }
+    } else {
+        if (content_length >= 0 && (unsigned)content_length > available) {
+            append(error, "Incomplete HTTP document.", ecap);
+            return -1;
+        }
+        written = content_length >= 0 ? (unsigned)content_length : available;
+        if (written >= cap) {
+            append(error, "Document exceeds the destination size limit.", ecap);
+            return -1;
+        }
+        memmove(out, body, written);
+    }
+    out[written] = 0;
+    return written;
+}
+
 static int http_once(const char *url, char *out, size_t cap, char *error, size_t ecap,
-                     int *status_out, char *location, size_t locap) {
+                     int *status_out, char *location, size_t locap, char **download) {
     out[0] = error[0] = 0;
     if (status_out)
         *status_out = 0;
@@ -1084,173 +1271,49 @@ static int http_once(const char *url, char *out, size_t cap, char *error, size_t
         stream_close();
         return -1;
     }
-    static char response[WEB_CAP + 8192];
+    size_t capacity = download ? 16384u : WEB_CAP + 8192u;
+    char *response = heap_allocate(capacity);
+    if (!response) {
+        stream_close();
+        append(error, "Insufficient memory for HTTP response.", ecap);
+        return -1;
+    }
     unsigned used = 0;
-    int n;
-    while (used + 1 < sizeof(response)) {
-        n = secure ? tls_read(response + used, sizeof(response) - used - 1)
-                   : stream_read(response + used, sizeof(response) - used - 1);
-        if (n <= 0)
-            break;
-        used += n;
+    int n = 0;
+    bool complete = true;
+    for (;;) {
+        if (used + 1u == capacity) {
+            if (!download || capacity > 0x7fffffffu / 2u) {
+                append(error, "Response exceeds the destination size limit.", ecap);
+                complete = false;
+                break;
+            }
+            char *next = heap_resize(response, capacity * 2u);
+            if (!next) {
+                append(error, "Insufficient memory for HTTP response.", ecap);
+                complete = false;
+                break;
+            }
+            response = next;
+            capacity *= 2u;
+        }
+        n = secure ? tls_read(response + used, capacity - used - 1u)
+                   : stream_read(response + used, capacity - used - 1u);
+        if (n <= 0) break;
+        used += (unsigned)n;
     }
     response[used] = 0;
     unsigned secure_error = secure ? tls_error() : 0;
     stream_close();
-    if (used + 1 >= sizeof(response)) {
-        append(error, "Response exceeds the 512 KiB transport limit.", ecap);
-        return -1;
+    int result = -1;
+    if (complete) {
+        if (download) { out = response; cap = capacity; }
+        result = http_response(response, used, out, cap, error, ecap, status_out,
+                               location, locap, secure, secure_error, n);
     }
-    char *body = 0;
-    for (unsigned i = 0; i + 3 < used; i++)
-        if (!strncmp(response + i, "\r\n\r\n", 4)) {
-            body = response + i + 4;
-            break;
-        }
-    if (!body || strncmp(response, "HTTP/1.", 7) || used < 12) {
-        append(error, "Invalid HTTP response.", ecap);
-        return -1;
-    }
-    unsigned code = (response[9] - '0') * 100 + (response[10] - '0') * 10 + response[11] - '0';
-    /* The redirect target is read from the headers before the status is judged. */
-    for (char *h = response; h < body;) {
-        char *end = h;
-        while (end < body && *end != '\r')
-            end++;
-        if (equals_ci(h, "Location:", 9)) {
-            char *p = h + 9;
-            while (p < end && (*p == ' ' || *p == '\t'))
-                p++;
-            size_t n = (size_t)(end - p);
-            while (n && (p[n - 1] == ' ' || p[n - 1] == '\t'))
-                n--;
-            if (location && n && n < locap) {
-                memcpy(location, p, n);
-                location[n] = 0;
-            }
-        }
-        h = end + 2;
-    }
-    if (status_out)
-        *status_out = (int)code;
-    if (code >= 300 && code < 400) {
-        if (!location || !location[0]) {
-            append(error, "The server sent a redirect without a target address.", ecap);
-            return -1;
-        }
-        /* The body of a redirect is not the document. */
-        unsigned redirect_body = used - (unsigned)(body - response);
-        if (redirect_body >= cap)
-            redirect_body = cap - 1;
-        memcpy(out, body, redirect_body);
-        out[redirect_body] = 0;
-        return (int)redirect_body;
-    }
-    if (code < 200 || code >= 300) {
-        append(error, "HTTP status ", ecap);
-        char b[16];
-        number(b, code);
-        append(error, b, ecap);
-        append(error, ".", ecap);
-        return -1;
-    }
-    bool chunked = false;
-    int content_length = -1;
-    for (char *h = response; h < body;) {
-        char *end = h;
-        while (end < body && *end != '\r')
-            end++;
-        if (equals_ci(h, "Transfer-Encoding:", 18)) {
-            for (char *p = h + 18; p + 7 <= end; p++)
-                if (equals_ci(p, "chunked", 7))
-                    chunked = true;
-        }
-        if (equals_ci(h, "Content-Length:", 15)) {
-            const char *p = h + 15;
-            while (*p == ' ')
-                p++;
-            content_length = atoi(p);
-        }
-        if (equals_ci(h, "Content-Encoding:", 17)) {
-            char *p = h + 17;
-            while (*p == ' ')
-                p++;
-            if (p < end && !equals_ci(p, "identity", 8)) {
-                append(error, "Compressed HTTP responses are not supported.", ecap);
-                return -1;
-            }
-        }
-        h = end + 2;
-    }
-    unsigned available = used - (body - response), written = 0;
-    /* Complete, authenticated HTTP framing can finish before TLS close_notify. */
-    if (secure && secure_error && secure_error != 31) {
-        append(error, "TLS response authentication failed (code ", ecap);
-        char b[16];
-        number(b, secure_error);
-        append(error, b, ecap);
-        append(error, ").", ecap);
-        return -1;
-    }
-    if ((secure && secure_error == 31) || (!secure && n < 0)) {
-        if (!chunked && (content_length < 0 || (unsigned)content_length > available)) {
-            append(error, "Transport interrupted; incomplete response rejected.", ecap);
-            append(error," ",ecap);append(error,transport_error,ecap);
-            return -1;
-        }
-    }
-
-    if (chunked) {
-        unsigned pos = 0;
-        for (;;) {
-            unsigned size = 0, digits = 0;
-            while (pos < available) {
-                char c = body[pos];
-                int v = c >= '0' && c <= '9'   ? c - '0'
-                        : c >= 'a' && c <= 'f' ? c - 'a' + 10
-                        : c >= 'A' && c <= 'F' ? c - 'A' + 10
-                                               : -1;
-                if (v < 0)
-                    break;
-                if (++digits > 7)
-                    return -1;
-                size = size * 16 + v;
-                pos++;
-            }
-            if (!digits)
-                return -1;
-            while (pos + 1 < available && !(body[pos] == '\r' && body[pos + 1] == '\n'))
-                pos++;
-            if (pos + 1 >= available)
-                return -1;
-            pos += 2;
-            if (!size)
-                break;
-            if (size > available - pos || size >= cap - written) {
-                append(error, "Chunked document is incomplete or too large.", ecap);
-                return -1;
-            }
-            memcpy(out + written, body + pos, size);
-            written += size;
-            pos += size;
-            if (pos + 1 >= available || body[pos] != '\r' || body[pos + 1] != '\n')
-                return -1;
-            pos += 2;
-        }
-    } else {
-        if (content_length >= 0 && (unsigned)content_length > available) {
-            append(error, "Incomplete HTTP document.", ecap);
-            return -1;
-        }
-        written = content_length >= 0 ? (unsigned)content_length : available;
-        if (written >= cap) {
-            append(error, "Document exceeds the destination size limit.", ecap);
-            return -1;
-        }
-        memcpy(out, body, written);
-    }
-    out[written] = 0;
-    return written;
+    if (download && result >= 0) *download = response;
+    else heap_release(response);
+    return result;
 }
 
 /* Builds an absolute address from a base document and a reference that may
@@ -1259,7 +1322,7 @@ static bool url_resolve(const char *base, const char *reference, char *out, size
     return net_url_resolve(base,reference,out,cap);
 }
 
-static int http_impl(const char *url, char *out, size_t cap, char *error, size_t ecap, bool https_only) {
+static int http_impl(const char *url, char *out, size_t cap, char *error, size_t ecap, bool https_only, char **download) {
     final_http_url[0]=0;
     char current[4096];
     size_t n = strlen(url);
@@ -1278,12 +1341,16 @@ static int http_impl(const char *url, char *out, size_t cap, char *error, size_t
         int status = 0;
         char location[4096];
         location[0] = 0;
-        int result = http_once(current, out, cap, error, ecap, &status, location, sizeof(location));
+        int result = http_once(current, out, cap, error, ecap, &status, location, sizeof(location), download);
         if (result < 0)
             return -1;
         if (status < 300 || status >= 400) {
             strcpy(final_http_url,current);
             return result;
+        }
+        if (download && *download) {
+            heap_release(*download);
+            *download = 0;
         }
         char next[4096];
         if (!url_resolve(current, location, next, sizeof(next))) {
@@ -1327,7 +1394,7 @@ int net_http(const char *url, char *out, size_t cap, char *error, size_t ecap) {
         return -1;
     }
     network_owner = task_current()->pid;
-    int result = http_impl(url, out, cap, error, ecap, false);
+    int result = http_impl(url, out, cap, error, ecap, false, 0);
     if(result<0) {
         failed_http_url[0]=failed_http_error[0]=0;
         append(failed_http_url,url,sizeof(failed_http_url));
@@ -1343,7 +1410,23 @@ int net_https(const char *url, char *out, size_t cap, char *error, size_t ecap) 
     out[0] = error[0] = 0;
     if (network_owner) { append(error, "Network service busy.", ecap); return -1; }
     network_owner = task_current()->pid;
-    int result = http_impl(url, out, cap, error, ecap, true);
+    int result = http_impl(url, out, cap, error, ecap, true, 0);
+    network_owner = 0;
+    return result;
+}
+
+/* Caller owns the complete decoded document and releases it with heap_release. */
+int net_download(const char *url, char **out, char *error, size_t ecap) {
+    if (!out || !error || !ecap) return -1;
+    *out = 0;
+    error[0] = 0;
+    if (network_owner) {
+        append(error, "Network service busy.", ecap);
+        return -1;
+    }
+    network_owner = task_current()->pid;
+    char unused[1] = {0};
+    int result = http_impl(url, unused, sizeof(unused), error, ecap, false, out);
     network_owner = 0;
     return result;
 }

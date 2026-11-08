@@ -96,7 +96,7 @@ static JSValue sdk_list(JSContext *ctx, JSValueConst self, int argc, JSValueCons
     JSValue list = JS_NewArray(ctx);
     size_t n = strlen(path);
     uint32_t index = 0;
-    for (int i = 0; i < MAX_FILES; i++) {
+    for (int i = 0; i < fs_file_capacity; i++) {
         if (!files[i].used || strncmp(files[i].path, path, n))
             continue;
         if (files[i].path[n] != '/' || !files[i].path[n+1] ||

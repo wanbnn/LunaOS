@@ -281,7 +281,7 @@ test-heap:
 .PHONY: test-lunafs2
 test-lunafs2:
 	@mkdir -p build
-	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=address,undefined -Itests/fs_mock -Ikernel kernel/fs.c tests/lunafs2.c -o build/lunafs2-test
+	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=address,undefined -Itests/fs_mock -Ikernel kernel/fs.c kernel/fs_volume.c tests/lunafs2.c -o build/lunafs2-test
 	./build/lunafs2-test
 
 .PHONY: test-storage test-storage-guest test-storage-interfaces test-storage-install

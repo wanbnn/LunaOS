@@ -230,7 +230,7 @@ int developer_command(int argc, char **argv, char *out, size_t cap) {
     if (argc == 2 && !strcmp(argv[1], "list")) {
         const char *home = account_home();
         size_t n = strlen(home);
-        for (int i = 0; i < MAX_FILES; i++)
+        for (int i = 0; i < fs_file_capacity; i++)
             if (files[i].used && !files[i].dir && !strncmp(files[i].path, home, n) &&
                 files[i].path[n] == '/' && !strchr(files[i].path + n + 1, '/') &&
                 (extension(files[i].path, ".ljs") || extension(files[i].path, ".ldrv") ||

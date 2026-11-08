@@ -44,7 +44,7 @@ A geração atual produz `dist/LunaOS.img` (disco raw de **32 MiB**) e `dist/Lun
 | **Boot BIOS** | Implementado | Bootloader próprio; carregamento do kernel acima de 1 MiB |
 | **Boot UEFI** | Experimental | Loader UEFI x64 com transição para kernel i386; caminho testável com OVMF/QEMU |
 | **Desktop** | Implementado | Janelas, minimização, maximização, busca, atalhos, compositor com meta de 60 fps e resoluções do adaptador virtual até 1920×1080 |
-| **Sistema de arquivos** | Limitado | LunaFS com snapshots, até 64 entradas e arquivos de até 8191 bytes |
+| **Sistema de arquivos** | Experimental | LunaFS2 com diretório dinâmico, arquivos binários e expansão da área de snapshots |
 | **Instalador** | IDE + drivers nativos experimentais | Seleção explícita de disco, confirmação destrutiva, cópia verificada, usuário e senha; controladores e limites em [storage](docs/storage.md) |
 | **Ethernet e HTTPS** | Parcial | RTL8139, IPv4, DNS, TCP, HTTP e BearSSL/TLS 1.2; não é uma stack de rede universal |
 | **Navegador nativo** | Experimental | HTML e CSS com layout/cascata parciais, bindings DOM/JS e PNG; **sem** compatibilidade moderna completa |
@@ -284,14 +284,11 @@ O LunaOS utiliza componentes de terceiros, incluindo **musl**, **QuickJS**, **Be
 
 ### LunaFS2: arquivos maiores e binários
 
-O LunaFS deixou de reservar 8 KiB fixos por arquivo. Dados são alocados sob demanda
-na RAM e serializados em snapshots compactos `LUNAFS2` no disco, com conteúdo
-binário e até 64 entradas. O formato `LUNAFS1` é lido para migração sem apagar
-a instalação; a próxima gravação atualiza o formato. O limite restante é a região
-**total** de snapshots (aproximadamente 2 MiB por slot), e não um teto de 8 KiB
-por arquivo. Esta região ainda **não é suficiente** para CPython completo ou
-pacotes grandes: será necessária uma partição de dados e drivers de armazenamento
-nativos para ampliar a capacidade. Consulte [LunaFS2](docs/lunafs2.md).
+O LunaFS aloca a tabela de arquivos e os dados sob demanda na RAM. Os snapshots
+`LUNAFS1` e `LUNAFS2` existentes continuam legíveis. Em discos LunaOS com espaço
+livre após a imagem do sistema, uma partição de dados permite expandir a área
+persistente além dos antigos 2 MiB por snapshot. A capacidade depende do disco,
+da memória e do formato de 32 bits. Consulte [LunaFS2](docs/lunafs2.md).
 
 ## Subsistema de armazenamento nativo
 

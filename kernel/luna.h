@@ -102,7 +102,7 @@ void pci_write(uint8_t, uint8_t, uint8_t, uint8_t, uint32_t);
 void pci_list(char *, size_t);
 bool disk_read(uint32_t, void *);
 bool disk_write(uint32_t, const void *);
-#define MAX_FILES 64
+extern int fs_file_capacity;
 /* Scratch buffers for shell/UI text commands; NOT a file-size limit. */
 #define LUNA_TEXT_BUFFER 8192
 /* Existing editor/shell scratch arrays still have their own 8 KiB UI budget.
@@ -114,18 +114,23 @@ typedef struct {
     uint32_t used, size, dir;
     char *data; /* Owned by LunaFS, dynamically sized and NUL-terminated. */
 } File;
-extern File files[MAX_FILES];
+extern File *files;
+typedef struct {
+    File *files;
+    int capacity;
+} FileState;
 extern char cwd[PATH_CAP];
 void fs_init(void);
 bool fs_path(const char *, char *);
+/* File pointers may move when the directory grows or a snapshot is loaded. */
 File *fs_find(const char *);
 int fs_create(const char *, bool);
 int fs_remove(const char *);
 int fs_write(const char *, const char *, bool);
 int fs_write_bytes(const char *, const void *, size_t, bool);
-int fs_clone(File *destination, const File *source);
-void fs_discard_state(File *state);
-void fs_restore_state(File *backup);
+int fs_clone(FileState *destination, const File *source);
+void fs_discard_state(FileState *state);
+void fs_restore_state(FileState *backup);
 bool fs_save(void);
 bool fs_load(void);
 extern bool fs_dirty;
@@ -134,6 +139,8 @@ void net_poll(void);
 void net_status(char *, size_t);
 bool net_set_dns(const char *); /* IPv4 address or "auto" (DHCP). */
 bool net_ping(const char *, char *, size_t);
+/* Download returns an owned heap buffer on success. Release with heap_release. */
+int net_download(const char *, char **, char *, size_t);
 int net_http(const char *, char *, size_t, char *, size_t);
 int net_https(const char *, char *, size_t, char *, size_t);
 extern bool net_ready;

@@ -1,4 +1,5 @@
 #include "install.h"
+#include "heap.h"
 #include "settings.h"
 #include "window.h"
 #include "webengine.h"
@@ -16,7 +17,7 @@ char browser_url[256] = "luna://welcome", browser_body[131072];
 static char css_body[CSS_CAP];
 static char pending_url[256], files_dir[PATH_CAP] = "/home/luna";
 static bool browser_edit, browser_loading;
-static int selected_file, file_indices[MAX_FILES], file_count;
+static int selected_file, *file_indices, file_count, file_capacity;
 static uint32_t selected_pid, graph_tick, cpu_history[48];
 static unsigned graph_head;
 static char task_search[32];
@@ -93,8 +94,15 @@ static void wrapped(int x, int y, int width, const char *s, int size, int max_li
 }
 static void list_files(void) {
     file_count = 0;
+    if (file_capacity < fs_file_capacity) {
+        int *next = heap_allocate_owned((size_t)fs_file_capacity * sizeof(int), 1);
+        if (!next) return;
+        if (file_indices) heap_release(file_indices);
+        file_indices = next;
+        file_capacity = fs_file_capacity;
+    }
     size_t n = strlen(files_dir);
-    for (int i = 0; i < MAX_FILES; i++)
+    for (int i = 0; i < fs_file_capacity; i++)
         if (files[i].used) {
             char *p = files[i].path;
             bool child = !strcmp(files_dir, "/") ? p[0] == '/' && p[1] && !strchr(p + 1, '/')

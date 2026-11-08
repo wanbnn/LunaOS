@@ -244,7 +244,7 @@ void settings_draw(int x, int y, int w, int h) {
         round_rect(a + 192, b + 375, width - 200, 35, 12, 0x102238, 80);
         text(a + 204, b + 384, *prefs.wallpaper_path ? prefs.wallpaper_path : "/home/luna/wall.ppm",
              13, MUTED);
-        label(a + 12, b + 426, "PPM P3: max 64 x 64, within the LunaFS 8 KiB file limit.");
+        label(a + 12, b + 426, "PPM P3 wallpaper: max 64 x 64 pixels.");
     } else if (page == 6) {
         row(a, b + 83, width, "Language / Idioma",
             prefs.language ? "Português (Brasil)" : "English");

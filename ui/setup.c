@@ -29,7 +29,7 @@ static char wifi_password[WIFI_MAX_PASSWORD + 1];
 static uint32_t wifi_last_refresh;
 static uint8_t boot_sector[512], transfer[512], verify_sector[512];
 static uint8_t copy_buffer[64 * 512], readback_buffer[64 * 512];
-static File file_backup[MAX_FILES];
+static FileState file_backup;
 static bool backup_valid;
 static const char *greetings[] = {"Olá.", "Hello.", "Hola.", "Bonjour.", "Hallo.", "Ciao."};
 static const char *countries[] = {"Brasil",      "Portugal", "United States", "United Kingdom",
@@ -219,7 +219,7 @@ void setup_live(void) {
 }
 static void fail(const char *s) {
     if (backup_valid) {
-        fs_restore_state(file_backup);
+        fs_restore_state(&file_backup);
         backup_valid = false;
     }
     secret_clear(password, sizeof(password));
@@ -883,9 +883,17 @@ void setup_poll(void) {
         return;
     }
     if (install_phase == 2) {
+        memset(transfer, 0, 512);
+        memcpy(transfer + 446, boot_sector + 446, 32);
+        transfer[510] = 0x55;
+        transfer[511] = 0xaa;
+        if (!disk_write_on(selected_disk, 0, transfer) || !disk_flush(selected_disk)) {
+            fail("Unable to prepare destination partitions.");
+            return;
+        }
         /* File data uses owned heap buffers; a shallow copy would dangle. */
-        fs_discard_state(file_backup);
-        if (fs_clone(file_backup, files)) {
+        fs_discard_state(&file_backup);
+        if (fs_clone(&file_backup, files)) {
             fail("Insufficient memory for filesystem backup.");
             return;
         }
@@ -911,7 +919,12 @@ void setup_poll(void) {
         memset(boot_sector + 432, 0, 4); /* Installed HDD must not retain CD handoff metadata. */
         memset(boot_sector + 444, 0, 2);
         memcpy(boot_sector + 440, &disk_id, 4);
-        memset(boot_sector + 446, 0, 64);
+        if (!disk_read_on(selected_disk, 0, verify_sector)) {
+            fail("Unable to read destination data partition.");
+            return;
+        }
+        memcpy(boot_sector + 478, verify_sector + 478, 32);
+        memset(boot_sector + 446, 0, 32);
         uint8_t *p = boot_sector + 446;
         p[0] = 0x80;
         p[1] = p[5] = 0xfe;
@@ -934,7 +947,7 @@ void setup_poll(void) {
             fail("Unable to commit verified boot sector.");
             return;
         }
-        fs_discard_state(file_backup);
+        fs_discard_state(&file_backup);
         backup_valid = false;
         change_page(9);
         reboot_at = frame_clock + 7000;

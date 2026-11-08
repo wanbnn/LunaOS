@@ -3,6 +3,7 @@
 #include "../drivers/rtw8822be_diag.h"
 #include "../drivers/iwl_pcie.h"
 #include "memory.h"
+#include "heap.h"
 #include "../drivers/rtw8822be_pcie.h"
 #include "driver.h"
 #include "storage.h"
@@ -225,7 +226,7 @@ static int execute(int argc, char **a, const char *input, char *out) {
             }
             strcpy(cwd, f->path);
         }
-        for (int i = 0; i < MAX_FILES; i++)
+        for (int i = 0; i < fs_file_capacity; i++)
             if (files[i].used && direct_child(files[i].path)) {
                 char *p = files[i].path;
                 char *base = p;
@@ -488,15 +489,18 @@ static int execute(int argc, char **a, const char *input, char *out) {
             emit(out, "usage: wget http://HOST/PATH OUTPUT_FILE\n");
             return 2;
         }
-        char body[8192], err[256];
-        int n = net_http(a[1], body, sizeof(body), err, sizeof(err));
+        char err[256];
+        char *body = 0;
+        int n = net_download(a[1], &body, err, sizeof(err));
         if (n < 0) {
             emit(out, "wget: ");
             emit(out, err);
             emit(out, "\n");
             return 1;
         }
-        if (fs_write(a[2], body, false)) {
+        int saved = fs_write_bytes(a[2], body, (size_t)n, false);
+        heap_release(body);
+        if (saved) {
             emit(out, "wget: cannot save file\n");
             return 1;
         }
@@ -873,10 +877,11 @@ static void complete(void) {
     for (int i = 0; i < begin; i++)
         if (shell_line[i] != ' ' && shell_line[i] != '\t')
             command = false;
-    char matches[MAX_FILES + 64][256];
+    char (*matches)[256] = heap_allocate(((size_t)fs_file_capacity + 64u) * 256u);
+    if (!matches) return;
     int count = 0;
     if (command) {
-        for (int i = 0; commands[i] && count < MAX_FILES + 64; i++)
+        for (int i = 0; commands[i] && count < fs_file_capacity + 64; i++)
             if (!strncmp(commands[i], prefix, length))
                 strcpy(matches[count++], commands[i]);
     } else {
@@ -889,15 +894,17 @@ static void complete(void) {
             memcpy(lead, prefix, slash + 1);
             lead[slash + 1] = 0;
             strcpy(fragment, prefix + slash + 1);
-            if (!fs_path(lead, directory))
+            if (!fs_path(lead, directory)) {
+                heap_release(matches);
                 return;
+            }
         } else {
             strcpy(directory, cwd);
             strcpy(fragment, prefix);
         }
         size_t dn = strlen(directory);
         bool only_dirs = !strncmp(shell_line, "cd ", 3);
-        for (int i = 0; i < MAX_FILES && count < MAX_FILES + 64; i++) {
+        for (int i = 0; i < fs_file_capacity && count < fs_file_capacity + 64; i++) {
             File *f = &files[i];
             if (!f->used || (only_dirs && !f->dir))
                 continue;
@@ -918,6 +925,7 @@ static void complete(void) {
     }
     if (!count) {
         last_tab = false;
+        heap_release(matches);
         return;
     }
     unsigned common = strlen(matches[0]);
@@ -953,6 +961,7 @@ static void complete(void) {
         }
         last_tab = true;
     }
+    heap_release(matches);
 }
 void shell_key(int key) {
     int c = key & 0xfff, len = strlen(shell_line);

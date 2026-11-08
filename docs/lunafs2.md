@@ -1,48 +1,45 @@
-# LunaFS2 — arquivos variáveis, conteúdo binário e persistência
+# LunaFS2 e capacidade de armazenamento
 
-A restrição de **8191 bytes por arquivo** foi removida. O FS agora guarda
-um ponteiro e comprimento por entrada, com armazenamento na heap sob demanda.
-A função `fs_write_bytes(path, data, length, append)` aceita conteúdo binário
-(incluindo bytes `0x00`). `fs_write` permanece como atalho para texto
-terminado por NUL. A leitura via `fs_find` expõe `File.data` e `File.size`;
-leitores binários não devem usar `strlen` para determinar o tamanho.
+A tabela de arquivos e os dados crescem na heap conforme a demanda. Os antigos
+limites de 64 entradas e 8191 bytes por arquivo foram removidos. A API
+`fs_write_bytes` preserva conteúdo binário, incluindo bytes NUL.
 
-## Layout no disco e durabilidade
+## Volume persistente
 
-- Duas regiões fixas de snapshot iniciam nos setores 8192 e 12288,
-  com 4096 setores cada (2 MiB/slot). O primeiro setor é um header `LUNAFS2`;
-  o payload contém um conjunto de entradas e dados concatenados.
-- Apenas bytes ocupados são gravados. O hash cobre os bytes serializados.
-  O header só é confirmado depois de completar a gravação dos dados;
-  uma falha interrompida preserva o snapshot válido anterior.
-- A inicialização lê e valida tanto `LUNAFS1` (legado de 8 KiB) quanto
-  `LUNAFS2`. O próximo `sync` salva na versão nova.
-- Arquivos são alocados sob demanda; não há buffer fixo de 8 KiB por entrada.
-  O volume continua limitado a **64 entradas**, com payload máximo de
-  **2.096.640 bytes** por snapshot menos metadados de diretório.
-- **Isso não transforma o espaço do pendrive/SSD em disco de dados LunaOS.**
-  O kernel atual só escreve em IDE/ATA. Pendrives UEFI são lidos previamente
-  pelo firmware e entregues como imagem RAM read-only após ExitBootServices.
-- CPython, bibliotecas e executáveis grandes ainda precisam de um filesystem
-  de capacidade redimensionável em um controlador de armazenamento nativo.
-  Este commit remove o limite por arquivo, **não o limite do volume**.
+Em discos LunaOS identificados pelo MBR e pelo cabeçalho da imagem, o primeiro
+`sync` pode criar uma partição de dados no maior intervalo livre após a imagem
+do sistema. Partições existentes são preservadas. A partição usa o tipo MBR
+`0xda` e uma identificação `LFS` nos campos CHS sem uso.
 
-## Riscos e compatibilidade
+A área disponível é dividida em dois snapshots. O tamanho acompanha o espaço
+livre encontrado no dispositivo. Uma imagem raw de exatamente 66 MiB continua
+com a área original disponível. Para testar a expansão em QEMU, aumente uma
+cópia da imagem antes de iniciá-la, por exemplo com `truncate -s 128M copia.img`.
 
-O formato v1 migra na próxima gravação, mas snapshots em v2 **não podem ser
-lidos por kernels antigos**. Faça backup antes de voltar para uma versão
-anterior. Binários maiores do que o total disponível do volume devem ser
-recusados sem truncamento. O instalador preserva o conteúdo anterior usando
-backups profundos que não duplicam a posse dos buffers.
+Os snapshots antigos nos setores 8192 e 12288 continuam legíveis. A migração
+preserva esses snapshots e grava a nova versão na partição expandida. Cada
+snapshot contém o diretório e os dados ocupados, protegidos por checksum. A
+confirmação ocorre após gravar e descarregar os dados. Uma gravação interrompida
+permite restaurar o snapshot válido anterior.
 
-## Testes
+O instalador cria a área no disco de destino. A atualização do sistema preserva
+a tabela de partições do disco instalado.
 
-```sh
-make test-lunafs2
-make check
-```
+## Recursos e formato
 
-O teste host verifica binários acima de 8 KiB, conteúdo NUL, load/save,
-retrocompatibilidade com v1, rollback de escrita interrompida e backup profundo.
-A instalação real e o boot pelo hardware físico continuam exigindo testes
-independentes.
+A capacidade depende do disco e da RAM disponíveis. Arquivos permanecem em RAM
+enquanto o sistema funciona e a gravação substitui seu buffer de forma atômica.
+Os snapshots continuam usando comprimentos de 32 bits e caminhos de 128 bytes.
+O dispositivo precisa ser acessível por um controlador nativo com setores de
+512 bytes. Mídias somente leitura permitem trabalho em RAM e exigem um destino
+gravável para persistência.
+
+O `wget` usa buffers expansíveis, sem os antigos tetos de 8 KiB no comando ou
+512 KiB no transporte de download. Respostas HTTP incompletas são rejeitadas e
+preservam o arquivo de destino existente.
+
+## Verificação
+
+`make test-lunafs2` verifica migração, conteúdo binário, mais de 64 entradas,
+arquivo de 3 MiB, isolamento de partições e recuperação de escrita interrompida.
+`tests/https.py` exercita o download chunked de 3 MiB no sistema em QEMU.

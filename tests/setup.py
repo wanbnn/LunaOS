@@ -41,7 +41,8 @@ def click(g,x,y):
 def type_text(g,s):
     for c in s: g.key({' ':'spc','-':'minus','_':'underscore'}.get(c,c))
 
-g=Guest(source,extra_args=extra,setup=True,cdrom=iso_mode)
+# Keep automatic NTP persistence out of the disk-isolation assertions.
+g=Guest(source,network=False,extra_args=extra,setup=True,cdrom=iso_mode)
 try:
     page(g,0);g.screenshot('setup-welcome')
     g.key('esc')
@@ -49,7 +50,7 @@ try:
 finally: g.close()
 assert sha(source)==source_before and sha(target)==target_before and sha(guard)==guard_before
 print('PASS: Try LunaOS leaves all disks unchanged',flush=True)
-g=Guest(source,extra_args=extra,setup=True,cdrom=iso_mode)
+g=Guest(source,network=False,extra_args=extra,setup=True,cdrom=iso_mode)
 try:
     page(g,0);g.key('ret');page(g,1)
     click(g,700,308) # Portuguese system language

@@ -22,9 +22,10 @@ seleção automática. O firmware UEFI ainda entrega a imagem de 66 MiB em RAM,
 mas o LunaFS já pode acessar a mídia nativa após encontrar o dispositivo.
 A origem de boot não deve ser apresentada como destino de instalação; o
 instalador também compara o identificador MBR para excluir clones.
-Armazenamento persistente continua sob LunaFS2, com 2 MiB por snapshot, mesmo
-quando o disco é maior. Para aproveitar o espaço do pendrive/SSD, ainda falta
-uma partição de dados com gerenciamento de espaço e drivers correspondentes.
+O LunaFS2 expande o diretório dinamicamente e pode criar uma partição de dados
+no espaço livre após a imagem do sistema, preservando as partições existentes.
+A capacidade persistente depende do espaço disponível e usa dois snapshots.
+Consulte [LunaFS2](lunafs2.md).
 
 ## Estado por controlador
 

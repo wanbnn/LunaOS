@@ -5,9 +5,10 @@
 #include <stdint.h>
 #include "../kernel/luna.h"
 #include "../kernel/install.h"
+#include "../kernel/fs_volume.h"
 #define SLOT_START 8192u
 #define SLOT_SECTORS 4096u
-#define SECTOR_COUNT (SLOT_START + 2u*SLOT_SECTORS)
+#define SECTOR_COUNT (224u * 1024u)
 static uint8_t disk[SECTOR_COUNT][512];
 static int writes_left = -1;
 void *heap_allocate_owned(size_t size, uint32_t owner) {
@@ -18,6 +19,8 @@ int heap_release(void *p) {
     free(p);
     return 0;
 }
+static DiskInfo device;
+const DiskInfo *disk_info(unsigned d) { return d ? 0 : &device; }
 unsigned disk_boot_index(void) { return 0; }
 bool disk_read_on(unsigned d, uint32_t sector, void *buffer) {
     if(d || sector>=SECTOR_COUNT || !buffer) return false;
@@ -41,7 +44,7 @@ typedef struct {
     uint32_t version,generation,bytes,hash;
     uint8_t pad[488];
 } OldHeader;
-static LegacyFile legacy[MAX_FILES];
+static LegacyFile legacy[64];
 static uint32_t fnv(const uint8_t *p,size_t n) {
     uint32_t h=2166136261u;
     while(n--) h=(h^*p++)*16777619u;
@@ -88,10 +91,10 @@ int main(void) {
     f=fs_find("/home/luna/big.bin");
     assert(f && f->size==256u*1024u && !memcmp(f->data,blob,f->size));
     /* Deep copy backup: update the original, restore the prior data. */
-    static File backup[MAX_FILES];
-    assert(!fs_clone(backup,files));
+    static FileState backup;
+    assert(!fs_clone(&backup,files));
     assert(!fs_write("/home/luna/big.bin","overwritten",false));
-    fs_restore_state(backup);
+    fs_restore_state(&backup);
     f=fs_find("/home/luna/big.bin");
     assert(f && f->size==256u*1024u && !memcmp(f->data,blob,f->size));
     /* Interrupted write must leave the previously committed slot intact. */
@@ -114,7 +117,57 @@ int main(void) {
     assert(f && !strcmp(f->data,"migrated to v2"));
     /* No overrun of the volume slot; bound is aggregate capacity, not 8K. */
     assert(fs_write_bytes("/home/luna/too-big",blob,3u*1024u*1024u,false)<0);
+    /* Grow onto free disk space without overwriting another partition. */
+    device = (DiskInfo){.present=true,.supported=true,.sectors=SECTOR_COUNT};
+    disk[0][510]=0x55;disk[0][511]=0xaa;
+    memcpy(disk[LUNA_IMAGE_INFO_SECTOR],"LUNAIMG1",8);
+    uint32_t image_version=1,image_bytes=LUNA_IMAGE_BYTES;
+    memcpy(disk[LUNA_IMAGE_INFO_SECTOR]+8,&image_version,4);
+    memcpy(disk[LUNA_IMAGE_INFO_SECTOR]+12,&image_bytes,4);
+    uint32_t partitions[3][2]={{8192,65536-8192},{65536,69632},{SECTOR_COUNT-2048,2048}};
+    for(unsigned i=0;i<3;i++) {
+        uint8_t *entry=disk[0]+446+i*16;
+        entry[4]=i==0?0xda:i==1?0xef:0x83;
+        memcpy(entry+8,&partitions[i][0],4);
+        memcpy(entry+12,&partitions[i][1],4);
+    }
+    memset(disk[SECTOR_COUNT-2048],0xa5,512);
+    uint8_t original_table[48];memcpy(original_table,disk[0]+446,48);
+    assert(fs_load());
+    assert(fs_find("/home/luna/legacy.txt"));
+    size_t large_size=3u*1024u*1024u;
+    uint8_t *large=malloc(large_size);
+    assert(large);memset(large,0x5a,large_size);
+    assert(!fs_write_bytes("/home/luna/expanded.bin",large,large_size,false));
+    for(unsigned i=0;i<200;i++) {
+        char path[80];snprintf(path,sizeof(path),"/home/luna/file-%u",i);
+        assert(!fs_write(path,"expanded directory",false));
+    }
+    assert(fs_file_capacity>64);
+    assert(!fs_clone(&backup,files));
+    writes_left=1;assert(!fs_save());writes_left=-1;
+    assert(fs_load() && fs_find("/home/luna/legacy.txt"));
+    fs_restore_state(&backup);
+    assert(fs_save() && fs_verify_on(0));
+    assert(!memcmp(original_table,disk[0]+446,48));
+    for(unsigned i=0;i<512;i++)assert(disk[SECTOR_COUNT-2048][i]==0xa5);
+    assert(fs_load());
+    f=fs_find("/home/luna/expanded.bin");
+    assert(f && f->size==large_size && !memcmp(f->data,large,large_size));
+    assert(fs_find("/home/luna/file-199"));
+    assert(!fs_write("/home/luna/expanded.bin","interrupted",false));
+    writes_left=5;assert(!fs_save());writes_left=-1;
+    assert(fs_load());
+    f=fs_find("/home/luna/expanded.bin");
+    assert(f && f->size==large_size && !memcmp(f->data,large,large_size));
+    FsVolume volume;
+    assert(fs_volume(0,false,&volume) && volume.extended && volume.exists);
+    /* An overlapping table must never authorize writes into another volume. */
+    uint32_t overlap=LUNA_IMAGE_BYTES/512;
+    memcpy(disk[0]+446+2*16+8,&overlap,4);
+    assert(fs_volume(0,false,&volume) && !volume.extended);
+    free(large);
     free(blob);
-    puts("PASS: LunaFS2 256 KiB binary file, persistence, crash fallback, deep-copy and v1 migration");
+    puts("PASS: LunaFS growth beyond 64 entries and 2 MiB, partition isolation, persistence, crash recovery and legacy migration");
     return 0;
 }

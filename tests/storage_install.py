@@ -96,9 +96,20 @@ def main():
                     start+=count
             installed.seek(510)
             assert installed.read(2)==b"\x55\xaa",kind+" missing boot signature"
-            installed.seek(8192*512)
-            snapshots=installed.read(8192*512)
-            assert b"/etc/setup-complete" in snapshots and b"LunaOS setup v1\n" in snapshots
+            installed.seek(478)
+            entry=installed.read(16)
+            assert entry[1:4]==b"LFS" and entry[4]==0xda
+            start=int.from_bytes(entry[8:12],"little")
+            sectors=int.from_bytes(entry[12:16],"little")
+            assert start>=66*1024*1024//512 and sectors>=4
+            found=False
+            for slot in range(2):
+                installed.seek((start+slot*(sectors//2))*512)
+                header=installed.read(512)
+                if header[:7]!=b"LUNAFS2": continue
+                payload=installed.read(int.from_bytes(header[16:20],"little"))
+                found |= b"/etc/setup-complete" in payload and b"LunaOS setup v1\n" in payload
+            assert found, kind+" missing committed data snapshot"
         report[kind]={"result":"PASS","target_size":target.stat().st_size,
                       "verified":"installer selected target, copied all 66 MiB, read-back verified, flushed, committed boot"}
         print("PASS: destructive install only to disposable QEMU "+kind+" image",flush=True)

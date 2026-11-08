@@ -75,6 +75,7 @@ openssl(
 
 large_css = b"/*" + b" " * 350000 + b"*/\n#network-proof { color: #123456; }"
 extra_css = b"p { margin: 1px; }"
+large_download = b"<html>" + b"x" * 64000 + b"</html>"
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -92,21 +93,41 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else b"<h1>NATIVE VERIFIED TLS WORKS</h1>"
         )
         if self.path == "/nested/style-page":
-            body = (f'<html><head><link rel="stylesheet" href="large.css"><link rel="stylesheet" href="//luna.test:{self.server.server_port}/extra.css"></head><body><p id="network-proof">Large CSS received</p></body></html>').encode()
+            body = (
+                f'<html><head><link rel="stylesheet" href="large.css"><link rel="stylesheet" href="//luna.test:{self.server.server_port}/extra.css"></head><body><p id="network-proof">Large CSS received</p></body></html>'
+            ).encode()
         elif self.path == "/nested/large.css":
             body = large_css
         elif self.path == "/extra.css":
             body = extra_css
+        elif self.path == "/large-chunked":
+            body = large_download
+        elif self.path == "/oversized-chunked":
+            body = b"x" * (3 * 1024 * 1024)
+        chunked = self.path in {
+            "/chunked",
+            "/large-chunked",
+            "/oversized-chunked",
+            "/truncated-chunked",
+            "/truncated-trailers",
+        }
         self.send_response(200)
-        if self.path == "/chunked":
+        if chunked:
             self.send_header("Transfer-Encoding", "chunked")
         else:
             self.send_header(
                 "Content-Length", str(len(body) + (10 if self.path == "/truncated" else 0))
             )
         self.end_headers()
-        if self.path == "/chunked":
-            self.wfile.write(f"{len(body):X}\r\n".encode() + body + b"\r\n0\r\n\r\n")
+        if self.path == "/truncated-chunked":
+            self.wfile.write(f"{len(body) + 10:X}\r\n".encode() + body)
+        elif self.path == "/truncated-trailers":
+            self.wfile.write(f"{len(body):X}\r\n".encode() + body + b"\r\n0\r\n")
+        elif chunked:
+            for offset in range(0, len(body), 17000):
+                part = body[offset : offset + 17000]
+                self.wfile.write(f"{len(part):X};fixture=test\r\n".encode() + part + b"\r\n")
+            self.wfile.write(b"0\r\nX-Fixture: complete\r\n\r\n")
         else:
             self.wfile.write(body)
 
@@ -123,7 +144,9 @@ secured.socket = ctx.wrap_socket(secured.socket, server_side=True)
 for server in [plain, secured]:
     threading.Thread(target=server.serve_forever, daemon=True).start()
 shutil.copyfile(ROOT / "dist/LunaOS.img", TEST / "tls.img")
-g = Guest(TEST / "tls.img")
+with (TEST / "tls.img").open("r+b") as disk:
+    disk.truncate(128 * 1024 * 1024)
+g = Guest(TEST / "tls.img", ram=128)
 try:
     g.command('write /etc/hosts "10.0.2.2 luna.test"')
     g.command(f"wget https://luna.test:{secured.server_port}/ /tmp/untrusted", "failed", timeout=35)
@@ -135,10 +158,47 @@ try:
         f"wget https://luna.test:{secured.server_port}/chunked /tmp/chunk", "Saved", timeout=35
     )
     g.command("cat /tmp/chunk", "NATIVE VERIFIED TLS WORKS")
+    g.command(
+        f"wget https://luna.test:{secured.server_port}/large-chunked /tmp/large.html",
+        f"Saved {len(large_download)} bytes",
+        timeout=35,
+    )
+    g.command("wc /tmp/large.html", str(len(large_download)))
+    g.command(
+        f"wget https://luna.test:{secured.server_port}/oversized-chunked /tmp/multi-megabyte",
+        "Saved 3145728 bytes",
+        timeout=120,
+    )
+    g.command("wc /tmp/multi-megabyte", "3145728")
+    g.command(
+        "write /home/luna/grow.ljs \"for(let i=0;i<100;i++) luna.fs.write('entry-'+i,'persisted'); luna.fs.read('entry-99')\""
+    )
+    g.command("dev run /home/luna/grow.ljs", "persisted")
+    capacity = int.from_bytes(memory(g, symbol_address("fs_file_capacity"), 4), "little")
+    assert capacity > 64, capacity
+    g.command("sync", "committed", timeout=60)
+    g.command("write /tmp/protected original")
+    for path, expected in [
+        ("truncated-chunked", "Incomplete chunked response"),
+        ("truncated-trailers", "Incomplete chunked response trailers"),
+    ]:
+        g.command(
+            f"wget https://luna.test:{secured.server_port}/{path} /tmp/protected",
+            expected,
+            timeout=35,
+        )
+        g.command("cat /tmp/protected", "original")
+    g.command(
+        f"wget https://luna.test:{secured.server_port}/ /tmp/after-limit", "Saved", timeout=35
+    )
+    g.command("ping 10.0.2.2", "Reply", timeout=15)
     style_url = f"https://luna.test:{secured.server_port}/style-page"
     g.command(f"browse {style_url}")
     final_url = f"https://luna.test:{secured.server_port}/nested/style-page"
-    wait_until(lambda: memory(g, symbol_address("browser_url"), 256).split(b"\0")[0].decode() == final_url, 60)
+    wait_until(
+        lambda: memory(g, symbol_address("browser_url"), 256).split(b"\0")[0].decode() == final_url,
+        60,
+    )
     wait_until(lambda: memory(g, symbol_address("browser_loading"), 1) == b"\0", 60)
     css_size = int.from_bytes(memory(g, symbol_address("sheet_length"), 4), "little")
     css_ptr = int.from_bytes(memory(g, symbol_address("sheet_text"), 4), "little")
@@ -157,6 +217,11 @@ try:
     g.command('js "123n ** 3n"', "1860867")
     g.command("js \"Object.fromEntries([['ok',42]]).ok\"", "42")
     g.command('js "while(true){}"', "interrupted")
+    # Restart the real guest and verify that the expanded snapshot is mounted.
+    g.close()
+    g = Guest(TEST / "tls.img", network=False, ram=128)
+    g.command("wc /tmp/multi-megabyte", "3145728")
+    g.command("cat /home/luna/entry-99", "persisted")
     report = {
         "result": "PASS",
         "image_sha256": hashlib.sha256((ROOT / "dist/LunaOS.img").read_bytes()).hexdigest(),
@@ -166,6 +231,13 @@ try:
             "hostname mismatch rejected",
             "authenticated HTTPS download",
             "chunked transfer decoded",
+            "64 KB chunked wget saved beyond the old 8 KiB command buffer",
+            "3 MiB chunked wget saved beyond the former transport and snapshot ceilings",
+            "more than 64 directory entries saved",
+            "expanded snapshot and multi-megabyte file survive guest restart",
+            "incomplete chunk trailers rejected",
+            "existing file preserved on failed downloads",
+            "HTTPS and ping still work after multi-megabyte download",
             "truncated HTTP body rejected",
             "complete 350 KB linked CSS transferred to the browser over TLS",
             "subsequent HTTPS and ICMP after large CSS",
@@ -173,7 +245,11 @@ try:
             "BigInt and modern JS syntax",
             "bounded execution of infinite script",
         ],
-        "not_implemented": ["TLS 1.3", "full browser standards compliance", "production browser sandbox"],
+        "not_implemented": [
+            "TLS 1.3",
+            "full browser standards compliance",
+            "production browser sandbox",
+        ],
         "not_validated": ["physical RTL8822BE ACK delivery and MitraStar link stability"],
     }
     (ROOT / "dist/web-foundation-report.json").write_text(json.dumps(report, indent=2) + "\n")
