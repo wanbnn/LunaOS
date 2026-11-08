@@ -4,6 +4,8 @@
 #include "../drivers/rtw8822be_pcie.c"
 static uint8_t descriptors[8*TX_RING_STRIDE], frames[2*TX_RING_COUNT*2048u];
 static unsigned mgmt_wp,be_wp,mgmt_rp,be_rp;
+static uint32_t fake_clock;
+uint32_t drv_now_ms(void) {return fake_clock;}
 int drv_mmio_read(DrvMmio *m,uint32_t reg,unsigned width,uint32_t *v) {
     (void)m;assert(width==4 && (reg==0x3b0 || reg==0x3a8));
     *v=(reg==0x3b0 ? mgmt_rp : be_rp)<<16;
@@ -29,7 +31,16 @@ int main(void) {
     assert(mgmt_wp==TX_RING_COUNT-1 && dev.tx_sent==TX_RING_COUNT-1);
     assert(tx_mpdu(NULL,mpdu,sizeof(mpdu),true)==-16);
     assert(dev.tx_busy==1 && mgmt_wp==TX_RING_COUNT-1);
+    dev.client.stage=WIFI_CLIENT_AUTH;
+    fake_clock=800;mgmt_tx_watchdog();
+    assert(dev.tx_mgmt_rekicks==1 && mgmt_wp==TX_RING_COUNT-1);
+    fake_clock=1600;mgmt_tx_watchdog();
+    assert(dev.tx_mgmt_rekicks==2);
+    fake_clock=2500;mgmt_tx_watchdog();
+    assert(dev.tx_mgmt_rekicks==2); /* bounded: no infinite kicks */
     mgmt_rp=1;
+    fake_clock=2600;mgmt_tx_watchdog();
+    assert(dev.tx_mgmt_rekicks==0); /* HW RX pointer progress */
     assert(!tx_mpdu(NULL,mpdu,sizeof(mpdu),true));
     assert(mgmt_wp==0 && dev.tx_sent==TX_RING_COUNT);
     mpdu[0]=8;assert(!tx_mpdu(NULL,mpdu,sizeof(mpdu),false));
