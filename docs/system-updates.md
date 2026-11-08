@@ -25,7 +25,7 @@ target manifest and only the compressed changed-block payloads. The initial
 MBR/boot block is always included. Excluded live filesystem snapshot sectors
 are never included.
 
-The publication workflow builds a delta against the preceding published
+To allow existing v1 installations to migrate directly to the newest commit,\nthe release pipeline ALSO publishes legacy \`update.manifest\` and \`chunk-*.z\`\nassets. The v2 engine never requests those legacy assets; it always transfers\nexactly one \`.pack\` per update attempt. Legacy assets may only be removed\nafter all v1 clients are retired.\n\nThe publication workflow builds a delta against the preceding published
 release when that release's `LunaOS.img` can be downloaded. Older bases
 without a corresponding delta use the full package. A locally modified or
 dirty build also uses the full package. Delta blocks omitted from the package

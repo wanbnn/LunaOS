@@ -33,7 +33,7 @@ jobs:
       - name: Package the exact compiled commit
         env:
           UPDATE_COMMIT: ${{ github.sha }}
-        run: python3 tools/updatepack.py --commit "$UPDATE_COMMIT"
+        run: python3 tools/updatepack.py --commit "$UPDATE_COMMIT" --legacy-assets
       - name: Optional differential package from previous published build
         env:
           GH_TOKEN: ${{ github.token }}
@@ -47,7 +47,7 @@ jobs:
             if [[ "$previous_commit" != "$UPDATE_COMMIT" ]]; then
               mkdir -p build/update-base
               if gh release download "$previous_tag" --pattern LunaOS.img --dir build/update-base; then
-                python3 tools/updatepack.py --commit "$UPDATE_COMMIT" --base-commit "$previous_commit" --base-image build/update-base/LunaOS.img
+                python3 tools/updatepack.py --commit "$UPDATE_COMMIT" --legacy-assets --base-commit "$previous_commit" --base-image build/update-base/LunaOS.img
               else
                 echo "Previous release image unavailable; publishing the full package only."
               fi
@@ -71,7 +71,7 @@ jobs:
             gh release create "$update_tag" --draft --target "$UPDATE_COMMIT" \
               --title "LunaOS ${UPDATE_COMMIT:0:12}" --notes-file docs/update-release-notes.md
           fi
-          gh release upload "$update_tag" dist/update/*.pack dist/LunaOS.img dist/LunaOS.iso --clobber
+          gh release upload "$update_tag" dist/update/*.pack dist/update/update.manifest dist/update/chunk-*.z dist/LunaOS.img dist/LunaOS.iso --clobber
           current_head="$(gh api repos/wanbnn/LunaOS/git/ref/heads/main --jq '.object.sha')"
           if [[ "$current_head" == "$UPDATE_COMMIT" ]]; then
             gh release edit "$update_tag" --draft=false --latest

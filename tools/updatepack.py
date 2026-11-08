@@ -40,7 +40,7 @@ def chunks(image):
         yield offset, image[offset:offset + CHUNK]
 
 
-def build(image, output, commit):
+def build(image, output, commit, legacy_assets=False):
     check_commit(commit)
     data = read_image(image, commit)
     output = Path(output)
@@ -50,6 +50,8 @@ def build(image, output, commit):
         packed = zlib.compress(raw, 9) if any(raw) else b''
         if packed:
             payload.append(packed)
+            if legacy_assets:
+                (output / f'chunk-{len(records):03d}.z').write_bytes(packed)
         records.append(RECORD.pack(offset // 512, len(packed), hashlib.sha256(raw).digest()))
     manifest = HEADER.pack(b'LUNAUPD1', 1, IMAGE_BYTES, CHUNK, len(records), commit.encode()) + b''.join(records)
     (output / 'update.manifest').write_bytes(manifest)  # local tests only; never publish separately
@@ -95,9 +97,10 @@ if __name__ == '__main__':
     parser.add_argument('--commit', required=True)
     parser.add_argument('--base-image')
     parser.add_argument('--base-commit')
+    parser.add_argument('--legacy-assets', action='store_true', help='publish compatibility assets for v1 clients')
     args = parser.parse_args()
     if bool(args.base_image) != bool(args.base_commit):
         parser.error('--base-image and --base-commit must be supplied together')
-    build(args.image, args.output, args.commit)
+    build(args.image, args.output, args.commit, legacy_assets=args.legacy_assets)
     if args.base_image:
         build_delta(args.image, args.base_image, args.output, args.commit, args.base_commit)
