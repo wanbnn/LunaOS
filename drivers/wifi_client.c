@@ -41,6 +41,7 @@ static int auth(WifiClient *c) {
     uint8_t f[30];hdr(c,f,0xb0);
     put16(f+24,0);put16(f+26,1);put16(f+28,0);
     int rc=emit(c,f,sizeof(f),true);
+    if(!rc) c->attempts++;
     if(!rc) {c->stage=WIFI_CLIENT_AUTH;c->deadline=c->radio.now(c->radio.context)+3000;}
     return rc;
 }
@@ -63,6 +64,7 @@ static int assoc(WifiClient *c) {
         copy(f+pos,selected,sizeof(selected));pos+=sizeof(selected);
     }
     int rc=emit(c,f,pos,true);
+    if(!rc) c->attempts++;
     if(!rc) {c->stage=WIFI_CLIENT_ASSOC;c->deadline=c->radio.now(c->radio.context)+3000;}
     return rc;
 }
@@ -70,6 +72,7 @@ static void fail(WifiClient *c,int error) {
     wifi_station_disconnect(&c->station);
     wifi_ccmp_clear(&c->ccmp);
     wipe(c->password,sizeof(c->password));
+    c->failed_stage=c->stage;
     c->stage=WIFI_CLIENT_IDLE;c->error=error;
 }
 static int tx_msdu(void *v,const uint8_t *ethernet,unsigned size,bool encrypt) {
@@ -151,6 +154,8 @@ int wifi_client_start(WifiClient *c,const WifiClientRadio *radio,const uint8_t m
     /* Only the scanned AP supplies these parameters; never auto-roam into
      * a new BSSID or silently downgrade an encrypted network to open. */
     c->radio=*radio;c->ap=*ap;copy(c->mac,mac,6);c->error=0;
+    c->failed_stage=WIFI_CLIENT_IDLE;c->attempts=0;
+    c->mgmt_rx=c->foreign_rx=c->auth_rx=c->assoc_rx=0;
     c->rsn_len=rsn_len;if(rsn_len) copy(c->rsn,rsn,rsn_len);
     if(n) copy(c->password,pass,n);
     c->password[n]=0;
@@ -168,7 +173,14 @@ void wifi_client_poll(WifiClient *c) {
         return;
     }
     if((int32_t)(c->radio.now(c->radio.context)-c->deadline)>=0) {
-        fail(c,TIMEOUT);return;
+        /* Retry unanswered management requests with bounded attempts.
+         * MAC TX completion is not equivalent to an AP response. */
+        if(c->attempts<3) {
+            int rc=c->stage==WIFI_CLIENT_AUTH ? auth(c) : assoc(c);
+            if(rc && rc!=BUSY) fail(c,rc);
+            else if(rc==BUSY) c->deadline=c->radio.now(c->radio.context)+250;
+        } else fail(c,TIMEOUT);
+        return;
     }
     for(unsigned budget=0;budget<16;budget++) {
         uint8_t f[1600];unsigned n=0;
@@ -176,11 +188,13 @@ void wifi_client_poll(WifiClient *c) {
         if(rc<0) {fail(c,rc);return;}
         if(!rc) break;
         Luna80211Header h;
-        if(n>sizeof(f) || luna80211_header(f,n,&h) ||
-           h.type!=0 || memcmp(h.source,c->ap.bssid,6) ||
+        if(n>sizeof(f) || luna80211_header(f,n,&h) || h.type!=0) continue;
+        c->mgmt_rx++;
+        if(memcmp(h.source,c->ap.bssid,6) ||
            memcmp(h.bssid,c->ap.bssid,6) || memcmp(h.destination,c->mac,6) ||
-           h.protected_frame) continue;
+           h.protected_frame) {c->foreign_rx++;continue;}
         if(c->stage==WIFI_CLIENT_AUTH && h.subtype==11 && n>=30) {
+            c->auth_rx++;
             if(u16(f+24) || u16(f+26)!=2) continue;
             unsigned status=u16(f+28);
             if(status) {fail(c,-(int)status);return;}
@@ -188,6 +202,7 @@ void wifi_client_poll(WifiClient *c) {
             return;
         }
         if(c->stage==WIFI_CLIENT_ASSOC && h.subtype==1 && n>=30) {
+            c->assoc_rx++;
             unsigned status=u16(f+26),aid=u16(f+28)&0x3fff;
             if(status || !aid || aid>2007) {fail(c,status?-(int)status:INVALID);return;}
             associated(c,aid);return;
