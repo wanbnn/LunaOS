@@ -170,6 +170,20 @@ static void dom_mutation_regressions(void) {
     check(web_node_insert_before(parent, first, 0) &&
           parent->last_child == first && first->prev == second,
           "detached node can be reattached at the end");
+    web_set_attr(parent, "data-state", "source");
+    WebNode *shallow = web_node_clone(parent, false);
+    WebNode *deep = web_node_clone(parent, true);
+    check(shallow && !shallow->first_child &&
+          !strcmp(web_attr(shallow, "data-state"), "source"),
+          "shallow clone copies attributes but not children");
+    check(deep && deep->first_child && deep->first_child != parent->first_child &&
+          deep->first_child->parent == deep,
+          "deep clone owns independent descendant nodes");
+    web_set_attr(deep, "data-state", "copy");
+    check(!strcmp(web_attr(parent, "data-state"), "source"),
+          "cloned attributes do not alias the original strings");
+    web_free_tree(shallow);
+    web_free_tree(deep);
     web_free_tree(document);
 }
 
