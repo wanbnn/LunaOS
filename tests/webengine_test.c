@@ -261,8 +261,8 @@ static void template_shadow_regressions(void) {
     web_node_append(fragment, one);
     web_node_append(fragment, two);
     check(web_node_insert_before(host, fragment, 0) && !fragment->first_child &&
-          host->first_child == one && one->next == two &&
-          two->parent == host,
+          host->last_child == two && one->next == two && two->prev == one &&
+          one->parent == host && two->parent == host,
           "inserting DocumentFragment moves children in document order");
     web_free_tree(fragment);
     web_free_tree(document);
