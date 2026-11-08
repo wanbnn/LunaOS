@@ -129,7 +129,7 @@ firmware RAID. Nenhum comando de configuração de array é emitido.
 
 Os testes em QEMU não certificam hardware físico, boot pelo firmware de cada
 controlador nem recuperação de falta de energia. Permanecem pendentes xHCI,
-hubs, UAS, Intel RST/VMD, software RAID, GPT, 4Kn, LBA64 e filesystem escalável.
+hubs, UAS, Intel RST/VMD, software RAID, GPT, 4Kn, LBA64 e snapshots com comprimentos de 64 bits.
 
 Referências de protocolo e modelos usados para validação:
 [EHCI/QEMU](https://github.com/qemu/qemu/blob/master/hw/usb/hcd-ehci.c),

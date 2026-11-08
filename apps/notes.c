@@ -62,13 +62,12 @@ void notes_key(int key) {
             path[n - 1] = 0;
         else if (c == 10) {
             File *f = fs_find(path);
-            if (f && !f->dir) {
-                strcpy(document, f->data);
+            if (f && !f->dir && fs_read_text(f, document, sizeof(document))) {
                 caret = top = 0;
                 dirty = false;
                 message = "Opened.";
             } else
-                message = "Path selected. File missing: Ctrl+S creates it.";
+                message = "File missing, unreadable or larger than the editor buffer.";
             detect();
             editing_path = false;
         } else if (c >= 32 && c < 127 && n < PATH_CAP - 1) {

@@ -62,7 +62,7 @@ static bool field(const char *text, const char *name, char *out, unsigned capaci
 bool account_load(void) {
     loaded = false;
     File *f = fs_find("/etc/luna-user");
-    if (!f || f->dir)
+    if (!f || f->dir || f->size >= 8192 || !fs_materialize(f))
         return false;
     char user[25], s[65], hash[65], r[16], algorithm[32];
     if (!field(f->data, "algorithm", algorithm, sizeof(algorithm)) ||

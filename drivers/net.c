@@ -1,13 +1,14 @@
 /* Native RTL8139 + Ethernet/ARP/IPv4/ICMP/UDP DNS/TCP HTTP.
  * One synchronous TCP connection, static QEMU user-network profile. */
-#include "luna.h"
+#include "../include/net/http_stream.h"
+#include "../include/net/time_dns.h"
 #include "heap.h"
+#include "luna.h"
+#include "net_time.h"
+#include "netif.h"
 #include "task.h"
 #include "web.h"
-#include "netif.h"
 #include "wifi.h"
-#include "net_time.h"
-#include "../include/net/time_dns.h"
 bool net_ready;
 static uint16_t io;
 static uint8_t mac[6], gateway_mac[6];
@@ -468,6 +469,17 @@ bool net_driver_ipv4(const NetDeviceOps *ops, void *ctx, NetIpv4Config *out) {
     if (out) *out=external_nic.dhcp.config;
     return true;
 }
+/* A 64 KiB RTL8139 receive ring always wraps, including with RxNoWrap set.
+ * Copy the second fragment from the start of the DMA ring. */
+static void copy_rx_frame(void *out, unsigned position, unsigned bytes) {
+    position %= 65536u;
+    unsigned first = 65536u - position;
+    if (first > bytes)
+        first = bytes;
+    memcpy(out, rx + position, first);
+    if (bytes > first)
+        memcpy((uint8_t *)out + first, rx, bytes - first);
+}
 void net_poll(void) {
     /* Synchronous DNS/TCP/ICMP callers may occupy the GUI loop that normally
      * services the radio. Drain/decrypt Wi-Fi RX before consuming its IP queue. */
@@ -504,7 +516,7 @@ void net_poll(void) {
         }
         if (status & 1) {
             uint8_t packet[1536];
-            memcpy(packet, h + 4, len - 4);
+            copy_rx_frame(packet, rxpos + 4u, len - 4u);
             receive(packet, len - 4);
             rxcount++;
         }
@@ -1183,14 +1195,10 @@ static int http_response(char *response, unsigned used, char *out, size_t cap,
     return written;
 }
 
-static int http_once(const char *url, char *out, size_t cap, char *error, size_t ecap,
-                     int *status_out, char *location, size_t locap, char **download) {
-    out[0] = error[0] = 0;
-    if (status_out)
-        *status_out = 0;
-    if (location && locap)
-        location[0] = 0;
+static int http_open(const char *url, bool *secured, char *error, size_t ecap) {
+    error[0] = 0;
     bool secure = !strncmp(url, "https://", 8);
+    *secured = secure;
     if (!secure && strncmp(url, "http://", 7)) {
         append(error, "Expected an http:// or https:// address.", ecap);
         return -1;
@@ -1271,7 +1279,18 @@ static int http_once(const char *url, char *out, size_t cap, char *error, size_t
         stream_close();
         return -1;
     }
-    size_t capacity = download ? 16384u : WEB_CAP + 8192u;
+    return 0;
+}
+
+static int http_once(const char *url, char *out, size_t cap, char *error, size_t ecap,
+                     int *status_out, char *location, size_t locap) {
+    out[0] = 0;
+    *status_out = 0;
+    location[0] = 0;
+    bool secure;
+    if (http_open(url, &secure, error, ecap) < 0)
+        return -1;
+    size_t capacity = WEB_CAP + 8192u;
     char *response = heap_allocate(capacity);
     if (!response) {
         stream_close();
@@ -1280,39 +1299,23 @@ static int http_once(const char *url, char *out, size_t cap, char *error, size_t
     }
     unsigned used = 0;
     int n = 0;
-    bool complete = true;
-    for (;;) {
-        if (used + 1u == capacity) {
-            if (!download || capacity > SIZE_MAX / 2u) {
-                append(error, "Response exceeds the destination size limit.", ecap);
-                complete = false;
-                break;
-            }
-            char *next = heap_resize(response, capacity * 2u);
-            if (!next) {
-                append(error, "Insufficient memory for HTTP response.", ecap);
-                complete = false;
-                break;
-            }
-            response = next;
-            capacity *= 2u;
-        }
+    while (used + 1u < capacity) {
         n = secure ? tls_read(response + used, capacity - used - 1u)
                    : stream_read(response + used, capacity - used - 1u);
-        if (n <= 0) break;
+        if (n <= 0)
+            break;
         used += (unsigned)n;
     }
     response[used] = 0;
     unsigned secure_error = secure ? tls_error() : 0;
     stream_close();
     int result = -1;
-    if (complete) {
-        if (download) { out = response; cap = capacity; }
-        result = http_response(response, used, out, cap, error, ecap, status_out,
-                               location, locap, secure, secure_error, n);
-    }
-    if (download && result >= 0) *download = response;
-    else heap_release(response);
+    if (used + 1u >= capacity)
+        append(error, "Response exceeds the destination size limit.", ecap);
+    else
+        result = http_response(response, used, out, cap, error, ecap, status_out, location, locap,
+                               secure, secure_error, n);
+    heap_release(response);
     return result;
 }
 
@@ -1322,7 +1325,8 @@ static bool url_resolve(const char *base, const char *reference, char *out, size
     return net_url_resolve(base,reference,out,cap);
 }
 
-static int http_impl(const char *url, char *out, size_t cap, char *error, size_t ecap, bool https_only, char **download) {
+static int http_impl(const char *url, char *out, size_t cap, char *error, size_t ecap,
+                     bool https_only) {
     final_http_url[0]=0;
     char current[4096];
     size_t n = strlen(url);
@@ -1341,16 +1345,12 @@ static int http_impl(const char *url, char *out, size_t cap, char *error, size_t
         int status = 0;
         char location[4096];
         location[0] = 0;
-        int result = http_once(current, out, cap, error, ecap, &status, location, sizeof(location), download);
+        int result = http_once(current, out, cap, error, ecap, &status, location, sizeof(location));
         if (result < 0)
             return -1;
         if (status < 300 || status >= 400) {
             strcpy(final_http_url,current);
             return result;
-        }
-        if (download && *download) {
-            heap_release(*download);
-            *download = 0;
         }
         char next[4096];
         if (!url_resolve(current, location, next, sizeof(next))) {
@@ -1371,6 +1371,7 @@ bool net_http_final_url(char *out,size_t cap) {
     memcpy(out,final_http_url,n+1);return true;
 }
 void net_cancel_owner(uint32_t pid) {
+    fs_abort_write(pid);
     if (network_owner == pid) {
         network_owner = 0;
         tcp.state = 0;
@@ -1394,7 +1395,7 @@ int net_http(const char *url, char *out, size_t cap, char *error, size_t ecap) {
         return -1;
     }
     network_owner = task_current()->pid;
-    int result = http_impl(url, out, cap, error, ecap, false, 0);
+    int result = http_impl(url, out, cap, error, ecap, false);
     if(result<0) {
         failed_http_url[0]=failed_http_error[0]=0;
         append(failed_http_url,url,sizeof(failed_http_url));
@@ -1410,23 +1411,89 @@ int net_https(const char *url, char *out, size_t cap, char *error, size_t ecap) 
     out[0] = error[0] = 0;
     if (network_owner) { append(error, "Network service busy.", ecap); return -1; }
     network_owner = task_current()->pid;
-    int result = http_impl(url, out, cap, error, ecap, true, 0);
+    int result = http_impl(url, out, cap, error, ecap, true);
     network_owner = 0;
     return result;
 }
 
-/* Caller owns the complete decoded document and releases it with heap_release. */
-int net_download(const char *url, char **out, char *error, size_t ecap) {
-    if (!out || !error || !ecap) return -1;
-    *out = 0;
+static HttpInput download_input;
+static int download_read(void *context, void *out, unsigned bytes) {
+    return (uintptr_t)context ? tls_read(out, bytes) : stream_read(out, bytes);
+}
+static bool download_sink(void *context, const void *data, size_t bytes) {
+    (void)context;
+    return fs_write_part(data, bytes);
+}
+bool net_download_file(const char *url, const char *path, uint64_t *written, char *error,
+                       size_t ecap) {
+    if (!url || !path || !written || !error || !ecap)
+        return false;
+    *written = 0;
     error[0] = 0;
     if (network_owner) {
         append(error, "Network service busy.", ecap);
-        return -1;
+        return false;
     }
     network_owner = task_current()->pid;
-    char unused[1] = {0};
-    int result = http_impl(url, unused, sizeof(unused), error, ecap, false, out);
+    bool result = false;
+    char current[4096];
+    if (strlen(url) >= sizeof(current)) {
+        append(error, "URL too long.", ecap);
+        goto done;
+    }
+    strcpy(current, url);
+    for (unsigned hop = 0; hop < 8; hop++) {
+        bool secure;
+        if (http_open(current, &secure, error, ecap) < 0)
+            goto done;
+        download_input = (HttpInput){.read = download_read, .context = (void *)(uintptr_t)secure};
+        HttpReply reply;
+        if (!http_stream_headers(&download_input, &reply, error, ecap))
+            goto done;
+        if (reply.status >= 300 && reply.status < 400) {
+            stream_close();
+            char next[4096];
+            if (!reply.location[0] || !url_resolve(current, reply.location, next, sizeof(next))) {
+                append(error, "Invalid HTTP redirect.", ecap);
+                goto done;
+            }
+            strcpy(current, next);
+            continue;
+        }
+        if (reply.status < 200 || reply.status >= 300) {
+            append(error, "HTTP status rejected.", ecap);
+            goto done;
+        }
+        if (!fs_begin_write(path, false, network_owner)) {
+            append(error, "Cannot stage download on the writable data volume.", ecap);
+            goto done;
+        }
+        if (!http_stream_body(&download_input, &reply, download_sink, 0, written, error, ecap))
+            goto done;
+        if (!reply.chunked && !reply.have_length &&
+            ((secure && tls_error()) || (!secure && download_input.last < 0))) {
+            append(error, "Transport interrupted; incomplete HTTP document.", ecap);
+            goto done;
+        }
+        if (secure && tls_error() && tls_error() != 31) {
+            append(error, "TLS response authentication failed.", ecap);
+            goto done;
+        }
+        stream_close();
+        if (!fs_finish_write()) {
+            append(error, "Cannot commit download to disk.", ecap);
+            goto done;
+        }
+        strcpy(final_http_url, current);
+        result = true;
+        goto done;
+    }
+    append(error, "Too many HTTP redirects.", ecap);
+done:
+    stream_close();
+    fs_abort_write(network_owner);
     network_owner = 0;
+    if (!result)
+        *written = 0;
     return result;
 }

@@ -31,6 +31,33 @@ bool disk_write_on(unsigned d, uint32_t sector, const void *buffer) {
     if(writes_left>0)writes_left--;
     memcpy(disk[sector],buffer,512);return true;
 }
+bool disk_read_blocks(unsigned d, uint32_t sector, unsigned count, void *buffer) {
+    for (unsigned i = 0; i < count; i++)
+        if (!disk_read_on(d, sector + i, (uint8_t *)buffer + i * 512u))
+            return false;
+    return true;
+}
+bool disk_write_blocks(unsigned d, uint32_t sector, unsigned count, const void *buffer) {
+    for (unsigned i = 0; i < count; i++)
+        if (!disk_write_on(d, sector + i, (const uint8_t *)buffer + i * 512u))
+            return false;
+    return true;
+}
+static bool matches(const File *f, const void *data, size_t n) {
+    if (!f || f->size != n)
+        return false;
+    uint8_t buffer[16384];
+    for (size_t off = 0; off < n;) {
+        size_t bytes = n - off;
+        if (bytes > sizeof(buffer))
+            bytes = sizeof(buffer);
+        if (!fs_read_bytes(f, off, buffer, bytes) ||
+            memcmp(buffer, (const uint8_t *)data + off, bytes))
+            return false;
+        off += bytes;
+    }
+    return true;
+}
 bool disk_flush(unsigned d) { return d==0; }
 void serial_write(const char *s) { (void)s; }
 
@@ -84,19 +111,19 @@ int main(void) {
     /* Binary data with zero bytes, far beyond former 8 KiB per-file cap. */
     assert(!fs_write_bytes("/home/luna/big.bin",blob,256u*1024u,false));
     File *f=fs_find("/home/luna/big.bin");
-    assert(f && f->size==256u*1024u && !memcmp(f->data,blob,f->size));
+    assert(matches(f, blob, 256u * 1024u));
     assert(fs_save() && !fs_dirty);
     assert(!fs_remove("/home/luna/big.bin"));
     assert(fs_load());
     f=fs_find("/home/luna/big.bin");
-    assert(f && f->size==256u*1024u && !memcmp(f->data,blob,f->size));
+    assert(matches(f, blob, 256u * 1024u));
     /* Deep copy backup: update the original, restore the prior data. */
     static FileState backup;
     assert(!fs_clone(&backup,files));
     assert(!fs_write("/home/luna/big.bin","overwritten",false));
     fs_restore_state(&backup);
     f=fs_find("/home/luna/big.bin");
-    assert(f && f->size==256u*1024u && !memcmp(f->data,blob,f->size));
+    assert(matches(f, blob, 256u * 1024u));
     /* Interrupted write must leave the previously committed slot intact. */
     assert(!fs_write("/home/luna/big.bin","uncommitted",false));
     writes_left=3;
@@ -104,7 +131,7 @@ int main(void) {
     writes_left=-1;
     assert(fs_load());
     f=fs_find("/home/luna/big.bin");
-    assert(f && f->size==256u*1024u && !memcmp(f->data,blob,f->size));
+    assert(matches(f, blob, 256u * 1024u));
     /* Old v1 installed volume loads and upgrades on the next sync. */
     legacy_snapshot(100);
     assert(fs_load());
@@ -143,6 +170,13 @@ int main(void) {
         char path[80];snprintf(path,sizeof(path),"/home/luna/file-%u",i);
         assert(!fs_write(path,"expanded directory",false));
     }
+    assert(!fs_copy("/home/luna/expanded.bin", "/home/luna/copy.bin"));
+    assert(matches(fs_find("/home/luna/copy.bin"), large, large_size));
+    assert(!fs_write_bytes("/home/luna/copy.bin", "tail", 4, true));
+    f = fs_find("/home/luna/copy.bin");
+    assert(f && f->size == large_size + 4u && !f->data);
+    char suffix[4];
+    assert(fs_read_bytes(f, large_size, suffix, 4) && !memcmp(suffix, "tail", 4));
     assert(fs_file_capacity>64);
     assert(!fs_clone(&backup,files));
     writes_left=1;assert(!fs_save());writes_left=-1;
@@ -153,13 +187,13 @@ int main(void) {
     for(unsigned i=0;i<512;i++)assert(disk[SECTOR_COUNT-2048][i]==0xa5);
     assert(fs_load());
     f=fs_find("/home/luna/expanded.bin");
-    assert(f && f->size==large_size && !memcmp(f->data,large,large_size));
+    assert(matches(f, large, large_size));
     assert(fs_find("/home/luna/file-199"));
     assert(!fs_write("/home/luna/expanded.bin","interrupted",false));
     writes_left=5;assert(!fs_save());writes_left=-1;
     assert(fs_load());
     f=fs_find("/home/luna/expanded.bin");
-    assert(f && f->size==large_size && !memcmp(f->data,large,large_size));
+    assert(matches(f, large, large_size));
     FsVolume volume;
     assert(fs_volume(0,false,&volume) && volume.extended && volume.exists);
     /* An overlapping table must never authorize writes into another volume. */

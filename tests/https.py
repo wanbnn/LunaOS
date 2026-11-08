@@ -4,6 +4,7 @@
 import hashlib
 import http.server
 import json
+import os
 import shutil
 import ssl
 import subprocess
@@ -76,6 +77,9 @@ openssl(
 large_css = b"/*" + b" " * 350000 + b"*/\n#network-proof { color: #123456; }"
 extra_css = b"p { margin: 1px; }"
 large_download = b"<html>" + b"x" * 64000 + b"</html>"
+text_tools = b"a" * 65534 + b"needle\n" + b"".join(f"line-{i:02d}\n".encode() for i in range(1, 21))
+stream_bytes = int(os.environ.get("LUNA_DOWNLOAD_BYTES", 3 * 1024 * 1024))
+stream_ram = int(os.environ.get("LUNA_DOWNLOAD_RAM", 64))
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -102,8 +106,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             body = extra_css
         elif self.path == "/large-chunked":
             body = large_download
+        elif self.path == "/text-tools":
+            body = text_tools
         elif self.path == "/oversized-chunked":
-            body = b"x" * (3 * 1024 * 1024)
+            body = b"x" * stream_bytes
         chunked = self.path in {
             "/chunked",
             "/large-chunked",
@@ -145,8 +151,8 @@ for server in [plain, secured]:
     threading.Thread(target=server.serve_forever, daemon=True).start()
 shutil.copyfile(ROOT / "dist/LunaOS.img", TEST / "tls.img")
 with (TEST / "tls.img").open("r+b") as disk:
-    disk.truncate(128 * 1024 * 1024)
-g = Guest(TEST / "tls.img", ram=128)
+    disk.truncate(max(128 * 1024 * 1024, 66 * 1024 * 1024 + stream_bytes * 2 + 16 * 1024 * 1024))
+g = Guest(TEST / "tls.img", ram=stream_ram)
 try:
     g.command('write /etc/hosts "10.0.2.2 luna.test"')
     g.command(f"wget https://luna.test:{secured.server_port}/ /tmp/untrusted", "failed", timeout=35)
@@ -166,17 +172,27 @@ try:
     g.command("wc /tmp/large.html", str(len(large_download)))
     g.command(
         f"wget https://luna.test:{secured.server_port}/oversized-chunked /tmp/multi-megabyte",
-        "Saved 3145728 bytes",
-        timeout=120,
+        f"Saved {stream_bytes} bytes",
+        timeout=max(120, stream_bytes // 32768),
     )
-    g.command("wc /tmp/multi-megabyte", "3145728")
+    g.command("wc /tmp/multi-megabyte", str(stream_bytes), timeout=120)
+    g.command(
+        f"wget https://luna.test:{secured.server_port}/text-tools /tmp/tools", "Saved", timeout=60
+    )
+    g.command("head /tmp/tools", "aaaa")
+    g.command("grep needle /tmp/tools && echo GREP_OK", "\nGREP_OK\n")
+    g.command("tail /tmp/tools", "line-11\n")
+    g.command("mv /tmp/tools /tmp/renamed")
+    g.command("cp /tmp/renamed /tmp/copied", timeout=60)
+    g.command("tail /tmp/copied", "line-11\n")
+
     g.command(
         "write /home/luna/grow.ljs \"for(let i=0;i<100;i++) luna.fs.write('entry-'+i,'persisted'); luna.fs.read('entry-99')\""
     )
     g.command("dev run /home/luna/grow.ljs", "persisted")
     capacity = int.from_bytes(memory(g, symbol_address("fs_file_capacity"), 4), "little")
     assert capacity > 64, capacity
-    g.command("sync", "committed", timeout=60)
+    g.command("sync", "committed", timeout=max(60, stream_bytes // 32768))
     g.command("write /tmp/protected original")
     for path, expected in [
         ("truncated-chunked", "Incomplete chunked response"),
@@ -219,8 +235,8 @@ try:
     g.command('js "while(true){}"', "interrupted")
     # Restart the real guest and verify that the expanded snapshot is mounted.
     g.close()
-    g = Guest(TEST / "tls.img", network=False, ram=128)
-    g.command("wc /tmp/multi-megabyte", "3145728")
+    g = Guest(TEST / "tls.img", network=False, ram=stream_ram)
+    g.command("wc /tmp/multi-megabyte", str(stream_bytes), timeout=120)
     g.command("cat /home/luna/entry-99", "persisted")
     report = {
         "result": "PASS",
@@ -232,8 +248,9 @@ try:
             "authenticated HTTPS download",
             "chunked transfer decoded",
             "64 KB chunked wget saved beyond the old 8 KiB command buffer",
-            "3 MiB chunked wget saved beyond the former transport and snapshot ceilings",
+            f"{stream_bytes} byte chunked wget streamed to disk with {stream_ram} MiB guest RAM",
             "more than 64 directory entries saved",
+            "head, tail, cross-block grep, binary copy and rename of disk-backed files",
             "expanded snapshot and multi-megabyte file survive guest restart",
             "incomplete chunk trailers rejected",
             "existing file preserved on failed downloads",

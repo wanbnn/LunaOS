@@ -748,7 +748,7 @@ static bool ppm_number(const char **p, int *out) {
 }
 bool gfx_load_wallpaper(const char *path) {
     File *f = fs_find(path);
-    if (!f || f->dir || strncmp(f->data, "P3", 2))
+    if (!f || f->dir || f->size > 65536 || !fs_materialize(f) || strncmp(f->data, "P3", 2))
         return false;
     const char *p = f->data + 2;
     int width, height, max;

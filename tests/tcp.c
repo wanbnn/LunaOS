@@ -65,6 +65,17 @@ static void segment(uint32_t seq,unsigned flags,const char *data,unsigned n) {
     segment_options(seq,flags,data,n,NULL,0);
 }
 int main(void) {
+    uint8_t wrapped[1400];
+    memset(rx, 0, sizeof(rx));
+    memset(rx + 65500, 0x78, 36);
+    memset(rx, 0x78, sizeof(wrapped) - 36u);
+    copy_rx_frame(wrapped, 65500, sizeof(wrapped));
+    for (size_t i = 0; i < sizeof(wrapped); i++)
+        assert(wrapped[i] == 0x78);
+    /* Header at the last aligned word, payload starts at ring byte zero. */
+    copy_rx_frame(wrapped, 65536, sizeof(wrapped) - 36u);
+    for (size_t i = 0; i < sizeof(wrapped) - 36u; i++)
+        assert(wrapped[i] == 0x78);
     setup();segment(100,0x18,"abc",3);segment(101,0x18,"bcDEF",5);
     assert(tcp.ack==106 && tcp.used==6 && !memcmp(tcp.data,"abcDEF",6));
     setup();segment(106,0x18,"ghi",3);segment(103,0x18,"def",3);

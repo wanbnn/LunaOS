@@ -132,7 +132,10 @@ static int driver_command(int argc, char **argv, char *out, size_t cap) {
             put(out, cap, "driver: only .ldrv files in your home are supported\n"); return 2;
         }
         File *file = fs_find(argv[3]);
-        if (!file || file->dir) { put(out, cap, "driver: file not found\n"); return 1; }
+        if (!file || file->dir || !fs_materialize(file)) {
+            put(out, cap, "driver: file not found\n");
+            return 1;
+        }
         if (ldev_load(file->data)) { put(out, cap, "driver: invalid or duplicate descriptor / registry full\n"); return 1; }
         put(out, cap, "Virtual device loaded (RAM only; no PCI/MMIO/IRQ).\n");
         return 0;
@@ -221,7 +224,11 @@ int developer_command(int argc, char **argv, char *out, size_t cap) {
          * Use kernel-owned scratch and release it after evaluation. */
         char *script = heap_allocate_owned((size_t)f->size + 1u, 1);
         if (!script) { put(out, cap, "dev: insufficient memory for program\n"); return 1; }
-        memcpy(script, f->data, f->size + 1u);
+        if (!fs_read_text(f, script, (size_t)f->size + 1u)) {
+            heap_release(script);
+            put(out, cap, "dev: disk read failed\n");
+            return 1;
+        }
         int result = py ? lunapy_eval_sdk(script, out, cap)
                         : javascript_eval_sdk(script, f->path, out, cap);
         heap_release(script);

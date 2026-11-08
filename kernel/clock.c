@@ -106,10 +106,11 @@ void clock_init(void) {
     File *f = fs_find("/etc/luna-clock");
     if (f) {
         char buf[512];
-        unsigned n = strlen(f->data);
+        unsigned n = f->size;
         if (n >= sizeof(buf))
             n = sizeof(buf) - 1;
-        memcpy(buf, f->data, n);
+        if (!fs_read_bytes(f, 0, buf, n))
+            n = 0;
         buf[n] = 0;
         char *p = buf;
         while (*p) {

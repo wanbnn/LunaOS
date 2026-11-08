@@ -112,12 +112,17 @@ extern int fs_file_capacity;
 typedef struct {
     char path[PATH_CAP];
     uint32_t used, size, dir;
-    char *data; /* Owned by LunaFS, dynamically sized and NUL-terminated. */
+    char *data; /* Optional owned text cache, NUL-terminated when present. */
+    unsigned disk;
+    uint64_t disk_offset; /* Backing bytes in the committed snapshot. */
 } File;
 extern File *files;
-typedef struct {
+typedef struct FileState {
     File *files;
     int capacity;
+    uint32_t snapshot_base;
+    struct FileState *next_backup;
+    bool registered;
 } FileState;
 extern char cwd[PATH_CAP];
 void fs_init(void);
@@ -128,6 +133,15 @@ int fs_create(const char *, bool);
 int fs_remove(const char *);
 int fs_write(const char *, const char *, bool);
 int fs_write_bytes(const char *, const void *, size_t, bool);
+bool fs_read_bytes(const File *, uint32_t, void *, size_t);
+bool fs_materialize(File *);
+bool fs_read_text(const File *, char *, size_t);
+int fs_copy(const char *, const char *);
+int fs_rename(const char *, const char *);
+bool fs_begin_write(const char *, bool, uint32_t);
+bool fs_write_part(const void *, size_t);
+bool fs_finish_write(void);
+void fs_abort_write(uint32_t);
 int fs_clone(FileState *destination, const File *source);
 void fs_discard_state(FileState *state);
 void fs_restore_state(FileState *backup);
@@ -139,8 +153,7 @@ void net_poll(void);
 void net_status(char *, size_t);
 bool net_set_dns(const char *); /* IPv4 address or "auto" (DHCP). */
 bool net_ping(const char *, char *, size_t);
-/* Download returns an owned heap buffer on success. Release with heap_release. */
-int net_download(const char *, char **, char *, size_t);
+bool net_download_file(const char *, const char *, uint64_t *, char *, size_t);
 int net_http(const char *, char *, size_t, char *, size_t);
 int net_https(const char *, char *, size_t, char *, size_t);
 extern bool net_ready;

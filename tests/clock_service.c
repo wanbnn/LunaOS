@@ -7,7 +7,8 @@
 #include <string.h>
 volatile uint32_t ticks, frame_clock;
 bool net_ready;
-static File saved;
+static char saved_data[8192];
+static File saved = {.data = saved_data};
 static bool exists, active;
 static int result = -11;
 static uint8_t packet[48];
@@ -20,8 +21,15 @@ int fs_write(const char *p, const char *s, bool a) {
     (void)p;
     (void)a;
     strcpy(saved.data, s);
+    saved.size = strlen(s);
     exists = true;
     return 0;
+}
+bool fs_read_bytes(const File *file, uint32_t offset, void *out, size_t bytes) {
+    if (offset > file->size || bytes > file->size - offset)
+        return false;
+    memcpy(out, file->data + offset, bytes);
+    return true;
 }
 bool fs_save(void) {
     return true;

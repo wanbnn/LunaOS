@@ -355,3 +355,9 @@ test-update: all build/host-bearssl/hash/sha2small.o build/host-bearssl/codec/en
 	$(PYTHON) tests/updatepack.py
 	$(CC) -std=c11 -O2 -ffunction-sections -fdata-sections -Wall -Wextra -Werror -Ikernel -Iui -Itests/update_mock -Ithird_party/bearssl/inc kernel/update.c kernel/update_format.c ui/web_image.c tests/update.c build/host-bearssl/hash/sha2small.o build/host-bearssl/codec/enc32be.o build/host-bearssl/codec/dec32be.o -Wl,--gc-sections -o build/update-test-engine
 	./build/update-test-engine
+
+.PHONY: test-fs-streaming
+test-fs-streaming:
+	@mkdir -p build
+	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -Itests/fs_mock -Ikernel kernel/fs.c kernel/fs_volume.c net/http_stream.c tests/fs_streaming.c -o build/fs-streaming-test
+	./build/fs-streaming-test

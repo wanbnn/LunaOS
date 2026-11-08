@@ -229,7 +229,7 @@ static void browser_load(const char *url) {
         browser_body[0] = 0;
     } else if (!strncmp(target, "file://", 7)) {
         File *f = fs_find(target + 7);
-        if (!f || f->dir) {
+        if (!f || f->dir || f->size >= WEB_CAP || !fs_materialize(f)) {
             browser_error_page("The file was not found in the Luna file system.");
         } else {
             char error[256];
@@ -584,8 +584,15 @@ static void file_view(int x, int y, int w, int h) {
         File *f = &files[file_indices[selected_file]];
         text(x + split + 28, y + 69, basename(f->path), 16, WHITE);
         label(x + split + 28, y + 106, f->dir ? "FOLDER" : "DOCUMENT PREVIEW");
+        char preview[2048];
+        size_t n = f->size < sizeof(preview) - 1u ? f->size : sizeof(preview) - 1u;
+        bool readable = f->dir || fs_read_bytes(f, 0, preview, n);
+        preview[readable ? n : 0] = 0;
         wrapped(x + split + 28, y + 140, w - split - 40,
-                f->dir ? "Enter to open this folder." : f->data, 13, (h - 150) / 21, false);
+                f->dir     ? "Enter to open this folder."
+                : readable ? preview
+                           : "Disk read failed.",
+                13, (h - 150) / 21, false);
     }
 }
 static void browser(int x, int y, int w, int h) {

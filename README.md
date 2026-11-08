@@ -34,7 +34,7 @@ O LunaOS tem **bootloader próprio**, **kernel próprio em C**, **interface grá
 - Gerenciamento dinâmico de memória física e contabilidade de RAM por processo.
 - Calendário mensal, configuração de data e hora offline e sincronização **SNTP/NTP**.
 
-A geração atual produz `dist/LunaOS.img` (disco raw de **32 MiB**) e `dist/LunaOS.iso` (CD inicializável BIOS de aproximadamente **32,125 MiB**). O limite de **120 MB** continua sendo um objetivo do projeto, não uma garantia para futuras integrações.
+A geração atual produz `dist/LunaOS.img` (disco raw de **66 MiB**) e `dist/LunaOS.iso` (CD inicializável BIOS de aproximadamente **66,125 MiB**). O limite de **120 MB** continua sendo um objetivo do projeto, não uma garantia para futuras integrações.
 
 ## Funcionalidades e limitações
 
@@ -284,7 +284,8 @@ O LunaOS utiliza componentes de terceiros, incluindo **musl**, **QuickJS**, **Be
 
 ### LunaFS2: arquivos maiores e binários
 
-O LunaFS aloca a tabela de arquivos e os dados sob demanda na RAM. Os snapshots
+O LunaFS aloca o diretório sob demanda e mantém arquivos grandes no disco. O
+`wget` recebe os dados em blocos, com memória limitada durante a transferência. Os snapshots
 `LUNAFS1` e `LUNAFS2` existentes continuam legíveis. Em discos LunaOS com espaço
 livre após a imagem do sistema, uma partição de dados permite expandir a área
 persistente além dos antigos 2 MiB por snapshot. A capacidade depende do disco,

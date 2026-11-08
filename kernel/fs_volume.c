@@ -84,7 +84,7 @@ bool fs_volume(unsigned disk, bool create, FsVolume *out) {
         if (i < occupied && ends[i] > cursor)
             cursor = ends[i];
     }
-    if (best_size < 4)
+    if (best_size < LEGACY_SLOT * 2u)
         return true;
     *out = (FsVolume){best_start, best_size / 2u, true, false};
     if (!create)

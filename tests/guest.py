@@ -36,7 +36,7 @@ assert Path(qemu).exists(), "Install qemu-system-x86 (host development dependenc
 
 
 class Guest:
-    def __init__(self, disk, network=True, ram=64, extra_args=None, setup=False, cdrom=False):
+    def __init__(self, disk, network=True, ram=64, extra_args=None, setup=False, cdrom=False, boot_timeout=None):
         if os.environ.get("LUNA_TEST_OFFLINE") == "1":
             network = False
         self.serialpath = TEST / "serial.sock"
@@ -113,7 +113,7 @@ class Guest:
         self.qf = self.qmp.makefile("rwb", buffering=0)
         self.qread()
         self.qcommand("qmp_capabilities")
-        self.wait("READY", 120 if UEFI else 30)
+        self.wait("READY", boot_timeout or (120 if UEFI else 30))
         if not setup and memory(self, symbol_address("setup_active"), 1) != b"\0":
             self.key("esc")
             wait_until(lambda: memory(self, symbol_address("setup_active"), 1) == b"\0")

@@ -32,7 +32,7 @@ static void dn_output(void *ctx, const void *data, size_t n) {
 static size_t trust_roots(void) {
     memcpy(roots, TAs, sizeof(TAs));
     File *f = fs_find("/etc/tls/custom.pem");
-    if (!f || f->dir)
+    if (!f || f->dir || f->size > 65536 || !fs_materialize(f))
         return TAs_NUM;
     br_pem_decoder_context pem;
     br_pem_decoder_init(&pem);

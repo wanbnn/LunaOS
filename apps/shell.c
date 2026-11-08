@@ -170,9 +170,128 @@ static const char *content(int argc, char **argv, const char *input, char *out) 
             emit(out, "error: file not found\n");
             return 0;
         }
-        return f->data;
+        static char text[CAP];
+        if (!fs_read_text(f, text, sizeof(text))) {
+            emit(out, "error: text command buffer exceeded or disk read failed\n");
+            return 0;
+        }
+        return text;
     }
     return input ? input : "";
+}
+static int file_head_tail(const File *file, bool tail, char *out) {
+    uint8_t block[4096];
+    uint32_t start = 0;
+    if (tail) {
+        uint32_t after[11] = {0};
+        unsigned lines = 0;
+        bool end = false;
+        for (uint32_t offset = 0; offset < file->size && !end;) {
+            size_t n = file->size - offset;
+            if (n > sizeof(block))
+                n = sizeof(block);
+            if (!fs_read_bytes(file, offset, block, n))
+                goto failed;
+            for (size_t i = 0; i < n; i++) {
+                if (!block[i]) {
+                    end = true;
+                    break;
+                }
+                if (block[i] == '\n')
+                    after[lines++ % 11u] = offset + (uint32_t)i + 1u;
+            }
+            offset += (uint32_t)n;
+        }
+        if (lines > 10)
+            start = after[(lines - 11u) % 11u];
+    }
+    unsigned lines = 0;
+    for (uint32_t offset = start; offset < file->size;) {
+        size_t n = file->size - offset;
+        if (n > sizeof(block))
+            n = sizeof(block);
+        if (!fs_read_bytes(file, offset, block, n))
+            goto failed;
+        for (size_t i = 0; i < n; i++) {
+            if (!block[i] || lines == 10 || strlen(out) >= CAP - 1u)
+                return 0;
+            char text[2] = {(char)block[i], 0};
+            emit(out, text);
+            if (block[i] == '\n')
+                lines++;
+        }
+        offset += (uint32_t)n;
+    }
+    return 0;
+failed:
+    emit(out, "error: disk read failed\n");
+    return 1;
+}
+static int file_grep(const File *file, const char *pattern, char *out) {
+    size_t length = strlen(pattern);
+    unsigned prefix[512] = {0};
+    if (length >= 512)
+        return 1;
+    for (unsigned i = 1, matched = 0; i < length; i++) {
+        while (matched && pattern[i] != pattern[matched])
+            matched = prefix[matched - 1u];
+        if (pattern[i] == pattern[matched])
+            matched++;
+        prefix[i] = matched;
+    }
+    uint8_t block[4096];
+    char line[CAP];
+    size_t used = 0;
+    unsigned matched = 0;
+    bool hit = !length, any = false, end = false;
+    for (uint32_t offset = 0; offset < file->size && !end;) {
+        size_t n = file->size - offset;
+        if (n > sizeof(block))
+            n = sizeof(block);
+        if (!fs_read_bytes(file, offset, block, n)) {
+            emit(out, "grep: disk read failed\n");
+            return 1;
+        }
+        for (size_t i = 0; i < n; i++) {
+            char byte = (char)block[i];
+            if (!byte) {
+                end = true;
+                break;
+            }
+            if (byte == '\n') {
+                if (hit) {
+                    line[used] = 0;
+                    emit(out, line);
+                    emit(out, "\n");
+                    any = true;
+                }
+                used = 0;
+                matched = 0;
+                hit = !length;
+                if (any && strlen(out) >= CAP - 1u)
+                    return 0;
+                continue;
+            }
+            if (used + 1u < sizeof(line))
+                line[used++] = byte;
+            if (!hit) {
+                while (matched && byte != pattern[matched])
+                    matched = prefix[matched - 1u];
+                if (byte == pattern[matched])
+                    matched++;
+                if (matched == length)
+                    hit = true;
+            }
+        }
+        offset += (uint32_t)n;
+    }
+    if (used && hit) {
+        line[used] = 0;
+        emit(out, line);
+        emit(out, "\n");
+        any = true;
+    }
+    return any ? 0 : 1;
 }
 static bool direct_child(const char *p) {
     size_t n = strlen(cwd);
@@ -254,7 +373,14 @@ static int execute(int argc, char **a, const char *input, char *out) {
                 emit(out, "cat: file not found\n");
                 return 1;
             }
-            emit(out, f->data);
+            char text[CAP];
+            size_t n = f->size < sizeof(text) - 1u ? f->size : sizeof(text) - 1u;
+            if (!fs_read_bytes(f, 0, text, n)) {
+                emit(out, "cat: disk read failed\n");
+                return 1;
+            }
+            text[n] = 0;
+            emit(out, text);
         }
     } else if (!strcmp(c, "mkdir") || !strcmp(c, "touch")) {
         if (argc != 2) {
@@ -300,12 +426,15 @@ static int execute(int argc, char **a, const char *input, char *out) {
             emit(out, "error: invalid or identical destination\n");
             return 1;
         }
-        if (fs_write(p, f->data, false)) {
-            emit(out, "error: cannot write destination\n");
-            return 1;
+        if (!strcmp(c, "mv")) {
+            if (fs_rename(a[1], p)) {
+                emit(out, "mv: cannot rename file\n");
+                return 1;
+            }
+            return 0;
         }
-        if (!strcmp(c, "mv") && fs_remove(a[1])) {
-            emit(out, "mv: source could not be removed\n");
+        if (fs_copy(a[1], p)) {
+            emit(out, "error: cannot write destination\n");
             return 1;
         }
     } else if (!strcmp(c, "head") || !strcmp(c, "tail") || !strcmp(c, "wc") || !strcmp(c, "grep")) {
@@ -321,7 +450,7 @@ static int execute(int argc, char **a, const char *input, char *out) {
                     emit(out, "grep: file not found\n");
                     return 1;
                 }
-                s = f->data;
+                return file_grep(f, a[1], out);
             } else
                 s = input ? input : "";
             bool match = false;
@@ -347,6 +476,51 @@ static int execute(int argc, char **a, const char *input, char *out) {
                 s = *end ? end + 1 : end;
             }
             return match ? 0 : 1;
+        }
+        if (argc > 1 && (!strcmp(c, "head") || !strcmp(c, "tail"))) {
+            File *file = fs_find(a[1]);
+            if (!file || file->dir) {
+                emit(out, "error: file not found\n");
+                return 1;
+            }
+            return file_head_tail(file, !strcmp(c, "tail"), out);
+        }
+        if (!strcmp(c, "wc") && argc > 1) {
+            File *file = fs_find(a[1]);
+            if (!file || file->dir) {
+                emit(out, "wc: file not found\n");
+                return 1;
+            }
+            unsigned lines = 0, words = 0;
+            bool inword = false;
+            uint8_t block[4096];
+            for (uint32_t offset = 0; offset < file->size;) {
+                size_t n = file->size - offset;
+                if (n > sizeof(block))
+                    n = sizeof(block);
+                if (!fs_read_bytes(file, offset, block, n)) {
+                    emit(out, "wc: disk read failed\n");
+                    return 1;
+                }
+                for (size_t i = 0; i < n; i++) {
+                    if (block[i] == '\n')
+                        lines++;
+                    if (block[i] == ' ' || block[i] == '\n' || block[i] == '\t')
+                        inword = false;
+                    else if (!inword) {
+                        words++;
+                        inword = true;
+                    }
+                }
+                offset += (uint32_t)n;
+            }
+            num(out, lines);
+            emit(out, " lines  ");
+            num(out, words);
+            emit(out, " words  ");
+            num(out, file->size);
+            emit(out, " bytes\n");
+            return 0;
         }
         s = content(argc, a, input, out);
         if (!s)
@@ -490,18 +664,11 @@ static int execute(int argc, char **a, const char *input, char *out) {
             return 2;
         }
         char err[256];
-        char *body = 0;
-        int n = net_download(a[1], &body, err, sizeof(err));
-        if (n < 0) {
+        uint64_t n = 0;
+        if (!net_download_file(a[1], a[2], &n, err, sizeof(err))) {
             emit(out, "wget: ");
             emit(out, err);
             emit(out, "\n");
-            return 1;
-        }
-        int saved = fs_write_bytes(a[2], body, (size_t)n, false);
-        heap_release(body);
-        if (saved) {
-            emit(out, "wget: cannot save file\n");
             return 1;
         }
         emit(out, "Saved ");
@@ -548,7 +715,10 @@ static int execute(int argc, char **a, const char *input, char *out) {
             emit(out, "source: script exceeds shell execution buffer; split the script\n");
             return 1;
         }
-        strcpy(script, f->data);
+        if (!fs_read_text(f, script, sizeof(script))) {
+            emit(out, "source: disk read failed\n");
+            return 1;
+        }
         depth++;
         char *p = script;
         while (*p) {
@@ -821,7 +991,11 @@ void shell_run(const char *line) {
                         strcpy(out, "lunaSH: input exceeds pipeline buffer\n");
                         valid = false;
                         status = 1;
-                    } else strcpy(input, f->data);
+                } else if (!fs_read_text(f, input, sizeof(input))) {
+                    strcpy(out, "lunaSH: disk read failed\n");
+                    valid = false;
+                    status = 1;
+                }
             }
             if (valid)
                 status = execute(argc, argv, input, out);

@@ -1,3 +1,4 @@
+#include "heap.h"
 /* ES2025 runtime for LunaOS scripting. This is NOT a DOM/CSS browser engine. */
 #include "quickjs.h"
 #include "web.h"
@@ -62,7 +63,26 @@ static JSValue sdk_read(JSContext *ctx, JSValueConst self, int argc, JSValueCons
     if (!allowed) return JS_ThrowTypeError(ctx, "path must be within your home directory");
     File *f = fs_find(path);
     if (!f || f->dir) return JS_NULL;
-    return JS_NewStringLen(ctx, f->data, f->size);
+    uint64_t offset = 0, length = f->size;
+    if (argc > 1 && JS_ToIndex(ctx, &offset, argv[1]))
+        return JS_EXCEPTION;
+    if (offset > f->size)
+        return JS_ThrowRangeError(ctx, "offset is past end of file");
+    length = f->size - offset;
+    if (argc > 2 && JS_ToIndex(ctx, &length, argv[2]))
+        return JS_EXCEPTION;
+    if (length > f->size - offset)
+        return JS_ThrowRangeError(ctx, "read extends past end of file");
+    char *buffer = heap_allocate((size_t)length + 1u);
+    if (!buffer)
+        return JS_ThrowOutOfMemory(ctx);
+    if (!fs_read_bytes(f, (uint32_t)offset, buffer, (size_t)length)) {
+        heap_release(buffer);
+        return JS_ThrowTypeError(ctx, "disk read failed");
+    }
+    JSValue result = JS_NewStringLen(ctx, buffer, (size_t)length);
+    heap_release(buffer);
+    return result;
 }
 static JSValue sdk_write(JSContext *ctx, JSValueConst self, int argc, JSValueConst *argv) {
     (void)self;

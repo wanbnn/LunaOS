@@ -29,7 +29,8 @@ void settings_init(void) {
         return;
     char buf[LUNA_TEXT_BUFFER];
     if (f->size >= sizeof(buf)) return;
-    strcpy(buf, f->data);
+    if (!fs_read_text(f, buf, sizeof(buf)))
+        return;
     char *p = buf;
     while (*p) {
         char *k = p;

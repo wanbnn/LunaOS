@@ -190,7 +190,8 @@ void setup_init(void) {
     login_busy = false;
     username[0] = erase_text[0] = layout_test[0] = 0;
     File *done = fs_find("/etc/setup-complete");
-    installed = done && !done->dir && !strcmp(done->data, "LunaOS setup v1\n");
+    installed = done && !done->dir && done->size < 128 && fs_materialize(done) &&
+                !strcmp(done->data, "LunaOS setup v1\n");
     setup_active = true;
     if (installed) {
         if (!account_load()) {
