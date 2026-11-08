@@ -46,15 +46,58 @@ WebNode *web_node_new(unsigned char type) {
     n->type = type;
     return n;
 }
-void web_node_append(WebNode *parent, WebNode *child) {
-    child->parent = parent;
-    child->prev = parent->last_child;
-    child->next = 0;
-    if (parent->last_child)
-        parent->last_child->next = child;
+/* DOM tree invariants: a node has one parent, never its descendant.
+ * Detached nodes remain owned by the caller until explicitly destroyed. */
+bool web_node_contains(const WebNode *ancestor, const WebNode *node) {
+    for (const WebNode *p = node; p; p = p->parent)
+        if (p == ancestor)
+            return true;
+    return false;
+}
+void web_node_detach(WebNode *node) {
+    if (!node || !node->parent)
+        return;
+    WebNode *parent = node->parent;
+    if (node->prev)
+        node->prev->next = node->next;
     else
-        parent->first_child = child;
-    parent->last_child = child;
+        parent->first_child = node->next;
+    if (node->next)
+        node->next->prev = node->prev;
+    else
+        parent->last_child = node->prev;
+    node->parent = node->next = node->prev = 0;
+}
+bool web_node_insert_before(WebNode *parent, WebNode *child, WebNode *reference) {
+    if (!parent || !child || web_node_contains(child, parent))
+        return false;
+    if (reference && reference->parent != parent)
+        return false;
+    if (reference == child)
+        return true;
+    web_node_detach(child);
+    child->parent = parent;
+    if (!reference) {
+        child->prev = parent->last_child;
+        if (parent->last_child)
+            parent->last_child->next = child;
+        else
+            parent->first_child = child;
+        parent->last_child = child;
+        child->next = 0;
+    } else {
+        child->next = reference;
+        child->prev = reference->prev;
+        if (reference->prev)
+            reference->prev->next = child;
+        else
+            parent->first_child = child;
+        reference->prev = child;
+    }
+    return true;
+}
+void web_node_append(WebNode *parent, WebNode *child) {
+    (void)web_node_insert_before(parent, child, 0);
 }
 const char *web_attr(const WebNode *node, const char *name) {
     for (WebAttr *a = node->attrs; a; a = a->next)
@@ -357,6 +400,10 @@ static bool implied_close(const char *open, const char *incoming) {
         return is_block_tag(incoming);
     if (!strcmp(open, "li"))
         return !strcmp(incoming, "li");
+    if (!strcmp(open, "rt") || !strcmp(open, "rp"))
+        return !strcmp(incoming, "rt") || !strcmp(incoming, "rp");
+    if (!strcmp(open, "optgroup"))
+        return !strcmp(incoming, "optgroup");
     if (!strcmp(open, "dt") || !strcmp(open, "dd"))
         return !strcmp(incoming, "dt") || !strcmp(incoming, "dd");
     if (!strcmp(open, "option"))
@@ -365,8 +412,16 @@ static bool implied_close(const char *open, const char *incoming) {
         return !strcmp(incoming, "td") || !strcmp(incoming, "th") || !strcmp(incoming, "tr");
     if (!strcmp(open, "tr"))
         return !strcmp(incoming, "tr") || !strcmp(incoming, "thead") || !strcmp(incoming, "tbody");
-    if (!strcmp(open, "thead") || !strcmp(open, "tbody"))
-        return !strcmp(incoming, "tbody") || !strcmp(incoming, "tfoot");
+    if (!strcmp(open, "thead") || !strcmp(open, "tbody") || !strcmp(open, "tfoot"))
+        return !strcmp(incoming, "thead") || !strcmp(incoming, "tbody") ||
+               !strcmp(incoming, "tfoot");
+    if (!strcmp(open, "colgroup"))
+        return !strcmp(incoming, "colgroup");
+    if (!strcmp(open, "h1") || !strcmp(open, "h2") || !strcmp(open, "h3") ||
+        !strcmp(open, "h4") || !strcmp(open, "h5") || !strcmp(open, "h6"))
+        return !strcmp(incoming, "h1") || !strcmp(incoming, "h2") ||
+               !strcmp(incoming, "h3") || !strcmp(incoming, "h4") ||
+               !strcmp(incoming, "h5") || !strcmp(incoming, "h6");
     return false;
 }
 static void close_implied(WebParser *ps, const char *incoming) {
