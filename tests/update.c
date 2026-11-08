@@ -10,13 +10,16 @@
 
 bool net_ready = true, setup_active;
 uint32_t memory_mb = 256;
+volatile uint32_t frame_clock;
+void serial_write(const char *message) { (void)message; }
+void number(char *out, uint32_t value) { snprintf(out, 24, "%u", value); }
 static Task current = {.pid = 9};
 static DiskInfo info = {.present = true, .supported = true, .sectors = LUNA_IMAGE_BYTES / 512};
 static uint8_t *disk, *original, *wanted;
 static uint8_t source_manifest[UPDATE_MANIFEST_BYTES];
 static unsigned requests, writes, reads, restarts, allocations;
 static int fail_download, corrupt_chunk, fail_write, fail_read, fail_flush, corrupt_readback, fail_alloc, bad_manifest;
-static bool save_ok = true, same_commit;
+static bool save_ok = true, same_commit, enable_delta;
 static unsigned transient_failures;
 Task *task_current(void) { return &current; }
 const char *system_text(const char *en, const char *pt) { (void)pt; return en; }
@@ -62,37 +65,72 @@ void append(char *out, const char *s, size_t cap) {
     memcpy(out + n, s, len); out[n + len] = 0;
 }
 int net_https(const char *url, char *out, size_t cap, char *error, size_t ecap) {
-    requests++; error[0] = 0;
-    if (strstr(url, "/git/ref/heads/main")) {
-        assert(cap > 80);
-        return snprintf(out, cap, "{\"object\":{\"sha\":\"%.*s\"}}", 40, same_commit ? (const uint8_t *)"0000000000000000000000000000000000000000" : source_manifest + 24);
+    (void)ecap;
+    requests++;
+    error[0] = 0;
+    assert(strstr(url, "/git/ref/heads/main") && cap > 80);
+    return snprintf(out, cap, "{\"object\":{\"sha\":\"%.*s\"}}", 40,
+                    same_commit ? (const uint8_t *)"0000000000000000000000000000000000000000" :
+                    source_manifest + 24);
+}
+/* Simulated HTTPS streams exercise the real v2 parser, SHA decoder, and
+ * disk installer, using on-disk packages produced by the Python release tool. */
+bool net_https_stream(const char *url, NetHttpsSink sink, void *context, uint64_t *written,
+                      char *error, size_t ecap) {
+    requests++;
+    error[0] = 0;
+    *written = 0;
+    bool delta = strstr(url, "/update-from-") != 0;
+    if (delta && !enable_delta) {
+        snprintf(error, ecap, "HTTP status 404.");
+        return false;
     }
-    if (strstr(url, "update.manifest")) {
-        assert(cap > sizeof(source_manifest));
-        memcpy(out, source_manifest, sizeof(source_manifest));
-        if (bad_manifest) out[64] ^= 1;
-        return sizeof(source_manifest);
-    }
-    const char *name = strrchr(url, '/'); assert(name);
     if (transient_failures) {
         transient_failures--;
         snprintf(error, ecap, "Transport interrupted.");
-        return -1;
+        return false;
     }
-    if (fail_download) { snprintf(error, ecap, "HTTP status 503."); return -1; }
-    char path[256]; snprintf(path, sizeof(path), "build/update-test%s", name);
-    FILE *f = fopen(path, "rb"); assert(f);
-    unsigned n = fread(out, 1, cap, f); assert(!ferror(f) && feof(f) && n < cap); fclose(f);
-    if (corrupt_chunk) { out[0] ^= 1; corrupt_chunk = 0; }
-    out[n] = 0;
-    return n;
+    if (fail_download) {
+        snprintf(error, ecap, "HTTP status 503.");
+        return false;
+    }
+    char path[256];
+    if (delta)
+        snprintf(path, sizeof(path), "build/update-test/update-from-%040d.pack", 0);
+    else
+        strcpy(path, "build/update-test/update.pack");
+    FILE *f = fopen(path, "rb");
+    assert(f);
+    unsigned char data[4096];
+    size_t n;
+    uint64_t offset = 0;
+    bool accepted = true;
+    while ((n = fread(data, 1, sizeof(data), f))) {
+        if (bad_manifest && offset <= 64 && offset + n > 64)
+            data[64 - offset] ^= 1;
+        if (corrupt_chunk && !delta && offset <= UPDATE_MANIFEST_BYTES &&
+            offset + n > UPDATE_MANIFEST_BYTES) {
+            data[UPDATE_MANIFEST_BYTES - offset] ^= 1;
+            corrupt_chunk = 0;
+        }
+        if (!sink(context, data, n)) {
+            accepted = false;
+            snprintf(error, ecap, "Bundle stream rejected.");
+            break;
+        }
+        *written += n;
+        offset += n;
+    }
+    assert(!ferror(f));
+    fclose(f);
+    return accepted;
 }
 static void reset(void) {
     memcpy(disk, original, LUNA_IMAGE_BYTES);
     requests = writes = reads = restarts = allocations = 0;
     transient_failures = 0;
     fail_download = corrupt_chunk = fail_write = fail_read = fail_flush = corrupt_readback = fail_alloc = bad_manifest = 0;
-    net_ready = save_ok = true; same_commit = setup_active = false; memory_mb = 256;
+    net_ready = save_ok = true; same_commit = setup_active = enable_delta = false; memory_mb = 256;
 }
 static void unchanged(void) {
     assert(!restarts && !memcmp(disk, original, LUNA_IMAGE_BYTES));
@@ -131,7 +169,7 @@ int main(void) {
     reset(); fail_alloc = 4; update_run(); unchanged(); assert(!writes);
     reset(); save_ok = false; update_run(); unchanged(); assert(!writes);
     reset(); fail_read = 2; update_run(); unchanged(); assert(!writes);
-    reset(); fail_write = 11; update_run(); unchanged(); assert(writes > 11);
+    reset(); fail_write = 3; update_run(); unchanged(); assert(writes > 3);
     reset(); fail_flush = 1; update_run(); unchanged(); assert(writes);
     reset(); corrupt_readback = 1; update_run(); unchanged(); assert(writes);
     reset();
@@ -142,6 +180,19 @@ int main(void) {
     memcpy(wanted + 8192 * 512, original + 8192 * 512, 4096 * 1024);
     assert(restarts == 1 && !memcmp(wanted, disk, LUNA_IMAGE_BYTES));
     assert(!update_busy() && !update_owner() && update_progress() == 100);
+    /* Exact-base differential: only changed blocks are in one streamed pack. */
+    f = fopen("build/update-test/base.img", "rb"); assert(f);
+    assert(fread(original, 1, LUNA_IMAGE_BYTES, f) == LUNA_IMAGE_BYTES); fclose(f);
+    memcpy(original + 440, "TEST", 4);
+    memset(original + 8192 * 512, 0xa5, 4096 * 1024);
+    reset(); enable_delta = true;
+    update_run();
+    assert(requests == 2 && restarts == 1 && !memcmp(wanted, disk, LUNA_IMAGE_BYTES));
+    /* A modified unselected sector must trigger full-package fallback BEFORE writing. */
+    original[3 * UPDATE_CHUNK_BYTES + 17] ^= 0x2c;
+    reset(); enable_delta = true;
+    update_run();
+    assert(requests == 3 && restarts == 1 && !memcmp(wanted, disk, LUNA_IMAGE_BYTES));
     free(disk); free(original); free(wanted);
     puts("PASS: automatic install/restart, user-data preservation, corrupt/missing downloads, allocation failure, write/flush/readback rollback");
     return 0;

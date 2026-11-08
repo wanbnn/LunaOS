@@ -7,6 +7,8 @@
 #define UPDATE_REPOSITORY "wanbnn/LunaOS"
 /* Runs on the Settings task; network waits yield to the desktop. */
 void update_run(void);
+#define UPDATE_DELTA_HEADER_BYTES 80u
+#define UPDATE_DELTA_MAGIC "LUNADLT2"
 bool update_busy(void);
 uint32_t update_owner(void);
 unsigned update_progress(void);
