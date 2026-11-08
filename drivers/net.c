@@ -1283,7 +1283,7 @@ static int http_once(const char *url, char *out, size_t cap, char *error, size_t
     bool complete = true;
     for (;;) {
         if (used + 1u == capacity) {
-            if (!download || capacity > 0x7fffffffu / 2u) {
+            if (!download || capacity > SIZE_MAX / 2u) {
                 append(error, "Response exceeds the destination size limit.", ecap);
                 complete = false;
                 break;
