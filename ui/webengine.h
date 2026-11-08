@@ -13,6 +13,7 @@ char *web_strndup(const char *s, size_t n);
 int web_strcasecmp(const char *a, const char *b);
 
 enum { WEB_ELEMENT, WEB_TEXT, WEB_COMMENT };
+enum { WEB_NS_HTML = 0, WEB_NS_SVG = 1, WEB_NS_MATHML = 2 };
 #define WEB_AUTO (-9999)
 enum { WEB_DISPLAY_BLOCK, WEB_DISPLAY_INLINE, WEB_DISPLAY_INLINE_BLOCK, WEB_DISPLAY_NONE };
 enum { WEB_ALIGN_LEFT, WEB_ALIGN_CENTER, WEB_ALIGN_RIGHT };
@@ -44,6 +45,7 @@ typedef struct {
 
 typedef struct WebNode {
     unsigned char type;
+    unsigned char namespace_id; /* HTML, SVG, or MathML, not inferred from case */
     char *tag;
     char *text;
     WebAttr *attrs;
