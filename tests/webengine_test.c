@@ -131,6 +131,59 @@ static void layout_regressions(void) {
     web_free_tree(root);
 }
 
+
+static void html_dom_regressions(void) {
+    const char *html =
+        "<!doctype html><html><head><title>A &amp; B</TITLE  ></head><body>"
+        "<section id='tree'>first <b>second</b> third <i>fourth</i></section>"
+        "<input disabled checked='' id='control' id='ignored'>"
+        "<div id='outer'/><span id='nested'>inside</span></div>"
+        "<textarea id='area'>A &lt; B &amp; C</TEXTAREA >"
+        "<script id='script'>if (a < b) { x = '&amp;'; }</SCRIPT >"
+        "<p id='unicode'>&#x1F600; &#128512; &#x110000; &#0; &#xZZ; tail</p>"
+        "<p id='end'>before</p><p id='next'>after</p>"
+        "</body></html>";
+    WebNode *root = 0;
+    char error[128] = {0};
+    check(web_parse(html, strlen(html), &root, error, sizeof(error)),
+          "HTML/DOM regression fixture parses");
+    if (!root)
+        return;
+    char value[256];
+    WebNode *tree = web_find_by_id(root, "tree");
+    web_node_text(tree, value, sizeof(value));
+    check(!strcmp(value, "first second third fourth"),
+          "textContent collects all text children in document order");
+    WebNode *control = web_find_by_id(root, "control");
+    check(control && !strcmp(web_attr(control, "disabled"), "") &&
+          !strcmp(web_attr(control, "checked"), "") &&
+          !strcmp(web_attr(control, "id"), "control"),
+          "boolean HTML attributes are empty and duplicate attributes keep first value");
+    WebNode *nested = web_find_by_id(root, "nested");
+    check(nested && nested->parent == web_find_by_id(root, "outer"),
+          "self-closing slash does not close a non-void HTML element");
+    WebNode *area = web_find_by_id(root, "area");
+    web_node_text(area, value, sizeof(value));
+    check(!strcmp(value, "A < B & C"),
+          "textarea RCDATA decodes entities and recognizes case-insensitive close");
+    WebNode *script = web_find_by_id(root, "script");
+    web_node_text(script, value, sizeof(value));
+    check(!strcmp(value, "if (a < b) { x = '&amp;'; }"),
+          "script raw text remains undecoded until case-insensitive end tag");
+    WebNode *title = web_find_first(root, "title");
+    web_node_text(title, value, sizeof(value));
+    check(!strcmp(value, "A & B"), "title RCDATA decodes entities");
+    WebNode *unicode = web_find_by_id(root, "unicode");
+    web_node_text(unicode, value, sizeof(value));
+    check(strstr(value, "\\xF0\\x9F\\x98\\x80") != 0 &&
+          strstr(value, "\\xEF\\xBF\\xBD") != 0 &&
+          strstr(value, "&#xZZ; tail") != 0,
+          "numeric entities support supplementary planes and preserve malformed references");
+    check(web_find_by_id(root, "next")->parent == web_find_by_id(root, "end")->parent,
+          "explicit paragraph close preserves sibling structure");
+    web_free_tree(root);
+}
+
 int main(void) {
     WebNode *root = 0;
     char error[128];
@@ -232,6 +285,7 @@ int main(void) {
     css_free_sheet(rules, count);
     web_free_tree(root);
     layout_regressions();
+    html_dom_regressions();
     printf(failures ? "\n%d check(s) failed\n" : "\nall checks passed\n", failures);
     return failures ? 1 : 0;
 }
