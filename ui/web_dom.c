@@ -614,10 +614,16 @@ bool web_parse(const char *html, size_t len, WebNode **root, char *error, size_t
     while (ps.p < ps.end && !ps.failed) {
         if (*ps.p == '<') {
             if (ps.p + 3 < ps.end && !strncmp(ps.p, "<!--", 4)) {
-                const char *end = ps.p + 4;
+                const char *begin = ps.p + 4;
+                const char *end = begin;
                 while (end + 2 < ps.end && strncmp(end, "-->", 3))
                     end++;
-                ps.p = end + 3 <= ps.end ? end + 3 : ps.end;
+                bool closed = end + 2 < ps.end;
+                const char *content_end = closed ? end : ps.end;
+                WebNode *comment = web_node_new(WEB_COMMENT);
+                comment->text = web_strndup(begin, (size_t)(content_end - begin));
+                web_node_append(current(&ps), comment);
+                ps.p = closed ? end + 3 : ps.end;
                 continue;
             }
             if (ps.p + 1 < ps.end && ps.p[1] == '!') {
