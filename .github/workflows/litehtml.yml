@@ -3,6 +3,7 @@ on:
   pull_request:
     paths:
       - '.gitmodules'
+      - 'Makefile'
       - 'third_party/litehtml'
       - 'ui/litehtml_bridge.h'
       - 'ui/litehtml_bridge.cpp'
@@ -31,6 +32,15 @@ jobs:
           g++ -m32 -std=c++17 -ffreestanding -fno-exceptions -fno-rtti -fno-pie -fno-stack-protector -c lib/cxx_runtime.cpp -o build/lib/cxx_runtime.o
           gcc -m32 -std=gnu11 -ffreestanding -fno-builtin -fno-pie -fno-stack-protector -Ikernel -Ibuild -Iui -c ui/litehtml_graphics.c -o build/ui/litehtml_graphics.o
           file build/lib/cxx_runtime.o build/ui/litehtml_graphics.o
+      - name: Build experimental i386 libstdc++ and litehtml static objects
+        run: |
+          test -f "$(g++ -m32 -print-file-name=libstdc++.a)"
+          make litehtml-native
+          file build/litehtml-native/liblitehtml.a build/ui/litehtml_bridge.o build/lib/cxx_runtime.o
+      - name: Link experimental C++ renderer into LunaOS kernel
+        run: |
+          python3 -m pip install --target .tools/python -r requirements-dev.txt
+          make LUNA_LITEHTML=1 build/kernel.elf
       - name: Build pinned litehtml v0.10 with C++17 runtime
         run: |
           cmake -S third_party/litehtml -B build/litehtml-host -DCMAKE_BUILD_TYPE=Release -DLITEHTML_BUILD_TESTING=OFF
