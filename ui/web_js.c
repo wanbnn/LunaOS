@@ -26,6 +26,34 @@ static JSRuntime *js_runtime;
 static JSContext *js_context;
 static WebNode *js_document;
 static WebTimer *js_timers;
+/* Keep detached nodes alive for JS references until document teardown.
+ * Reattached nodes are removed from this list so the document owns them. */
+typedef struct WebDetachedNode {
+    WebNode *node;
+    struct WebDetachedNode *next;
+} WebDetachedNode;
+static WebDetachedNode *js_detached;
+static void untrack_detached(WebNode *node) {
+    WebDetachedNode **link = &js_detached;
+    while (*link) {
+        if ((*link)->node == node) {
+            WebDetachedNode *entry = *link;
+            *link = entry->next;
+            web_free(entry);
+            return;
+        }
+        link = &(*link)->next;
+    }
+}
+static void track_detached(WebNode *node) {
+    for (WebDetachedNode *it = js_detached; it; it = it->next)
+        if (it->node == node)
+            return;
+    WebDetachedNode *entry = web_malloc(sizeof(*entry));
+    entry->node = node;
+    entry->next = js_detached;
+    js_detached = entry;
+}
 static int js_timer_id;
 static bool js_document_dirty;
 static uint32_t js_deadline;
@@ -93,6 +121,7 @@ enum {
     PROP_HREF,
     PROP_TITLE,
     PROP_NODE_TYPE,
+    PROP_IS_CONNECTED,
     PROP_VALUE,
     PROP_FIRST_CHILD,
     PROP_LAST_CHILD,
@@ -341,6 +370,8 @@ static JSValue element_getter(JSContext *ctx, JSValueConst this_val, int magic) 
             return JS_NewInt32(ctx, node->type == WEB_ELEMENT ? 1 :
                                     node->type == WEB_TEXT ? 3 :
                                     node->type == WEB_COMMENT ? 8 : 11);
+        case PROP_IS_CONNECTED:
+            return web_node_is_connected(node) ? JS_TRUE : JS_FALSE;
         case PROP_TEMPLATE_CONTENT:
             return node->template_content ? make_element(ctx, node->template_content) : JS_UNDEFINED;
         case PROP_SHADOW_ROOT:
@@ -627,6 +658,7 @@ static JSValue js_append_child(JSContext *ctx, JSValueConst this_val, int argc,
     WebNode *child = argc ? node_from_value(ctx, argv[0]) : 0;
     if (!parent || !child || !web_node_insert_before(parent, child, 0))
         return JS_ThrowTypeError(ctx, "Invalid appendChild tree mutation");
+    untrack_detached(child);
     mark_dirty();
     return make_element(ctx, child);
 }
@@ -664,56 +696,50 @@ static JSValue js_insert_before(JSContext *ctx, JSValueConst this_val, int argc,
     WebNode *reference = argc > 1 ? node_from_value(ctx, argv[1]) : 0;
     if (!parent || !child || !web_node_insert_before(parent, child, reference))
         return JS_ThrowTypeError(ctx, "Invalid insertBefore tree mutation");
+    untrack_detached(child);
     mark_dirty();
     return make_element(ctx, child);
 }
 static JSValue js_remove_child(JSContext *ctx, JSValueConst this_val, int argc,
+                               JSValueConst *argv) {
+    WebNode *parent = node_from_value(ctx, this_val);
+    WebNode *child = argc ? node_from_value(ctx, argv[0]) : 0;
+    if (!parent || !child || child->parent != parent)
+        return JS_ThrowTypeError(ctx, "removeChild requires a direct child");
+    web_node_detach(child);
+    track_detached(child);
+    mark_dirty();
+    return make_element(ctx, child);
+}
+static JSValue js_replace_child(JSContext *ctx, JSValueConst this_val, int argc,
                                 JSValueConst *argv) {
     WebNode *parent = node_from_value(ctx, this_val);
-    if (!parent || !argc)
-        return JS_UNDEFINED;
-    WebNode *child = node_from_value(ctx, argv[0]);
-    if (!child || !child->parent)
-        return JS_UNDEFINED;
-    WebNode **link = &parent->first_child;
-    while (*link && *link != child)
-        link = &(*link)->next;
-    if (*link) {
-        *link = child->next;
-        if (child->next)
-            child->next->prev = child->prev;
-        else
-            parent->last_child = child->prev;
-        child->parent = 0;
-        child->prev = 0;
-        child->next = 0;
-        web_free_tree(child);
+    WebNode *next = argc > 0 ? node_from_value(ctx, argv[0]) : 0;
+    WebNode *old = argc > 1 ? node_from_value(ctx, argv[1]) : 0;
+    if (!parent || !next || !old || !web_node_replace_child(parent, next, old))
+        return JS_ThrowTypeError(ctx, "Invalid replaceChild tree mutation");
+    untrack_detached(next);
+    if (next != old) {
+        track_detached(old);
         mark_dirty();
     }
-    return JS_UNDEFINED;
+    return make_element(ctx, old);
+}
+static JSValue js_get_root_node(JSContext *ctx, JSValueConst this_val, int argc,
+                                 JSValueConst *argv) {
+    (void)argc; (void)argv;
+    WebNode *node = node_from_value(ctx, this_val);
+    WebNode *root = web_node_root(node);
+    return root ? make_element(ctx, root) : JS_NULL;
 }
 static JSValue js_remove_element(JSContext *ctx, JSValueConst this_val, int argc,
-                                 JSValueConst *argv) {
-    (void)argc;
-    (void)argv;
+                                  JSValueConst *argv) {
+    (void)ctx; (void)argc; (void)argv;
     WebNode *node = node_from_value(ctx, this_val);
     if (node && node->parent) {
-        WebNode *parent = node->parent;
-        WebNode **link = &parent->first_child;
-        while (*link && *link != node)
-            link = &(*link)->next;
-        if (*link) {
-            *link = node->next;
-            if (node->next)
-                node->next->prev = node->prev;
-            else
-                parent->last_child = node->prev;
-            node->parent = 0;
-            node->prev = 0;
-            node->next = 0;
-            web_free_tree(node);
-            mark_dirty();
-        }
+        web_node_detach(node);
+        track_detached(node);
+        mark_dirty();
     }
     return JS_UNDEFINED;
 }
@@ -1058,6 +1084,8 @@ static const JSCFunctionListEntry element_functions[] = {
     JS_CFUNC_DEF("cloneNode", 1, js_clone_node),
     JS_CFUNC_DEF("attachShadow", 1, js_attach_shadow),
     JS_CFUNC_DEF("removeChild", 1, js_remove_child),
+    JS_CFUNC_DEF("replaceChild", 2, js_replace_child),
+    JS_CFUNC_DEF("getRootNode", 0, js_get_root_node),
     JS_CFUNC_DEF("setAttribute", 2, js_set_attribute),
     JS_CFUNC_DEF("getAttribute", 1, js_get_attribute),
     JS_CFUNC_DEF("hasAttribute", 1, js_has_attribute),
@@ -1084,6 +1112,7 @@ static void install_element(JSContext *ctx, JSValue object) {
         JS_CGETSET_MAGIC_DEF("href", element_getter, element_setter, PROP_HREF),
         JS_CGETSET_MAGIC_DEF("title", element_getter, element_setter, PROP_TITLE),
         JS_CGETSET_MAGIC_DEF("nodeType", element_getter, 0, PROP_NODE_TYPE),
+        JS_CGETSET_MAGIC_DEF("isConnected", element_getter, 0, PROP_IS_CONNECTED),
         JS_CGETSET_MAGIC_DEF("content", element_getter, 0, PROP_TEMPLATE_CONTENT),
         JS_CGETSET_MAGIC_DEF("shadowRoot", element_getter, 0, PROP_SHADOW_ROOT),
         JS_CGETSET_MAGIC_DEF("value", element_getter, element_setter, PROP_VALUE),
@@ -1387,6 +1416,17 @@ void web_js_release(void) {
     if (js_document)
         release_states(js_document);
     js_document = 0;
+    /* Tear down detached JS states before releasing the JS context, then
+     * reclaim the orphan trees that were kept alive for removeChild(). */
+    while (js_detached) {
+        WebDetachedNode *entry = js_detached;
+        js_detached = entry->next;
+        if (entry->node && !entry->node->parent) {
+            release_states(entry->node);
+            web_free_tree(entry->node);
+        }
+        web_free(entry);
+    }
     WebTimer *timer = js_timers;
     while (timer) {
         WebTimer *next = timer->next;
