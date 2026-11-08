@@ -102,7 +102,19 @@ static int rx_msdu(void *v,uint8_t *out,unsigned cap,unsigned *bytes,bool *encry
         if(rc<=0) return rc;
         if(rc!=1 || n>sizeof(f)) return INVALID;
         Luna80211Header h;
-        if(luna80211_header(f,n,&h) || h.type!=2 || (h.subtype!=0 && h.subtype!=8) ||
+        if(luna80211_header(f,n,&h)) continue;
+        /* The post-association path must still observe AP disconnects.
+         * Return through the station's error path so keys/DHCP are closed
+         * after this receive callback returns, not while it is on the stack. */
+        if(h.type==0 && (h.subtype==10 || h.subtype==12) &&
+           !h.protected_frame && !(f[1]&4) && !(f[22]&15) && n>=h.header_len+2 &&
+           !memcmp(h.source,c->ap.bssid,6) && !memcmp(h.bssid,c->ap.bssid,6) &&
+           (!memcmp(h.destination,c->mac,6) ||
+            !memcmp(h.destination,"\xff\xff\xff\xff\xff\xff",6))) {
+            c->peer_disconnect_reason=u16(f+h.header_len);
+            return -100;
+        }
+        if(h.type!=2 || (h.subtype!=0 && h.subtype!=8) ||
            h.from_ds!=1 || h.to_ds || memcmp(h.bssid,c->ap.bssid,6) ||
            (memcmp(h.destination,c->mac,6) && !(h.destination[0]&1))) continue;
         c->data_rx++;
@@ -116,7 +128,18 @@ static int rx_msdu(void *v,uint8_t *out,unsigned cap,unsigned *bytes,bool *encry
                 c->decrypt_errors++;
                 if(reason==WIFI_CCMP_RX_FORMAT) c->decrypt_format++;
                 else if(reason==WIFI_CCMP_RX_KEY) c->decrypt_key++;
-                else if(reason==WIFI_CCMP_RX_REPLAY) c->decrypt_replay++;
+                else if(reason==WIFI_CCMP_RX_REPLAY) {
+                    c->decrypt_replay++;
+                    bool group=(f[4]&1)!=0;
+                    if(group) c->replay_group++; else c->replay_unicast++;
+                    if(f[1]&8) c->replay_retry++;
+                    const uint8_t *iv=f+h.header_len;
+                    c->replay_pn=(uint64_t)iv[0]|((uint64_t)iv[1]<<8);
+                    for(unsigned i=4;i<8;i++) c->replay_pn|=(uint64_t)iv[i]<<(8*(i-2));
+                    unsigned tid=h.qos ? f[24]&15 : 16;
+                    c->replay_high=group ? c->ccmp.rx_group_pn[iv[3]>>6][tid] : c->ccmp.rx_pairwise_pn[tid];
+                    c->replay_sequence=u16(f+22)>>4;c->replay_tid=tid;
+                }
                 else if(reason==WIFI_CCMP_RX_MIC) c->decrypt_mic++;
                 continue;
             }

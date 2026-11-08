@@ -35,6 +35,7 @@ static void reply(unsigned subtype,unsigned status,unsigned seq_or_aid) {
     memcpy(f+4,sta,6);memcpy(f+10,ap_mac,6);memcpy(f+16,ap_mac,6);
     if(subtype==0xb0){f[26]=seq_or_aid;f[28]=status;}
     if(subtype==0x10){f[26]=status;f[28]=seq_or_aid;}
+    if(subtype==0xc0 || subtype==0xa0) f[24]=seq_or_aid;
     unsigned slot=rxhead+rxcount;memcpy(incoming[slot],f,30);rx_len[slot]=30;rxcount++;
 }
 int main(void) {
@@ -51,6 +52,15 @@ int main(void) {
     reply(0x10,0,42);wifi_client_poll(&client);
     assert(associations==1 && client.aid==42);
     assert(wifi_client_link(&client)==WIFI_ASSOCIATED);
+    /* A post-association AP disconnect must reach the station's teardown
+     * path; unrelated transmitters must not be able to close this port. */
+    uint8_t output[1514];unsigned bytes;bool encrypted;
+    reply(0xc0,0,4);incoming[rxhead][10]^=1;
+    assert(!client.station.radio.receive(&client,output,sizeof(output),&bytes,&encrypted));
+    assert(!client.peer_disconnect_reason);
+    reply(0xc0,0,4);
+    assert(client.station.radio.receive(&client,output,sizeof(output),&bytes,&encrypted)==-100);
+    assert(client.peer_disconnect_reason==4 && !bytes);
     wifi_client_disconnect(&client);
     assert(wifi_client_link(&client)==WIFI_IDLE && !client.password[0]);
     rxhead=rxcount=0;

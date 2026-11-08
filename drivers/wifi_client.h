@@ -31,6 +31,9 @@ typedef struct {
     uint32_t attempts, mgmt_rx, foreign_rx, auth_rx, assoc_rx;
     uint32_t data_rx, decrypt_errors, decap_errors, ethernet_rx;
     uint32_t decrypt_format, decrypt_key, decrypt_replay, decrypt_mic;
+    uint32_t replay_unicast, replay_group, replay_retry, replay_sequence, replay_tid;
+    uint64_t replay_pn, replay_high;
+    unsigned peer_disconnect_reason;
     uint32_t tx_stalled_since, tx_backpressure;
     int error;
     WifiClientStage failed_stage;

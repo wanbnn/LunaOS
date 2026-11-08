@@ -628,6 +628,16 @@ void rtw8822be_status(char *out,size_t cap) {
     append(out," key=",cap);number(n,dev.client.decrypt_key);append(out,n,cap);
     append(out," replay=",cap);number(n,dev.client.decrypt_replay);append(out,n,cap);
     append(out," mic=",cap);number(n,dev.client.decrypt_mic);append(out,n,cap);
+    append(out,"\nReplay unicast=",cap);number(n,dev.client.replay_unicast);append(out,n,cap);
+    append(out," group=",cap);number(n,dev.client.replay_group);append(out,n,cap);
+    append(out," retry=",cap);number(n,dev.client.replay_retry);append(out,n,cap);
+    append(out," seq=",cap);number(n,dev.client.replay_sequence);append(out,n,cap);
+    append(out," tid=",cap);number(n,dev.client.replay_tid);append(out,n,cap);
+    append(out,"\nReplay PN high:low=",cap);hex(n,dev.client.replay_pn>>32);append(out,n,cap);
+    append(out,":",cap);hex(n,(uint32_t)dev.client.replay_pn);append(out,n,cap);
+    append(out," accepted=",cap);hex(n,dev.client.replay_high>>32);append(out,n,cap);
+    append(out,":",cap);hex(n,(uint32_t)dev.client.replay_high);append(out,n,cap);
+    append(out,"\nAP disconnect reason=",cap);number(n,dev.client.peer_disconnect_reason);append(out,n,cap);
     append(out,"\nMME",cap);
     append(out," foreign=",cap);number(n,dev.client.foreign_rx);append(out,n,cap);
     append(out," auth_rx=",cap);number(n,dev.client.auth_rx);append(out,n,cap);
