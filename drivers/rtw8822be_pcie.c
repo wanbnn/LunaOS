@@ -457,6 +457,17 @@ void rtw8822be_status(char *out,size_t cap) {
     if(dev.scanner.error) {
         append(out," scan error=",cap); number(n,(uint32_t)-dev.scanner.error); append(out,n,cap);
     }
+    append(out,"\nMLME stage=",cap);number(n,dev.client.stage);append(out,n,cap);
+    append(out," last_fail_stage=",cap);number(n,dev.client.failed_stage);append(out,n,cap);
+    append(out," error=",cap);number(n,(uint32_t)dev.client.error);append(out,n,cap);
+    append(out," attempts=",cap);number(n,dev.client.attempts);append(out,n,cap);
+    append(out," mgmt_rx=",cap);number(n,dev.client.mgmt_rx);append(out,n,cap);
+    append(out," foreign=",cap);number(n,dev.client.foreign_rx);append(out,n,cap);
+    append(out," auth_rx=",cap);number(n,dev.client.auth_rx);append(out,n,cap);
+    append(out," assoc_rx=",cap);number(n,dev.client.assoc_rx);append(out,n,cap);
+    append(out,"\nWPA2 phase=",cap);number(n,dev.client.station.wpa.phase);append(out,n,cap);
+    append(out," WPA2 error=",cap);number(n,(uint32_t)dev.client.station.wpa.error);append(out,n,cap);
+    append(out," link=",cap);number(n,wifi_client_link(&dev.client));append(out,n,cap);
     append(out,"\nTX frames=",cap);number(n,dev.tx_sent);append(out,n,cap);
     append(out," busy=",cap);number(n,dev.tx_busy);append(out,n,cap);
     append(out," errors=",cap);number(n,dev.tx_errors);append(out,n,cap);
