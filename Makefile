@@ -31,7 +31,7 @@ $(patsubst %.c,build/%.o,$(SOURCES)): $(wildcard kernel/*.h ui/*.h drivers/*.h i
 all: dist/LunaOS.img dist/LunaOS.iso
 build/font.h: tools/fontgen.py assets/fonts/InterTight.ttf
 	$(PYTHON) tools/fontgen.py
-build/notices.h: tools/notices.py assets/fonts/OFL.txt assets/icons/lucide/LICENSE $(wildcard assets/licenses/*) third_party/quickjs/LICENSE third_party/musl/COPYRIGHT third_party/bearssl/LICENSE.txt third_party/stb/LICENSE third_party/uacpi/LICENSE
+build/notices.h: tools/notices.py assets/fonts/OFL.txt assets/icons/lucide/LICENSE $(wildcard assets/licenses/*) third_party/quickjs/LICENSE third_party/musl/COPYRIGHT third_party/bearssl/LICENSE.txt third_party/stb/LICENSE third_party/uacpi/LICENSE $(wildcard third_party/lexbor/LICENSE)
 	$(PYTHON) tools/notices.py
 build/uacpi/%.o: third_party/uacpi/source/%.c $(shell find third_party/uacpi/include -name '*.h')
 	@mkdir -p $(dir $@)
