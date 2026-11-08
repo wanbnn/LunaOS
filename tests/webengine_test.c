@@ -309,6 +309,42 @@ static void dom_core_phase2_regressions(void) {
     web_free_tree(document);
 }
 
+
+static void html_entities_full_regressions(void) {
+    const char *html =
+        "<html><body>"
+        "<p id='named'>&acE; &notin; &Aacute &fjlig; &CounterClockwiseContourIntegral;</p>"
+        "<p id='numeric'>&#128; &#x80; &#x1F600;</p>"
+        "<div id='attr' data-ambiguous='&notit;' data-legacy='&copy text' "
+        "data-escaped='a&amp;b'></div>"
+        "</body></html>";
+    WebNode *root = 0;
+    char error[128] = {0};
+    check(web_parse(html, strlen(html), &root, error, sizeof(error)),
+          "full named entity fixture parses");
+    if (!root)
+        return;
+    WebNode *named = web_find_by_id(root, "named");
+    char value[256];
+    web_node_text(named, value, sizeof(value));
+    check(strstr(value, "\\xe2\\x88\\xbe\\xcc\\xb3") != 0 &&
+          strstr(value, "\\xe2\\x88\\x89") != 0 &&
+          strstr(value, "\\xc3\\x81") != 0 &&
+          strstr(value, "fj") != 0,
+          "named entities support two codepoints, legacy and uncommon references");
+    WebNode *numeric = web_find_by_id(root, "numeric");
+    web_node_text(numeric, value, sizeof(value));
+    check(strstr(value, "\\xe2\\x82\\xac") != 0 &&
+          strstr(value, "\\xf0\\x9f\\x98\\x80") != 0,
+          "numeric references remap C1 characters and decode astral planes");
+    WebNode *attr = web_find_by_id(root, "attr");
+    check(attr && !strcmp(web_attr(attr, "data-ambiguous"), "&notit;") &&
+          !strcmp(web_attr(attr, "data-legacy"), "\\xc2\\xa9 text") &&
+          !strcmp(web_attr(attr, "data-escaped"), "a&b"),
+          "attribute context refuses ambiguous semicolonless named references");
+    web_free_tree(root);
+}
+
 static void html_dom_regressions(void) {
     const char *html =
         "<!doctype html><html><head><title>A &amp; B</TITLE  ></head><body>"
@@ -472,6 +508,7 @@ int main(void) {
     foreign_namespace_regressions();
     template_shadow_regressions();
     dom_core_phase2_regressions();
+    html_entities_full_regressions();
     printf(failures ? "\n%d check(s) failed\n" : "\nall checks passed\n", failures);
     return failures ? 1 : 0;
 }
