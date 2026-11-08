@@ -9,6 +9,11 @@ extern "C" {
 #endif
 typedef struct LunaLiteDocument LunaLiteDocument;
 typedef struct {
+    int offset_x, offset_y;
+    int clip_depth;
+    int clips[16][4];
+} LunaLiteSurface;
+typedef struct {
     void *context;
     int (*text_width)(void *, const char *, int);
     void (*draw_text)(void *, int, int, const char *, int, uint32_t);
@@ -24,6 +29,9 @@ void luna_lite_destroy(LunaLiteDocument *document);
 int luna_lite_layout(LunaLiteDocument *document, int width, int height);
 void luna_lite_draw(LunaLiteDocument *document, int x, int y);
 int luna_lite_document_height(const LunaLiteDocument *document);
+void luna_lite_add_css(LunaLiteDocument *document, const char *css);
+void web_litehtml_graphics(LunaLiteGraphics *graphics, LunaLiteSurface *surface);
+void web_litehtml_offset(LunaLiteSurface *surface, int x, int y);
 #ifdef __cplusplus
 }
 #endif
