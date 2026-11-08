@@ -132,6 +132,47 @@ static void layout_regressions(void) {
 }
 
 
+
+static void dom_mutation_regressions(void) {
+    WebNode *document = web_node_new(WEB_ELEMENT);
+    document->tag = web_strdup("#document");
+    WebNode *parent = web_node_new(WEB_ELEMENT);
+    parent->tag = web_strdup("main");
+    WebNode *first = web_node_new(WEB_ELEMENT);
+    first->tag = web_strdup("a");
+    WebNode *second = web_node_new(WEB_ELEMENT);
+    second->tag = web_strdup("b");
+    WebNode *third = web_node_new(WEB_ELEMENT);
+    third->tag = web_strdup("c");
+    web_node_append(document, parent);
+    web_node_append(parent, first);
+    web_node_append(parent, second);
+    web_node_append(parent, third);
+    check(web_node_contains(document, third) && !web_node_contains(third, parent),
+          "DOM ancestry follows parent pointers");
+    check(!web_node_insert_before(first, parent, 0) &&
+          !web_node_insert_before(parent, parent, 0),
+          "DOM cannot move an ancestor under its descendant or itself");
+    check(web_node_insert_before(parent, third, first) &&
+          parent->first_child == third && third->next == first &&
+          first->prev == third && parent->last_child == second,
+          "insertBefore moves nodes and repairs sibling links");
+    check(web_node_insert_before(parent, first, first) &&
+          third->next == first && first->next == second,
+          "insertBefore of a node before itself is a no-op");
+    check(!web_node_insert_before(parent, second, document) &&
+          second->parent == parent,
+          "insertBefore rejects a reference outside the parent");
+    web_node_detach(first);
+    check(!first->parent && !first->next && !first->prev &&
+          third->next == second && second->prev == third,
+          "detach preserves remaining links and leaves node reusable");
+    check(web_node_insert_before(parent, first, 0) &&
+          parent->last_child == first && first->prev == second,
+          "detached node can be reattached at the end");
+    web_free_tree(document);
+}
+
 static void html_dom_regressions(void) {
     const char *html =
         "<!doctype html><html><head><title>A &amp; B</TITLE  ></head><body>"
@@ -286,6 +327,7 @@ int main(void) {
     web_free_tree(root);
     layout_regressions();
     html_dom_regressions();
+    dom_mutation_regressions();
     printf(failures ? "\n%d check(s) failed\n" : "\nall checks passed\n", failures);
     return failures ? 1 : 0;
 }
