@@ -28,7 +28,9 @@ typedef struct {
     unsigned rsn_len, sequence, aid;
     char password[WIFI_MAX_PASSWORD+1];
     uint32_t deadline;
+    uint32_t attempts, mgmt_rx, foreign_rx, auth_rx, assoc_rx;
     int error;
+    WifiClientStage failed_stage;
 } WifiClient;
 int wifi_client_start(WifiClient *,const WifiClientRadio *,const uint8_t mac[6],
                       const WifiAp *,const char *,const uint8_t *rsn,size_t rsn_len);
