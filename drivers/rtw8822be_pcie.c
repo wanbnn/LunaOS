@@ -29,6 +29,7 @@ static struct {
     unsigned txwp[8], tx_sent, tx_busy, tx_errors;
     unsigned rp, tag, received, dropped, rx_invalid_tag, rx_invalid_packet, rx_c2h;
     unsigned rx_dma_polls, rx_pending, rx_last_index;
+    uint32_t diag_cr, diag_rcr, diag_pcictrl, diag_rxfilter;
 } dev;
 static int rd(void *ctx,uint32_t reg,unsigned width,uint32_t *out) {
     (void)ctx; return drv_mmio_read(&dev.mmio,reg,width,out);
@@ -170,6 +171,13 @@ static int receive(void *ctx,uint8_t *out,unsigned capacity,unsigned *bytes,int1
     unsigned wp=(index>>16)&0xfff;
     dev.rx_dma_polls++;
     dev.rx_last_index=index;
+    /* Sample read-only registers while scanning, without changing radio state. */
+    if(!(dev.rx_dma_polls & 63u)) {
+        (void)read32(0x100,&dev.diag_cr);
+        (void)read32(0x608,&dev.diag_rcr);
+        (void)read32(0x300,&dev.diag_pcictrl);
+        (void)read32(0x6a0,&dev.diag_rxfilter);
+    }
     if(wp>=RX_COUNT) return DRV_EIO;
     if(wp==dev.rp) return 0;
     dev.rx_pending++;
@@ -378,15 +386,20 @@ void rtw8822be_init(void) {
     STEP("RX descriptor length",bits(0x115,1,15,15));
     STEP("RX PHY status",write(0x60f,1,4));
     STEP("RX management filter",write(0x6a0,2,0xffff));
-    STEP("RX control filter",write(0x6a2,2,0));
+    STEP("RX control filter",write(0x6a2,2,0x0fff));
     STEP("RX data filter",write(0x6a4,2,0xffff));
-    STEP("RX RCR",write(0x608,4,(1u<<31)|(1u<<28)|(1u<<13)|0x0f));
+    /* Upstream rtw8822b_mac_init WLAN_RCR_CFG=0xe400220e.
+     * Enable AAP bit for passive beacons addressed to other receivers.
+     * Former value 0x9000200f omitted multiple required RX flags. */
+    STEP("RX RCR",write(0x608,4,0xe400220fu));
     STEP("interrupt mask",write(0xb0,4,0));
     STEP("interrupt mask",write(0xb8,4,0));
     STEP("interrupt mask",write(0x10b8,4,0));
     dev.master=true; STEP("RX bus mastering",drv_pci_master(&dev.pci,true));
     STEP("DMA resume",write(0x303,1,0));
-    STEP("MAC RX",bits(0x100,2,0x40,0xba));
+    /* Upstream REG_CR MAC_TRX_ENABLE = 0xff (all MAC/HCI DMA paths).
+     * Do not leave TX DMA disabled or retain stale power-on bits. */
+    STEP("MAC TRX enable",write(0x100,1,0xff));
     dev.ready=true;
     /* Receive-only channels; no active probes or transmit-power assumptions. */
     static const uint8_t channels[]={1,2,3,4,5,6,7,8,9,10,11,36,40,44,48};
@@ -420,6 +433,10 @@ void rtw8822be_status(char *out,size_t cap) {
     append(out," parse_fail=",cap); number(n,dev.rx_invalid_packet); append(out,n,cap);
     append(out," c2h=",cap); number(n,dev.rx_c2h); append(out,n,cap);
     append(out,"\nRX index=",cap); hex(n,dev.rx_last_index); append(out,n,cap);
+    append(out,"\nMAC CR=",cap);hex(n,dev.diag_cr);append(out,n,cap);
+    append(out," RCR=",cap);hex(n,dev.diag_rcr);append(out,n,cap);
+    append(out," PCICTRL=",cap);hex(n,dev.diag_pcictrl);append(out,n,cap);
+    append(out," RXFLTMAP=",cap);hex(n,dev.diag_rxfilter);append(out,n,cap);
     append(out," rp=",cap); number(n,dev.rp); append(out,n,cap);
     append(out," tag=",cap); number(n,dev.tag); append(out,n,cap);
     append(out,"\nScan active=",cap); number(n,dev.scanner.scanning ? 1u : 0u);append(out,n,cap);
