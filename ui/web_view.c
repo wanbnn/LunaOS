@@ -2,6 +2,12 @@
 /* Browser surface for the Luna web engine: document lifecycle, painting,
  * scrolling and link activation. */
 #include "webengine.h"
+#ifdef LUNA_USE_LITEHTML
+#include "litehtml_bridge.h"
+static LunaLiteDocument *litehtml_document;
+static LunaLiteSurface litehtml_surface;
+static LunaLiteGraphics litehtml_graphics;
+#endif
 
 static WebNode *document_root;
 static WebRule *style_rules;
@@ -55,6 +61,10 @@ static void styles_rebuild(void) {
     style_rules = 0;
     style_rule_count = 0;
     css_parse_sheet(sheet_text ? sheet_text : "", &style_rules, &style_rule_count);
+#ifdef LUNA_USE_LITEHTML
+    if (litehtml_document && sheet_text)
+        luna_lite_add_css(litehtml_document, sheet_text);
+#endif
     web_relayout();
 }
 void web_add_stylesheet(const char *css, size_t len) {
@@ -183,6 +193,12 @@ bool web_set_image(int index, const unsigned char *data, size_t len) {
     return true;
 }
 void web_reset(void) {
+#ifdef LUNA_USE_LITEHTML
+    if (litehtml_document) {
+        luna_lite_destroy(litehtml_document);
+        litehtml_document = 0;
+    }
+#endif
     web_js_release();
     web_js_clear_dirty();
     if (document_root)
@@ -212,6 +228,10 @@ void web_relayout(void) {
     PerfArea previous = perf_enter(PERF_WEB_LAYOUT);
     css_apply(document_root, style_rules, style_rule_count);
     web_layout(document_root, layout_width, viewport_height);
+#ifdef LUNA_USE_LITEHTML
+    if (litehtml_document)
+        luna_lite_layout(litehtml_document, layout_width, viewport_height);
+#endif
     perf_leave(previous);
 }
 void web_set_viewport(int width, int height) {
@@ -232,6 +252,17 @@ bool web_load_document(const char *url, const char *html, size_t len, char *erro
         return false;
     }
     document_root = root;
+#ifdef LUNA_USE_LITEHTML
+    /* Opt-in renderer: keep Lexbor's live DOM for QuickJS while litehtml
+     * independently computes CSS layout from the original document source. */
+    if (html && len && layout_width > 0 && viewport_height > 0) {
+        char *copy = web_strndup(html, len);
+        web_litehtml_graphics(&litehtml_graphics, &litehtml_surface);
+        litehtml_document = luna_lite_create(copy, &litehtml_graphics,
+                                               layout_width, viewport_height);
+        web_free(copy);
+    }
+#endif
     sheet_length = 0;
     if (sheet_text)
         sheet_text[0] = 0;
@@ -259,13 +290,19 @@ bool web_load_document(const char *url, const char *html, size_t len, char *erro
 const char *web_document_url(void) { return document_url; }
 const char *web_error_text(void) { return document_error; }
 bool web_has_document(void) { return document_root != 0; }
-int web_content_height(void) { return web_document_height(); }
+int web_content_height(void) {
+#ifdef LUNA_USE_LITEHTML
+    if (litehtml_document)
+        return luna_lite_document_height(litehtml_document);
+#endif
+    return web_document_height();
+}
 int web_scroll_offset(void) { return scroll_offset; }
 bool web_scroll_by(int delta) {
     if (!document_root)
         return false;
     int previous = scroll_offset;
-    int maximum = web_document_height() - viewport_height;
+    int maximum = web_content_height() - viewport_height;
     if (maximum < 0)
         maximum = 0;
     scroll_offset += delta;
@@ -295,17 +332,23 @@ void web_render(int x, int y, int w, int h) {
     int bottom = y + h < saved[1] + saved[3] ? y + h : saved[1] + saved[3];
     gfx_clip(left, top, right > left ? right - left : 0, bottom > top ? bottom - top : 0);
     rect(x, y, w, h, 0xffffff);
-    web_paint(document_root, x, y - scroll_offset);
+#ifdef LUNA_USE_LITEHTML
+    if (litehtml_document) {
+        web_litehtml_offset(&litehtml_surface, x, y - scroll_offset);
+        luna_lite_draw(litehtml_document, 0, 0);
+    } else
+#endif
+        web_paint(document_root, x, y - scroll_offset);
     gfx_clip(saved[0], saved[1], saved[2], saved[3]);
     perf_leave(previous);
-    if (web_document_height() > h) {
+    if (web_content_height() > h) {
         int track = h - 4;
-        int ratio = h * h / web_document_height();
+        int ratio = h * h / web_content_height();
         if (ratio < 24)
             ratio = 24;
         int thumb = track * ratio / h;
-        int position = (web_document_height() - h) ? scroll_offset * (track - thumb) /
-                                                         (web_document_height() - h)
+        int position = (web_content_height() - h) ? scroll_offset * (track - thumb) /
+                                                         (web_content_height() - h)
                                                    : 0;
         rect(x + w - 6, y, 6, h, 0xe6ebf2);
         rect(x + w - 6, y + position, 6, thumb, 0x9fb2c8);
