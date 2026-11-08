@@ -20,9 +20,7 @@ static uint8_t local_ip[4] = {10, 0, 2, 15}, gateway[4] = {10, 0, 2, 2},
                      dns_ip[4] = {10, 0, 2, 3};
 static uint8_t manual_dns[4];
 static bool dns_manual;
-static void apply_dns(const uint8_t automatic[4]) {
-    memcpy(dns_ip,dns_manual ? manual_dns : automatic,4);
-}
+static void apply_dns(const uint8_t automatic[4]);
 static uint8_t rx[65536 + 2048] __attribute__((aligned(256))),
     tx[4][1536] __attribute__((aligned(256)));
 static int txslot;
@@ -34,6 +32,18 @@ static uint32_t arp_requests, arp_received, dns_requests, dns_answers, tcp_syns;
 /* The task that currently owns the network service; nobody else may poll it. */
 static uint32_t network_owner;
 static uint8_t resolved[4];
+static uint32_t resolved_ttl;
+static struct {
+    char host[201];
+    uint8_t address[4], dns[4], local[4];
+    uint32_t expires, hits;
+    bool valid;
+} dns_cache;
+static void apply_dns(const uint8_t automatic[4]) {
+    const uint8_t *selected=dns_manual ? manual_dns : automatic;
+    if(memcmp(dns_ip,selected,4)) dns_cache.valid=false;
+    memcpy(dns_ip,selected,4);
+}
 static struct {
     unsigned phase; /* 0=idle, 1=resolve, 2=send request, 3=wait response, 4=done */
     uint8_t address[4],request[48],response[512];
@@ -223,6 +233,7 @@ static void dns_receive(const uint8_t *p, int n) {
             return;
         pos += 4;
     }
+    uint32_t ttl_limit=UINT32_MAX;
     while (a--) {
         pos = skip_name(p, n, pos);
         if (pos < 0 || pos + 10 > n)
@@ -231,8 +242,11 @@ static void dns_receive(const uint8_t *p, int n) {
         pos += 10;
         if (pos + len > n)
             return;
+        uint32_t ttl=be32(p+pos-6);
+        if(cls==1 && type==5 && ttl<ttl_limit) ttl_limit=ttl;
         if (type == 1 && cls == 1 && len == 4) {
             memcpy(resolved, p + pos, 4);
+            resolved_ttl=ttl<ttl_limit ? ttl : ttl_limit;
             dns_done = true;
             return;
         }
@@ -359,8 +373,10 @@ static void external_input(void *ctx, uint8_t *p, unsigned n) {
     (void)ctx;
     if (!external_nic.dhcp.configured) return;
     const NetIpv4Config *cfg=&external_nic.dhcp.config;
-    if (!net_ready || memcmp(local_ip,cfg->address,4) || memcmp(gateway,cfg->gateway,4))
+    if (!net_ready || memcmp(local_ip,cfg->address,4) || memcmp(gateway,cfg->gateway,4)) {
         gateway_known=peer_known=false;
+        dns_cache.valid=false;
+    }
     memcpy(local_ip,cfg->address,4); memcpy(netmask,cfg->mask,4);
     memcpy(gateway,cfg->gateway,4); apply_dns(cfg->dns);
     net_ready=true;
@@ -370,12 +386,14 @@ int net_attach_driver(const NetDeviceOps *ops, void *ctx, const uint8_t address[
     if (io || external_nic.started || network_owner) return -16;
     int rc=netif_start(&external_nic,ops,ctx,address,xid,frame_clock);
     if (rc) return rc;
+    dns_cache.valid=false;
     memcpy(mac,address,6); gateway_known=peer_known=false; pending_bytes=0; net_ready=false;
     memset(&tcp,0,sizeof(tcp)); return 0;
 }
 void net_detach_driver(const NetDeviceOps *ops, void *ctx) {
     if (!external_nic.started || external_nic.ops!=ops || external_nic.context!=ctx) return;
     netif_stop(&external_nic); net_ready=false; gateway_known=peer_known=false; pending_bytes=0;
+    dns_cache.valid=false;
     memset(&tcp,0,sizeof(tcp)); memset(mac,0,sizeof(mac));
     memset(local_ip,0,4); memset(gateway,0,4); memset(dns_ip,0,4);
 }
@@ -393,12 +411,14 @@ void net_poll(void) {
         netif_poll(&external_nic,frame_clock,external_input,0);
         if (external_nic.dhcp.configured) {
             const NetIpv4Config *cfg=&external_nic.dhcp.config;
-            if (!net_ready || memcmp(local_ip,cfg->address,4) || memcmp(gateway,cfg->gateway,4))
+            if (!net_ready || memcmp(local_ip,cfg->address,4) || memcmp(gateway,cfg->gateway,4)) {
                 gateway_known=peer_known=false;
+                dns_cache.valid=false;
+            }
             memcpy(local_ip,cfg->address,4); memcpy(netmask,cfg->mask,4);
             memcpy(gateway,cfg->gateway,4); apply_dns(cfg->dns);
             net_ready=true;
-        } else { net_ready=false; gateway_known=peer_known=false; pending_bytes=0; tcp.state=0; }
+        } else { net_ready=false; gateway_known=peer_known=false; pending_bytes=0; tcp.state=0; dns_cache.valid=false; }
         time_network_poll();
         return;
     }
@@ -495,6 +515,8 @@ void net_status(char *out, size_t cap) {
             append(out,names[i],cap); append(out,value,cap); append(out,"\n",cap);
         }
         append(out,"Last connection: ",cap); append(out,connect_error,cap); append(out,"\n",cap);
+        char hits[16]; number(hits,dns_cache.hits);
+        append(out,"DNS cache hits: ",cap); append(out,hits,cap); append(out,"\n",cap);
         append(out, "MAC: ", cap);
         for (int i = 0; i < 6; i++) {
             char b[4] = {"0123456789abcdef"[mac[i] >> 4], "0123456789abcdef"[mac[i] & 15],
@@ -675,6 +697,13 @@ static bool resolve(const char *host, uint8_t *out) {
     }
     if (!*host || strlen(host) > 200)
         return false;
+    if(dns_cache.valid && !strcmp(host,dns_cache.host) &&
+       equal(dns_cache.dns,dns_ip,4) && equal(dns_cache.local,local_ip,4) &&
+       (int32_t)(frame_clock-dns_cache.expires)<0) {
+        memcpy(out,dns_cache.address,4);
+        dns_cache.hits++;
+        return true;
+    }
     uint8_t p[512];
     memset(p, 0, sizeof(p));
     put16(p, 53000);
@@ -713,6 +742,17 @@ static bool resolve(const char *host, uint8_t *out) {
             net_poll();
             if (dns_done) {
                 memcpy(out, resolved, 4);
+                /* Cache only successful A answers, bounded to five minutes.
+                 * A zero TTL must always cause a new query. */
+                dns_cache.valid=resolved_ttl!=0;
+                if(dns_cache.valid) {
+                    strcpy(dns_cache.host,host);
+                    memcpy(dns_cache.address,resolved,4);
+                    memcpy(dns_cache.dns,dns_ip,4);
+                    memcpy(dns_cache.local,local_ip,4);
+                    uint32_t ttl=resolved_ttl>300 ? 300 : resolved_ttl;
+                    dns_cache.expires=frame_clock+ttl*1000;
+                }
                 return true;
             }
             task_yield();

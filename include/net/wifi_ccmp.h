@@ -21,4 +21,9 @@ void wifi_ccmp_clear(WifiCcmp *);
  * decrypt: Protected CCMP MPDU -> plaintext data MPDU. */
 int wifi_ccmp_encrypt(WifiCcmp *, uint8_t *, size_t *, size_t capacity);
 int wifi_ccmp_decrypt(WifiCcmp *, uint8_t *, size_t *);
+typedef enum {
+    WIFI_CCMP_RX_OK, WIFI_CCMP_RX_FORMAT, WIFI_CCMP_RX_KEY,
+    WIFI_CCMP_RX_REPLAY, WIFI_CCMP_RX_MIC
+} WifiCcmpRxError;
+int wifi_ccmp_decrypt_ex(WifiCcmp *, uint8_t *, size_t *, WifiCcmpRxError *);
 #endif

@@ -37,12 +37,15 @@ int main(void) {
     ap_frame(f);len=53;
     uint8_t tampered[128];memcpy(tampered,f,len);tampered[35]^=0x80;
     size_t bad_len=len;
-    assert(wifi_ccmp_decrypt(&c,tampered,&bad_len)==-13);
+    WifiCcmpRxError reason;
+    assert(wifi_ccmp_decrypt_ex(&c,tampered,&bad_len,&reason)==-13);
+    assert(reason==WIFI_CCMP_RX_MIC);
     assert(c.rx_pairwise_pn[16]==0);
     assert(!wifi_ccmp_decrypt(&c,f,&len));
     assert(len==37 && f[1]==2 && !memcmp(f+24,llc,13));
     ap_frame(f);len=53;
-    assert(wifi_ccmp_decrypt(&c,f,&len)==-13); /* replay */
+    assert(wifi_ccmp_decrypt_ex(&c,f,&len,&reason)==-13); /* replay */
+    assert(reason==WIFI_CCMP_RX_REPLAY);
     assert(c.rx_pairwise_pn[16]==1);
     wifi_ccmp_clear(&c);assert(!c.active && c.tx_pn==0);
     /* Retry is masked out of CCMP AAD. A retransmission may be the first
@@ -53,6 +56,12 @@ int main(void) {
     assert(len==37 && !memcmp(f+24,llc,13));
     ap_frame(f);f[1]|=0x08;len=53;
     assert(wifi_ccmp_decrypt(&c,f,&len)==-13);
+    ap_frame(f);f[27]=0x60;len=53;
+    assert(wifi_ccmp_decrypt_ex(&c,f,&len,&reason)==-13);
+    assert(reason==WIFI_CCMP_RX_KEY);
+    ap_frame(f);f[1]|=0x04;len=53;
+    assert(wifi_ccmp_decrypt_ex(&c,f,&len,&reason)==-22);
+    assert(reason==WIFI_CCMP_RX_FORMAT);
     wifi_ccmp_clear(&c);
     puts("PASS: independent AESCCM vectors, MIC tampering, replay, PN and safe key teardown");
 }

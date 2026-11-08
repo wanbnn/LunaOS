@@ -101,7 +101,9 @@ int wifi_ccmp_encrypt(WifiCcmp *s,uint8_t *f,size_t *length,size_t cap) {
     memcpy(f+hdr+8+n,mic,8); *length+=16;
     zero(&k,sizeof(k));zero(mic,sizeof(mic));return 0;
 }
-int wifi_ccmp_decrypt(WifiCcmp *s,uint8_t *f,size_t *length) {
+int wifi_ccmp_decrypt_ex(WifiCcmp *s,uint8_t *f,size_t *length,WifiCcmpRxError *reason) {
+    if(!reason) return ERR_INVAL;
+    *reason=WIFI_CCMP_RX_FORMAT;
     if(!s || !s->active || !f || !length) return ERR_INVAL;
     unsigned hdr=header(f,*length,true,true);
     if(!hdr || *length<hdr+16) return ERR_INVAL;
@@ -109,21 +111,28 @@ int wifi_ccmp_decrypt(WifiCcmp *s,uint8_t *f,size_t *length) {
     if(iv[2]!=0 || (iv[3]&0x3f)!=0x20) return ERR_ACCESS;
     unsigned keyid=iv[3]>>6;
     bool group=(f[4]&1)!=0;
+    *reason=WIFI_CCMP_RX_KEY;
     if((group && keyid!=s->group_index) || (!group && keyid)) return ERR_ACCESS;
     uint64_t pn=read_pn(iv);
     unsigned tid=f[0]==0x88 ? (f[24]&15) : 16;
     uint64_t *last=group ? &s->rx_group_pn[keyid][tid] : &s->rx_pairwise_pn[tid];
+    *reason=WIFI_CCMP_RX_REPLAY;
     if(!pn || pn<=*last) return ERR_ACCESS;
     const uint8_t *key=group ? s->group : s->pairwise;
     size_t n=*length-hdr-16;
-    if(n>2296) return ERR_INVAL;
+    if(n>2296) { *reason=WIFI_CCMP_RX_FORMAT; return ERR_INVAL; }
     br_aes_ct_cbcenc_keys k; br_aes_ct_cbcenc_init(&k,key,16);
     crypt(&k,f,f+hdr+8,n,pn);
     uint8_t mic[8];tag(&k,f,f+hdr+8,n,pn,mic);
     uint8_t different=0;for(unsigned i=0;i<8;i++) different|=mic[i]^f[hdr+8+n+i];
     zero(&k,sizeof(k));zero(mic,sizeof(mic));
-    if(different) { zero(f+hdr+8,n); return ERR_ACCESS; }
+    if(different) { *reason=WIFI_CCMP_RX_MIC; zero(f+hdr+8,n); return ERR_ACCESS; }
     *last=pn;
     memmove(f+hdr,f+hdr+8,n); *length-=16; f[1]&=~0x40;
+    *reason=WIFI_CCMP_RX_OK;
     return 0;
+}
+int wifi_ccmp_decrypt(WifiCcmp *s,uint8_t *f,size_t *length) {
+    WifiCcmpRxError reason;
+    return wifi_ccmp_decrypt_ex(s,f,length,&reason);
 }

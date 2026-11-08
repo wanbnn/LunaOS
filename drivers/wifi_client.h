@@ -30,6 +30,7 @@ typedef struct {
     uint32_t deadline;
     uint32_t attempts, mgmt_rx, foreign_rx, auth_rx, assoc_rx;
     uint32_t data_rx, decrypt_errors, decap_errors, ethernet_rx;
+    uint32_t decrypt_format, decrypt_key, decrypt_replay, decrypt_mic;
     uint32_t tx_stalled_since, tx_backpressure;
     int error;
     WifiClientStage failed_stage;

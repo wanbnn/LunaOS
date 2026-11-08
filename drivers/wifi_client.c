@@ -110,9 +110,14 @@ static int rx_msdu(void *v,uint8_t *out,unsigned cap,unsigned *bytes,bool *encry
         if(crypted) {
             /* CCMP authentication precedes decapsulation, even for broadcasts. */
             size_t mpdu_len=n;
+            WifiCcmpRxError reason=WIFI_CCMP_RX_KEY;
             if(c->station.wpa.phase!=WPA2_AUTHORIZED ||
-               wifi_ccmp_decrypt(&c->ccmp,f,&mpdu_len)) {
+               wifi_ccmp_decrypt_ex(&c->ccmp,f,&mpdu_len,&reason)) {
                 c->decrypt_errors++;
+                if(reason==WIFI_CCMP_RX_FORMAT) c->decrypt_format++;
+                else if(reason==WIFI_CCMP_RX_KEY) c->decrypt_key++;
+                else if(reason==WIFI_CCMP_RX_REPLAY) c->decrypt_replay++;
+                else if(reason==WIFI_CCMP_RX_MIC) c->decrypt_mic++;
                 continue;
             }
             n=(unsigned)mpdu_len;

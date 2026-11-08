@@ -11,6 +11,12 @@ server when IPv4 is ready. The choice applies to browser, updater, ping name
 resolution, and network time, survives DHCP refreshes, and is stored as
 `dns_server` in `/etc/luna-settings` (empty for automatic mode).
 
+Foreground name resolution keeps the last successful IPv4 answer until its
+TTL expires (at most five minutes), so a browser connection can reuse a name
+just resolved by ping. Zero-TTL answers are not cached. Changing DNS or
+reconnecting invalidates the cache. `net` reports cache hits; `wifidiag`
+separates CCMP format, key, replay and MIC drops for physical-radio diagnosis.
+
 Settings → Network uses the native `wifi_*` API for scanning and connection.
 Three results are displayed per page; the arrow buttons show the remaining
 results. Open and WPA2-PSK networks can be selected; WPA2 passwords are masked,
