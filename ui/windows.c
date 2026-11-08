@@ -591,97 +591,93 @@ static void draw_topbar(void) {
     rtc_string(clock);
     text(W - 136, 17, clock + 12, 13, 0xffffff);
 }
-/* Repaints the cached surfaces of the windows whose content changed. The
- * glass background is only redrawn when the window itself moved or the theme
- * changed; a content update alone keeps the cached background. */
 static bool app_dark(int app) {
     return app == APP_SHELL || app == APP_TASKS;
 }
-/* Rasterizes the window background into the given target. */
-static void render_glass(Window *w, uint32_t *target, int stride, int height) {
-    gfx_set_target(target, stride, height, w->x, w->y);
+static bool window_large(const Window *w) {
+    return w->w > GFX_CACHE_W || w->h > GFX_CACHE_H;
+}
+/* Render a surface just before compositing it, while the shared large cache
+ * still belongs to this window. Only small windows use the glass cache. */
+static bool update_surface(Window *w, bool large, uint32_t *surface, int stride) {
+    int app = w->app;
+    bool focused = app == active_app;
+    bool content = !surface_valid[app] || (large && large_owner != app);
+    if (!content && surface_focus[app] == focused)
+        return false;
+
+    if (content && !large &&
+        (!glass_valid || glass_app != app || glass_x != w->x || glass_y != w->y ||
+         glass_w != w->w || glass_h != w->h)) {
+        gfx_set_target(glass_cache, GFX_CACHE_W, GFX_CACHE_H, w->x, w->y);
+        glass(0, 0, w->w, w->h, 20, app_dark(app));
+        glass_valid = true;
+        glass_app = app;
+        glass_x = w->x;
+        glass_y = w->y;
+        glass_w = w->w;
+        glass_h = w->h;
+    }
+    gfx_set_target(surface, stride, large ? GFX_MAX_H : GFX_CACHE_H, w->x, w->y);
+    if (!content)
+        gfx_clip(0, 0, w->w, 33);
+    if (large || !content) {
+        glass(0, 0, w->w, w->h, 20, app_dark(app));
+    } else {
+        for (int j = 0; j < w->h; j++)
+            memcpy(surface + j * stride, glass_cache + j * GFX_CACHE_W, w->w * 4);
+    }
+
     Window paint = *w;
     paint.x = paint.y = 0;
-    glass(0, 0, w->w, w->h, 20, app_dark(w->app));
+    titlebar(&paint, focused);
+    if (content) {
+        gfx_clip(12, 36, w->w - 24, w->h - 48);
+        app_draw(app, 20, 46, w->w - 40, w->h - 66);
+    }
+    if (large)
+        large_owner = app;
+    surface_valid[app] = true;
+    surface_focus[app] = focused;
+    return true;
 }
-static void update_surfaces(void) {
+/* Include changed surfaces in the frame's damage before drawing any region.
+ * Evicting a cache entry alone does not change pixels already on screen. */
+static void damage_changed_surfaces(void) {
     for (int z = 0; z < zcount; z++) {
-        Window *w = &windows[zorder[z]];
+        int app = zorder[z];
+        Window *w = &windows[app];
         if (!w->open || w->minimized || window_covered(z))
             continue;
-        bool focused = w->app == active_app;
-        bool large = w->w > GFX_CACHE_W || w->h > GFX_CACHE_H;
-        uint32_t *surface = large ? large_surface : surfaces[w->app];
-        int stride = large ? GFX_MAX_W : GFX_CACHE_W;
-        int height = large ? GFX_MAX_H : GFX_CACHE_H;
-        bool replaced = large && large_owner != w->app;
-        bool content = !surface_valid[w->app] || replaced;
-        bool title = surface_focus[w->app] != focused;
-        if (!content && !title)
-            continue;
-        Window paint = *w;
-        paint.x = paint.y = 0;
-        if (content) {
-            /* The background only changes when the window moves, when the
-             * theme changes or when it was never painted. Otherwise the
-             * cached copy is reused and only the client is drawn again. */
-            bool cached = !large && glass_valid && glass_app == w->app &&
-                          glass_x == w->x && glass_y == w->y && glass_w == w->w &&
-                          glass_h == w->h;
-            if (cached) {
-                gfx_set_target(surface, stride, height, w->x, w->y);
-                for (int j = 0; j < w->h; j++)
-                    memcpy(surface + j * stride, glass_cache + j * GFX_CACHE_W, w->w * 4);
-            } else {
-                render_glass(w, glass_cache, GFX_CACHE_W, GFX_CACHE_H);
-                glass_valid = true;
-                glass_app = w->app;
-                glass_x = w->x;
-                glass_y = w->y;
-                glass_w = w->w;
-                glass_h = w->h;
-                gfx_set_target(surface, stride, height, w->x, w->y);
-                for (int j = 0; j < w->h; j++)
-                    memcpy(surface + j * stride, glass_cache + j * GFX_CACHE_W, w->w * 4);
-            }
-            titlebar(&paint, focused);
-            gfx_clip(12, 36, w->w - 24, w->h - 48);
-            app_draw(w->app, 20, 46, w->w - 40, w->h - 66);
-        } else {
-            /* Only the focus changed: the titlebar strip is repainted. */
-            gfx_set_target(surface, stride, height, w->x, w->y);
-            gfx_clip(0, 0, w->w, 33);
-            glass(0, 0, w->w, w->h, 20, app_dark(w->app));
-            titlebar(&paint, focused);
-        }
-        surface_valid[w->app] = true;
-        surface_focus[w->app] = focused;
-        if (large)
-            large_owner = w->app;
-        /* The scene still holds the previous pixels of that rectangle. */
-        if (content)
-            gui_damage(w->x - SHADOW_SIDE, w->y - SHADOW_SIDE, w->w + 2 * SHADOW_SIDE,
-                       w->h + SHADOW_DROP);
-        else
-            gui_damage(w->x, w->y, w->w, 33);
+        if (!surface_valid[app])
+            damage_window(app);
+        else if (surface_focus[app] != (app == active_app))
+            gui_damage(w->x, w->y + motion_y[app], w->w, 33);
     }
 }
 /* Repaints one damaged rectangle: wallpaper, top bar, every window that
  * intersects it in stacking order, then the dock and the overlays. */
 static void paint_region(int rx, int ry, int rw, int rh) {
+    Damage region = {rx, ry, rw, rh};
     gfx_scene_target();
     gfx_clip(rx, ry, rw, rh);
     gfx_fill_wallpaper();
     draw_topbar();
     for (int z = 0; z < zcount; z++) {
         Window *w = &windows[zorder[z]];
-                if (!w->open || w->minimized || window_covered(z))
+        if (!w->open || w->minimized || window_covered(z))
             continue;
-        bool large = w->w > GFX_CACHE_W || w->h > GFX_CACHE_H;
-        uint32_t *surface = large ? large_surface : surfaces[w->app];
-        int stride = large ? GFX_MAX_W : GFX_CACHE_W;
         int visible_y = w->y + motion_y[w->app];
         gfx_window_shadow(w->x, visible_y, w->w, w->h, 20);
+        if (!damage_overlap(region, (Damage){w->x, visible_y, w->w, w->h}))
+            continue;
+        bool large = window_large(w);
+        uint32_t *surface = large ? large_surface : surfaces[w->app];
+        int stride = large ? GFX_MAX_W : GFX_CACHE_W;
+        if (update_surface(w, large, surface, stride)) {
+            gfx_scene_target();
+            gfx_clip(rx, ry, rw, rh);
+        }
         gfx_blit_surface(surface, stride, w->x, visible_y, w->w, w->h, 20);
     }
     gfx_occlusion_clear();
@@ -728,13 +724,15 @@ void gui_motion_poll(void) {
     last_spinner = phase;
 }
 void gui_draw(void) {
-        if (setup_active) {
+    if (setup_active) {
         setup_draw();
         damage_count = 0;
         damage_full = false;
         return;
     }
     uint32_t started = frame_clock;
+    if (!damage_full && damage_count)
+        damage_changed_surfaces();
     if (damage_full) {
         damage[0] = (Damage){0, 0, W, H};
         damage_count = 1;
@@ -744,7 +742,6 @@ void gui_draw(void) {
         ui_dirty = false;
         return;
     }
-        update_surfaces();
     for (int i = 0; i < damage_count; i++)
         paint_region(damage[i].x, damage[i].y, damage[i].w, damage[i].h);
     for (int i = 0; i < damage_count; i++)

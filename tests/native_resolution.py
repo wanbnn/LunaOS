@@ -53,6 +53,26 @@ def set_mode(index):
     wait_until(lambda:memory(g,symbol_address('ui_dirty'),1)==b'\0',30)
 
 try:
+    g.open_app('home')
+    g.open_app('terminal')
+    terminal = window(1)
+    click(terminal[1] + 76, terminal[2] + 17)
+    wait_until(lambda: window(1)[12] == 1)
+    move(1023, 767)
+    im = screenshot('native-terminal-maximized-1024')
+    x, y, width, height = window(1)[1:5]
+    assert (x, y, width, height) == (8, 54, 1008, 606)
+    # Blank terminal glass must stay continuous across the small cache's edges.
+    for a, b in [((x + 879, y + 300), (x + 880, y + 300)),
+                 ((x + 740, y + 557), (x + 740, y + 558))]:
+        before, after = im.getpixel(a), im.getpixel(b)
+        assert min(before + after) > 0 and max(abs(p - q) for p, q in zip(before, after)) <= 4, (
+            a, before, b, after
+        )
+    click(x + 76, y + 17)
+    wait_until(lambda: window(1)[12] == 0)
+    assert window(1)[1:5] == terminal[1:5]
+
     g.open_app('settings');w=window();x,y=w[1]+20,w[2]+46
     click(x+65,y+62+2*47+18)
     baseline=title_metrics(screenshot('native-1024'))
