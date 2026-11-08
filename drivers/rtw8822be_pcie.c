@@ -310,6 +310,11 @@ static int tx_mpdu(void *ctx,const uint8_t *mpdu,unsigned n,bool mgmt) {
     le32(pkt+4,(mgmt ? 0x12u : 0u)<<8);
     le32(pkt+12,(1u<<8)|(1u<<10));
     le32(pkt+16,dev.phy.hal.current_channel>14 ? 4 : 0);
+    /* rtw88 TX_DESC_W9_SW_SEQ[23:12] supplies the MAC sequence when
+     * EN_HWSEQ is clear. A sequence in the MPDU alone is insufficient:
+     * leaving this zero can reuse sequence zero for unrelated packets. */
+    unsigned sequence=((unsigned)mpdu[22]|((unsigned)mpdu[23]<<8))>>4;
+    le32(pkt+36,sequence<<12);
     unsigned checksum=0;
     for(unsigned i=0;i<32;i+=2) checksum^=pkt[i]|((unsigned)pkt[i+1]<<8);
     le16(pkt+28,checksum);
