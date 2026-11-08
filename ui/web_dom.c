@@ -129,6 +129,7 @@ WebNode *web_node_clone(const WebNode *source, bool deep) {
         return 0;
     WebNode *copy = web_node_new(source->type);
     copy->tag = web_strdup(source->tag);
+    copy->namespace_id = source->namespace_id;
     copy->text = web_strdup(source->text);
     for (const WebAttr *a = source->attrs; a; a = a->next)
         web_set_attr(copy, a->name, a->value);
@@ -534,6 +535,18 @@ static void parse_start_tag(WebParser *ps) {
     WebNode *node = web_node_new(WEB_ELEMENT);
     node->tag = tag;
     WebNode *parent = current(ps);
+    if (parent) {
+        node->namespace_id = parent->namespace_id;
+        if (parent->namespace_id == WEB_NS_SVG &&
+            (!strcmp(parent->tag, "foreignobject") ||
+             !strcmp(parent->tag, "desc") ||
+             !strcmp(parent->tag, "title")))
+            node->namespace_id = WEB_NS_HTML;
+        if (!strcmp(tag, "svg") && node->namespace_id == WEB_NS_HTML)
+            node->namespace_id = WEB_NS_SVG;
+        else if (!strcmp(tag, "math") && node->namespace_id == WEB_NS_HTML)
+            node->namespace_id = WEB_NS_MATHML;
+    }
     if (!parent) {
         web_free_tree(node);
         return;
