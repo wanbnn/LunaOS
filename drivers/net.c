@@ -1990,3 +1990,78 @@ done:
         *written = 0;
     return result;
 }
+
+
+/* A single authenticated HTTPS stream for v2 update packages. Redirects are
+ * authenticated and every hop must remain HTTPS. No temporary LunaFS file. */
+bool net_https_stream(const char *url, NetHttpsSink sink, void *context, uint64_t *written,
+                      char *error, size_t ecap) {
+    if (!url || !sink || !written || !error || !ecap) return false;
+    *written = 0;
+    error[0] = 0;
+    if (network_owner) {
+        append(error, "Network service busy.", ecap);
+        return false;
+    }
+    network_owner = task_current()->pid;
+    char current[4096];
+    if (strlen(url) >= sizeof(current)) {
+        append(error, "Update URL too long.", ecap);
+        network_owner = 0;
+        return false;
+    }
+    strcpy(current, url);
+    /* Streaming requests have an idle timeout but no total-size deadline. */
+    http_begin(0);
+    bool result = false;
+    for (unsigned hop = 0; hop < 8; ++hop) {
+        if (strncmp(current, "https://", 8)) {
+            append(error, "HTTPS downgrade refused.", ecap);
+            goto done;
+        }
+        bool secure = false;
+        if (http_open(current, &secure, error, ecap) < 0 || !secure)
+            goto done;
+        HttpInput input = {.read = download_read, .context = (void *)(uintptr_t)1};
+        HttpReply reply;
+        if (!http_stream_headers(&input, &reply, error, ecap)) goto done;
+        if (reply.status >= 300 && reply.status < 400) {
+            stream_close();
+            char next[4096];
+            if (!reply.location[0] ||
+                !url_resolve(current, reply.location, next, sizeof(next))) {
+                append(error, "Invalid update redirect.", ecap);
+                goto done;
+            }
+            strcpy(current, next);
+            continue;
+        }
+        if (reply.status != 200) {
+            append(error, "HTTP status ", ecap);
+            char code[16];
+            number(code, reply.status);
+            append(error, code, ecap);
+            append(error, ".", ecap);
+            goto done;
+        }
+        if (!http_stream_body(&input, &reply, sink, context, written, error, ecap))
+            goto done;
+        if (!reply.chunked && !reply.have_length && tls_error() && tls_error() != 31) {
+            append(error, "Incomplete authenticated HTTPS body.", ecap);
+            goto done;
+        }
+        if (tls_error() && tls_error() != 31) {
+            append(error, "TLS verification failed during package transfer.", ecap);
+            goto done;
+        }
+        result = true;
+        goto done;
+    }
+    append(error, "Too many update redirects.", ecap);
+done:
+    http_operation.active = false;
+    stream_close();
+    network_owner = 0;
+    if (!result) *written = 0;
+    return result;
+}

@@ -160,6 +160,8 @@ bool net_ping(const char *, char *, size_t);
 bool net_download_file(const char *, const char *, uint64_t *, char *, size_t);
 int net_http(const char *, char *, size_t, char *, size_t);
 int net_https(const char *, char *, size_t, char *, size_t);
+typedef bool (*NetHttpsSink)(void *, const void *, size_t);
+bool net_https_stream(const char *, NetHttpsSink, void *, uint64_t *, char *, size_t);
 extern bool net_ready;
 void shell_init(void);
 void shell_run(const char *);
