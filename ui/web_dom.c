@@ -44,6 +44,8 @@ WebNode *web_node_new(unsigned char type) {
     WebNode *n = web_malloc(sizeof(WebNode));
     memset(n, 0, sizeof(WebNode));
     n->type = type;
+    if (type == WEB_DOCUMENT_FRAGMENT || type == WEB_SHADOW_ROOT)
+        n->tag = web_strdup("#document-fragment");
     return n;
 }
 /* DOM tree invariants: a node has one parent, never its descendant.
@@ -69,12 +71,26 @@ void web_node_detach(WebNode *node) {
     node->parent = node->next = node->prev = 0;
 }
 bool web_node_insert_before(WebNode *parent, WebNode *child, WebNode *reference) {
-    if (!parent || !child || web_node_contains(child, parent))
+    if (!parent || !child || web_node_contains(child, parent) ||
+        child->type == WEB_SHADOW_ROOT)
         return false;
     if (reference && reference->parent != parent)
         return false;
     if (reference == child)
         return true;
+    if (child->type == WEB_DOCUMENT_FRAGMENT) {
+        /* DOM fragment insertion moves its children, not the fragment. */
+        for (WebNode *n = child->first_child; n; n = n->next)
+            if (web_node_contains(n, parent))
+                return false;
+        while (child->first_child) {
+            WebNode *n = child->first_child;
+            web_node_detach(n);
+            if (!web_node_insert_before(parent, n, reference))
+                return false;
+        }
+        return true;
+    }
     web_node_detach(child);
     child->parent = parent;
     if (!reference) {
@@ -137,7 +153,21 @@ WebNode *web_node_clone(const WebNode *source, bool deep) {
         for (const WebNode *child = source->first_child; child; child = child->next)
             web_node_append(copy, web_node_clone(child, true));
     }
+    if (source->template_content) {
+        copy->template_content = web_node_clone(source->template_content, deep);
+    }
+    /* Shadow trees are intentionally not implicitly cloned. */
     return copy;
+}
+WebNode *web_attach_shadow(WebNode *host, bool open_mode) {
+    if (!host || host->type != WEB_ELEMENT || host->shadow_root ||
+        host->namespace_id != WEB_NS_HTML)
+        return 0;
+    WebNode *root = web_node_new(WEB_SHADOW_ROOT);
+    root->host = host;
+    host->shadow_root = root;
+    host->shadow_open = open_mode;
+    return root;
 }
 void web_free_tree(WebNode *node) {
     if (!node)
@@ -148,6 +178,8 @@ void web_free_tree(WebNode *node) {
         web_free_tree(child);
         child = next;
     }
+    web_free_tree(node->template_content);
+    web_free_tree(node->shadow_root);
     WebAttr *a = node->attrs;
     while (a) {
         WebAttr *next = a->next;
@@ -372,7 +404,12 @@ static bool is_alpha(char c) {
 static bool name_char(char c) {
     return is_alpha(c) || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == ':';
 }
-static WebNode *current(WebParser *ps) { return ps->depth ? ps->open[ps->depth - 1] : 0; }
+static WebNode *current(WebParser *ps) {
+    if (!ps->depth)
+        return 0;
+    WebNode *top = ps->open[ps->depth - 1];
+    return top->template_content ? top->template_content : top;
+}
 
 static void add_text(WebParser *ps, const char *text, size_t len) {
     if (!len)
@@ -564,6 +601,8 @@ static void parse_start_tag(WebParser *ps) {
     (void)self_closing;
     if (web_is_void_tag(node->tag))
         return;
+    if (node->namespace_id == WEB_NS_HTML && !strcmp(node->tag, "template"))
+        node->template_content = web_node_new(WEB_DOCUMENT_FRAGMENT);
     if (is_raw_tag(node->tag)) {
         /* Raw script/style and RCDATA textarea/title end at a matching,
          * ASCII-case-insensitive end tag; whitespace before '>' is allowed. */
