@@ -9,6 +9,7 @@ on:
       - 'ui/litehtml_bridge.cpp'
       - 'ui/litehtml_graphics.c'
       - 'lib/cxx_runtime.cpp'
+      - 'lib/runtime.c'
       - 'tests/litehtml_bridge_test.cpp'
       - '.github/workflows/litehtml.yml'
   push:
