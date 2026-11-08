@@ -11,6 +11,7 @@ on:
       - 'ui/litehtml_graphics.c'
       - 'lib/cxx_runtime.cpp'
       - 'lib/runtime.c'
+      - 'lib/cxx_glibc_compat.c'
       - 'tests/litehtml_bridge_test.cpp'
       - '.github/workflows/litehtml.yml'
   push:
