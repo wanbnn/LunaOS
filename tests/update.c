@@ -169,7 +169,7 @@ int main(void) {
     reset(); fail_alloc = 4; update_run(); unchanged(); assert(!writes);
     reset(); save_ok = false; update_run(); unchanged(); assert(!writes);
     reset(); fail_read = 2; update_run(); unchanged(); assert(!writes);
-    reset(); fail_write = 11; update_run(); unchanged(); assert(writes > 11);
+    reset(); fail_write = 3; update_run(); unchanged(); assert(writes > 3);
     reset(); fail_flush = 1; update_run(); unchanged(); assert(writes);
     reset(); corrupt_readback = 1; update_run(); unchanged(); assert(writes);
     reset();
