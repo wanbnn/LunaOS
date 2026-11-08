@@ -32,6 +32,16 @@ build/icons.h: tools/icongen.py $(wildcard assets/icons/lucide/*)
 	$(PYTHON) tools/icongen.py
 build/ui/graphics.o: build/font.h build/icons.h
 build/ui/windows.o build/ui/desktop.o: ui/window.h
+# Render the source revision actually compiled into the image, not a hardcoded
+# release string. FORCE runs the check at every build; unchanged content is
+# left untouched so an incremental build does not unnecessarily relink.
+.PHONY: FORCE
+FORCE:
+build/luna_build_version.h: FORCE
+	@mkdir -p build
+	@$(PYTHON) -c 'from pathlib import Path; import subprocess; p=Path("build/luna_build_version.h"); s=subprocess.run(["git","rev-parse","--short=12","HEAD"],capture_output=True,text=True); v=(s.stdout.strip() if s.returncode==0 else "unknown"); content="#ifndef LUNA_BUILD_VERSION_H\\n#define LUNA_BUILD_VERSION_H\\n#define LUNA_BUILD_COMMIT \\""+v+"\\"\\n#endif\\n"; content=content.replace("\\\\n","\\n").replace("\\\\"","\\""); p.write_text(content) if not p.exists() or p.read_text()!=content else None'
+build/ui/desktop.o: build/luna_build_version.h
+
 third_party/musl/config.mak: third_party/musl/configure
 	cd third_party/musl && ./configure --target=i386 --prefix=/luna CC='gcc -m32' CFLAGS='-O2 -fno-pie -fno-stack-protector' --disable-shared
 third_party/musl/lib/libc.a: third_party/musl/config.mak
