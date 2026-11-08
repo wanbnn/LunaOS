@@ -11,6 +11,8 @@
 bool net_ready = true, setup_active;
 uint32_t memory_mb = 256;
 volatile uint32_t frame_clock;
+void serial_write(const char *message) { (void)message; }
+void number(char *out, uint32_t value) { snprintf(out, 24, "%u", value); }
 static Task current = {.pid = 9};
 static DiskInfo info = {.present = true, .supported = true, .sectors = LUNA_IMAGE_BYTES / 512};
 static uint8_t *disk, *original, *wanted;
