@@ -4,6 +4,7 @@
 #include "webengine.h"
 #include "motion.h"
 #include "memory.h"
+#include "luna_build_version.h"
 #define WHITE 0xf2f7ff
 #define MUTED 0xb5cbdf
 extern int display_brightness;
@@ -566,6 +567,7 @@ static void home(int x, int y, int w, int h) {
     text(x + 9, y + 110, "A little more you.", 48, WHITE);
     text(x + 13, y + 195, "Your own kernel. Your own space.", 20, WHITE);
     text(x + 13, y + 231, "Floating windows. Protected native app clients.", 16, MUTED);
+    text(x + 13, y + 264, "Build commit: " LUNA_BUILD_COMMIT, 16, 0xa5d3ff);
     line(x + 12, y + h - 100, x + w - 12, y + h - 100, 0x829bb8);
     button(x + 12, y + h - 72, 144, "Open lunaSH", true);
     button(x + 171, y + h - 72, 144, "Explore files", true);
