@@ -44,9 +44,10 @@ static void wr(AhciHost *h,uint32_t off,uint32_t v) {
 static bool wait_reg(AhciHost *h,uint32_t off,uint32_t mask,uint32_t expected,
                      unsigned timeout_ms) {
     uint32_t start=drv_now_ms();
+    unsigned polls = 0;
     while((rd(h,off)&mask)!=expected) {
         if((uint32_t)(drv_now_ms()-start)>=timeout_ms)return false;
-        __asm__ volatile("pause");
+        storage_poll_wait(&polls);
     }
     return true;
 }
@@ -112,11 +113,23 @@ static int issue(AhciDisk *d,uint8_t opcode,uint64_t lba,
     drv_memory_barrier();
     wr(h,base+PX_CI,1);
     uint32_t start=drv_now_ms();
+    unsigned polls = 0;
     for(;;) {
-        if(rd(h,base+PX_IS)&(1u<<30))return DRV_EIO;
-        if(!(rd(h,base+PX_CI)&1u))break;
-        if((uint32_t)(drv_now_ms()-start)>3000)return DRV_ETIMEDOUT;
-        __asm__ volatile("pause");
+        bool pending = (rd(h,base+PX_CI)&1u) != 0;
+        if(rd(h,base+PX_IS)&(1u<<30)) {
+            if (pending) {
+                d->ready = false;
+                port_stop(d);
+            }
+            return DRV_EIO;
+        }
+        if(!pending)break;
+        if((uint32_t)(drv_now_ms()-start)>3000) {
+            d->ready = false;
+            port_stop(d);
+            return DRV_ETIMEDOUT;
+        }
+        storage_poll_wait(&polls);
     }
     drv_memory_barrier();
     return (rd(h,base+PX_TFD)&1u)?DRV_EIO:0;
@@ -208,7 +221,12 @@ int storage_ahci_probe(uint8_t bus,uint8_t slot,uint8_t fn) {
         }
         if(!identify(d)) {
             serial_write("STORAGE AHCI: IDENTIFY failed\n");
-            port_stop(d);port_free(d);continue;
+            if (!port_stop(d)) {
+                drv_pci_master(&h->pci, false);
+                h->used = true;
+                return h->count ? (int)h->count : DRV_ETIMEDOUT;
+            }
+            port_free(d);continue;
         }
         h->count++;
     }

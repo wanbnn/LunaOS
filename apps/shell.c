@@ -26,7 +26,7 @@ static const char *commands[] = {
     "uname",  "free",  "uptime",  "date",     "pci",     "net",     "ifconfig", "dns", "ping",  "wget",
     "browse", "audio", "beep",    "sync",     "history", "source",  "set",      "env",   "true",
     "false",  "sleep", "reboot",  "poweroff", "about",   "ps",      "tasks",    "kill",  "ringtest",
-    "js",     "dev",   "bench", "drvinfo", "whoami",   "setup",   "drvtest", "fwinfo",   "wifidiag", "wifi", "memtest", 0};
+    "js",     "dev",   "bench", "perf", "drvinfo", "whoami",   "setup",   "drvtest", "fwinfo",   "wifidiag", "wifi", "memtest", 0};
 #define CAP 8192
 static void emit(char *out, const char *s) {
     append(out, s, CAP);
@@ -885,6 +885,8 @@ static int execute(int argc, char **a, const char *input, char *out) {
         emit(out, "\n");
         drv_firmware_release(&fw);
         return 0;
+    } else if (!strcmp(c, "perf")) {
+        perf_status(out, CAP);
     } else if (!strcmp(c, "bench")) {
         gui_benchmark(out, CAP);
         return 0;

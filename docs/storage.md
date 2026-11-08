@@ -38,6 +38,11 @@ Consulte [LunaFS2](lunafs2.md).
 | SDHCI/eMMC (PCI ou ACPI `_HID`/`_CRS`) | **Experimental** | CMD0/1/2/3/7/8/9/13/17/24, SD ACMD41, eMMC EXT_CSD/cache flush | PIO 1-bit até 25 MHz; SDHC/SDXC e eMMC com OCR sector mode, 512 B, área de usuário |
 | RAID MegaRAID MFI (`1000:0060/0079`) | **Experimental** | Inicializa fila, lista volumes, SCSI READ CAPACITY/MODE SENSE, LD READ/WRITE, DCMD cache flush | SAS1078/2108; volumes existentes, 512 B; não cria arrays nem escreve em membros físicos |
 
+Os backends de armazenamento fazem uma consulta curta antes de suspender a
+tarefa que aguarda o controlador. Isso permite que outros aplicativos avancem
+enquanto os buffers do comando continuam reservados. `tests/storage_multitask.py`
+verifica esse comportamento com uma leitura AHCI limitada artificialmente no QEMU.
+
 **Nenhum backend de instalação é automaticamente universal.** IOMMU, MSI,
 APIC, BAR acima de 4 GiB, NVMe 4K lógico, hotplug, comandos assíncronos,
 SATA NCQ, NVMe namespaces adicionais, controladores SAS e Intel VMD

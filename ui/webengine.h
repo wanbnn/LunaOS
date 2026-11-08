@@ -55,6 +55,8 @@ typedef struct WebNode {
     void *js;
     unsigned char *image;
     int image_w, image_h;
+    uint64_t fragment_epoch;
+    int first_fragment, last_fragment;
 } WebNode;
 
 typedef struct WebFragment {
@@ -63,7 +65,7 @@ typedef struct WebFragment {
     int size;
     uint32_t color;
     bool underline;
-    WebNode *owner;
+    int next;
 } WebFragment;
 
 /* dom */
@@ -120,7 +122,9 @@ void web_add_stylesheet(const char *css, size_t len);
 bool web_stylesheet_link(int index, char *out, size_t cap);
 void web_render(int x, int y, int w, int h);
 int web_content_height(void);
-void web_scroll_by(int delta);
+bool web_scroll_by(int delta);
+void web_finish_resources(void);
+void web_set_viewport(int width, int height);
 int web_scroll_offset(void);
 bool web_click(int x, int y, char *href, size_t cap);
 bool web_has_document(void);

@@ -59,6 +59,8 @@ void serial_init(void);
 void serial_put(char);
 void serial_write(const char *);
 int serial_get(void);
+bool serial_interrupt(void);
+bool serial_uses_irq(void);
 void platform_init(void);
 void timer_interrupt(void);
 void kernel_fault(void);
@@ -76,9 +78,11 @@ void audio_status(char *, size_t);
 void input_init(void);
 int input_key(void);
 void input_poll(void);
+bool input_pending(void);
 bool input_pointer(int *, int *, int *);
 extern int mouse_x, mouse_y, mouse_buttons;
-extern bool mouse_changed;
+bool input_interrupt(void);
+bool input_uses_irq(void);
 #define KEY_UP 128
 #define KEY_DOWN 129
 #define KEY_LEFT 130
@@ -169,6 +173,7 @@ extern bool ui_dirty;
 void gui_init(void);
 void gui_draw(void);
 void gui_motion_poll(void);
+void gui_refresh_status(void);
 void gui_damage(int, int, int, int);
 void gui_damage_quick(void);
 void gui_damage_all(void);

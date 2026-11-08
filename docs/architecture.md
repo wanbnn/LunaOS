@@ -40,27 +40,33 @@ orçamento curto de execução, mas uma rotina longa de kernel ainda pode atrasa
 
 ## Entrada, janelas e renderização
 
-PS/2 mantém filas de teclas e transições de botões. Modificadores são capturados no
-momento do evento. Super abre o launcher; Alt+Tab usa uma ordem de troca estável enquanto
+PS/2 e a serial recebem bytes por interrupção. O desktop decodifica a fila PS/2
+fora da interrupção. Uma consulta de segurança atende firmware com roteamento
+diferente e dispositivos virtuais VMMouse. O driver mantém filas de teclas e
+transições de botões, com os modificadores capturados no momento do evento. Super abre o launcher; Alt+Tab usa uma ordem de troca estável enquanto
 Alt está pressionado; Alt+Shift+Tab reverte; Alt+F4 fecha o foco. F1–F6 não abrem apps.
 Movimentos repetidos com o mesmo estado de botão são agrupados, preservando as bordas
 de pressionar/soltar. Deltas PS/2 usam o sinal de nove bits e escala linear configurável.
 
 Janelas mantêm geometria, foco, ordem, restauração, minimização e PID. O compositor
 pinta cada cliente em uma superfície RGB cacheada. Arrastar recompõe superfícies;
-ao soltar, invalida o vidro para recalcular a amostragem do fundo na nova posição.
-Recortes respeitam as dimensões da janela; as curvas usam cobertura de 16 subpixels.
+a área opaca da janela em movimento cobre as camadas abaixo. Ao soltar, invalida
+o vidro para recalcular a amostragem do fundo na nova posição. Recortes respeitam
+as dimensões da janela e as curvas usam cobertura de 16 subpixels.
 
-O scanout preferido é Bochs/QEMU stdvga de 32 bits; VBE é fallback. Cópias em bloco
-substituem a conversão completa por pixel no caminho nativo. O cursor é um overlay
-pequeno restaurado a partir da cena, com hotspot alinhado à ponta do Lucide. Ele não
-invalida todos os aplicativos a cada movimento.
+O scanout usa Bochs/QEMU stdvga de 32 bits ou o framebuffer entregue pelo firmware
+(VBE/GOP). O kernel usa write-combining quando a CPU e o mapeamento permitem.
+A GPU exibe o framebuffer e o CPU compõe a cena. O cursor é combinado com os
+pixels antes da cópia ao framebuffer e pode ser atualizado entre frames.
 
 O pacing usa fase fracionária (`milliseconds * 60`, incremento de 1000) para não
 introduzir um teto de 58,8 fps por arredondamento constante de 17 ms. Idle não força
 60 repaint completos por segundo. `bench` mede throughput, separado da cadência
 interativa e da frequência física. Timings do monitor não são programados pelo driver;
-modos superiores a 60 não são anunciados como suportados.
+modos superiores a 60 não são anunciados como suportados. O comando `perf` do
+lunaSH mostra contagens e tempo ativo estimado por subsistema desde o boot.
+Compare duas leituras para isolar uma ação. Tempos de espera suspensa ficam fora
+dos totais.
 
 ## Configurações e dados
 

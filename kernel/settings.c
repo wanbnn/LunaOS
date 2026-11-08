@@ -85,9 +85,15 @@ bool settings_write(void) {
 void settings_changed(void) {
     net_set_dns(*prefs.dns_server ? prefs.dns_server : "auto");
     static int dark = -1, accent = -1, wallpaper = -1;
+    static int brightness = 100, night_light;
     input_apply_settings();
     audio_apply_settings();
-    gfx_transform_changed();
+    if (brightness != prefs.brightness || night_light != prefs.night_light) {
+        brightness = prefs.brightness;
+        night_light = prefs.night_light;
+        gfx_transform_changed();
+        gui_damage_all();
+    }
     if (dark != prefs.dark || accent != prefs.accent || wallpaper != prefs.wallpaper) {
         dark = prefs.dark;
         accent = prefs.accent;

@@ -21,6 +21,8 @@ static uint8_t shell_stack[SHELL_STACK_BYTES] __attribute__((aligned(4096)));
 #define MMIO_PAGES 4096u
 static uint32_t mmio_tables[4][1024] __attribute__((aligned(4096)));
 static uint16_t mmio_lengths[MMIO_PAGES];
+static uint32_t framebuffer_tables[4][1024] __attribute__((aligned(4096)));
+static uint64_t framebuffer_start, framebuffer_end;
 static uint64_t gdt[10];
 static struct {
     uint32_t previous, esp0, ss0, esp1, ss1, esp2, ss2, cr3, eip, eflags, eax, ecx, edx, ebx, esp,
@@ -156,7 +158,8 @@ void task_init(void) {
     __asm__ volatile("sti");
     serial_write("Tasks: paging / TSS / CPL 0,1,2,3 / int80 / private stacks\n");
 }
-uint32_t task_spawn(int app, const char *name, unsigned ring, unsigned probe) {
+static uint32_t spawn(int app, const char *name, unsigned ring, unsigned probe,
+                      void (*service)(void)) {
     if (!initialized || ring < 1 || ring > 3 || app >= APP_COUNT)
         return 0;
     int slot;
@@ -173,8 +176,9 @@ uint32_t task_spawn(int app, const char *name, unsigned ring, unsigned probe) {
     t->observed_ring = 255;
     t->app = app;
     t->probe = probe;
-    t->system = ring < 3;
-    t->capabilities = app >= 0 ? CAP_UI : 0;
+    t->system = ring < 3 || service != NULL;
+    t->service = service;
+    t->capabilities = app >= 0 || service ? CAP_UI : 0;
     if (app == APP_TASKS || app == APP_SHELL)
         t->capabilities |= CAP_TASK_CONTROL;
     t->kernel_stack = app == APP_SHELL ? shell_stack : kernel_stacks[slot];
@@ -199,8 +203,15 @@ uint32_t task_spawn(int app, const char *name, unsigned ring, unsigned probe) {
     t->frame->useresp = USER_STACK + USER_STACK_BYTES - USER_CODE - 16;
     t->frame->eax = probe;
     t->state = TASK_READY;
-    gui_damage_all();
+    if (!service)
+        gui_damage_all();
     return t->pid;
+}
+uint32_t task_spawn(int app, const char *name, unsigned ring, unsigned probe) {
+    return spawn(app, name, ring, probe, NULL);
+}
+uint32_t task_spawn_service(const char *name, void (*service)(void)) {
+    return spawn(-1, name, 3, 0, service);
 }
 bool task_post(uint32_t pid, AppEvent e) {
     Task *t = task_by_pid(pid);
@@ -234,7 +245,7 @@ static void finish(Task *t, unsigned code) {
 bool task_kill(uint32_t pid) {
     if (update_busy() && update_owner() == pid) return false;
     Task *t = task_by_pid(pid);
-    if (!t || t->system || t->state == TASK_EXITED || t->state == TASK_UNUSED)
+    if (!t || t->system || t->storage_depth || t->state == TASK_EXITED || t->state == TASK_UNUSED)
         return false;
     finish(t, 0);
     return true;
@@ -245,30 +256,47 @@ void task_yield(void) {
     else
         __asm__ volatile("hlt");
 }
-void task_sleep(uint32_t duration) {
+void task_yield_ready(void) {
+    for (unsigned i = 0; i < TASK_MAX; i++)
+        if (tasks[i].state == TASK_READY) {
+            task_yield();
+            return;
+        }
+}
+void task_sleep_ms(uint32_t duration) {
     if (!initialized) {
-        uint32_t start = ticks;
-        while (ticks - start < duration)
+        uint32_t start = frame_clock;
+        while (frame_clock - start < duration)
             __asm__ volatile("hlt");
         return;
     }
     if (!duration)
         return;
     Task *t = task_current();
-    t->wake_tick = ticks + duration;
+    t->wake_tick = frame_clock + duration;
     t->state = TASK_SLEEPING;
     task_yield();
 }
+void task_sleep(uint32_t duration) {
+    task_sleep_ms(duration > INT32_MAX / 10u ? INT32_MAX : duration * 10);
+}
 void task_idle(void) {
+    if (!initialized) {
+        __asm__ volatile("hlt");
+        return;
+    }
+    perf_pause();
     idling = true;
     uint32_t now = clock_units();
     tasks[current_task].cpu_units += now - stamp;
     __asm__ volatile("hlt");
     stamp = clock_units();
     idling = false;
+    perf_resume();
 }
 static TrapFrame *schedule(TrapFrame *f) {
     Task *old = task_current();
+    perf_pause();
     uint32_t now = clock_units();
     if (!idling)
         old->cpu_units += now - stamp;
@@ -303,6 +331,7 @@ static TrapFrame *schedule(TrapFrame *f) {
         tss.esp0 = 0x3f00000;
     if (t->directory != old->directory)
         __asm__ volatile("mov %0,%%cr3" ::"r"(t->directory) : "memory");
+    perf_resume();
     return t->frame;
 }
 static void sample(void) {
@@ -356,7 +385,12 @@ static TrapFrame *syscall(TrapFrame *f) {
             break;
         }
         t->event_pending = false;
-        app_event(t->app, t->delivered);
+        if (t->service) {
+            if (t->delivered.type == EVENT_SERVICE)
+                t->service();
+        } else {
+            app_event(t->app, t->delivered);
+        }
         f->eax = 0;
         break;
     case SYS_EXIT:
@@ -389,7 +423,7 @@ TrapFrame *trap_dispatch(TrapFrame *f) {
         if (!initialized)
             return f;
         for (int i = 0; i < TASK_MAX; i++)
-            if (tasks[i].state == TASK_SLEEPING && (int32_t)(ticks - tasks[i].wake_tick) >= 0)
+            if (tasks[i].state == TASK_SLEEPING && (int32_t)(frame_clock - tasks[i].wake_tick) >= 0)
                 tasks[i].state = TASK_READY;
         if (!idling)
             task_current()->run_ticks++;
@@ -477,9 +511,82 @@ void task_ring_tests(char *out, size_t cap) {
 }
 
 /* Dedicated virtual arena shared by all CR3s, never mapped user-accessible. */
+/* Keep the framebuffer at its identity address. Replacing those entries
+ * avoids creating a second virtual alias with a different memory type. */
+bool task_framebuffer_wc(uint32_t physical, uint32_t bytes) {
+    uint64_t end = ((uint64_t)physical + bytes + 4095u) & ~UINT64_C(4095);
+    uint32_t start = physical & ~4095u;
+    if (!bytes || framebuffer_end || start < 0x4000000u || end > UINT64_C(0x100000000))
+        return false;
+    unsigned first = start >> 22, last = (end - 1) >> 22;
+    if (last - first >= 4 || (start < USER_CODE + 0x400000u && end > MMIO_BASE))
+        return false;
+    unsigned ranges = *(const volatile uint32_t *)0x5000;
+    const volatile PmmRange *map = (const volatile PmmRange *)0x5004;
+    for (unsigned i = 0; i < ranges && i < 128; i++) {
+        uint64_t base = map[i].base;
+        if (map[i].type == 1 && base < end &&
+            (base >= start || map[i].length > start - base))
+            return false;
+    }
+    for (unsigned i = 0; i < MMIO_PAGES; i++) {
+        uint32_t page = mmio_tables[i / 1024][i % 1024];
+        if (page && (page & ~4095u) >= start && (page & ~4095u) < end)
+            return false;
+    }
+
+    uint32_t eax = 1, ebx, ecx, edx;
+    __asm__ volatile("cpuid" : "+a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx));
+    const uint32_t required = (1u << 5) | (1u << 16) | (1u << 25); /* MSR, PAT, SFENCE */
+    if ((edx & required) != required)
+        return false;
+    const uint32_t pat_msr = 0x277;
+    uint32_t low, high;
+    __asm__ volatile("rdmsr" : "=a"(low), "=d"(high) : "c"(pat_msr));
+    uint64_t pat = ((uint64_t)high << 32) | low;
+    unsigned index;
+    for (index = 0; index < 8; index++)
+        if (((pat >> (index * 8)) & 255u) == 1)
+            break;
+    if (index == 8) {
+        /* The kernel uses PAT entries 0–3 only. Keep their types intact. */
+        index = 4;
+        high = (high & ~255u) | 1u;
+    }
+    uint32_t attributes = ((index & 3u) << 3) | ((index & 4u) << 5);
+    uint32_t flags = drv_irq_save();
+    __asm__ volatile("wbinvd" ::: "memory");
+    if (index == 4 && ((pat >> 32) & 255u) != 1) {
+        uint32_t cr0, uncached;
+        __asm__ volatile("mov %%cr0,%0" : "=r"(cr0));
+        uncached = (cr0 | (1u << 30)) & ~(1u << 29);
+        __asm__ volatile("mov %0,%%cr0; wbinvd" :: "r"(uncached) : "memory");
+        __asm__ volatile("wrmsr" :: "a"(low), "d"(high), "c"(pat_msr) : "memory");
+        __asm__ volatile("wbinvd; mov %0,%%cr0" :: "r"(cr0) : "memory");
+    }
+    for (unsigned region = first; region <= last; region++) {
+        uint32_t *table = framebuffer_tables[region - first];
+        for (unsigned i = 0; i < 1024; i++) {
+            uint32_t page = (region << 22) | (i << 12);
+            table[i] = page | 3u | ((page >= start && page < end) ? attributes : 0);
+        }
+        for (unsigned i = 0; i < TASK_MAX; i++)
+            if (!i || tasks[i].directory)
+                directories[i][region] = (uint32_t)table | 3u;
+    }
+    __asm__ volatile("mov %0,%%cr3" :: "r"(task_current()->directory) : "memory");
+    framebuffer_start = start;
+    framebuffer_end = end;
+    drv_irq_restore(flags);
+    return true;
+}
+
 static int physical_map(uint32_t physical, uint32_t bytes, void **out, uint32_t attributes) {
     if (!initialized || !out || !bytes || (uint64_t)physical + bytes > 0x100000000ull)
         return DRV_EINVAL;
+    if (framebuffer_end && (uint64_t)physical < framebuffer_end &&
+        (uint64_t)physical + bytes > framebuffer_start)
+        return DRV_EBUSY;
     uint32_t offset = physical & 4095;
     uint64_t span = (uint64_t)bytes + offset;
     if (span > MMIO_PAGES * 4096u)

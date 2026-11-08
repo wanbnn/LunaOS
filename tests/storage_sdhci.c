@@ -14,6 +14,7 @@ static uint32_t load(unsigned off,unsigned width) {
     uint32_t v=0;memcpy(&v,regs+off,width);return v;
 }
 static void save(unsigned off,unsigned width,uint32_t value){memcpy(regs+off,&value,width);}
+void storage_poll_wait(unsigned *polls) { (void)polls; }
 uint32_t drv_now_ms(void){return clock_ms++;}
 int drv_sleep_ms(uint32_t ms){clock_ms+=ms;return 0;}
 void serial_write(const char *s){(void)s;}

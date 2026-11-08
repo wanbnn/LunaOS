@@ -12,6 +12,7 @@ static size_t data_limit = (4096u - 1u) * 512u;
 static uint32_t generation;
 static uint32_t mounted_base;
 static bool fs_locked;
+static unsigned disk_readers;
 static FileState *backups;
 #define FILE_CACHE_BYTES (64u * 1024u)
 #define FS_IO_BYTES 16384u
@@ -27,6 +28,10 @@ bool fs_read_bytes(const File *file, uint32_t offset, void *out, size_t bytes) {
     }
     uint8_t *destination = out;
     uint64_t position = file->disk_offset + offset;
+    unsigned disk = file->disk;
+    /* The read may sleep. Keep its snapshot slot from being reused, even if
+     * a writer already staging the other slot commits in the meantime. */
+    disk_readers++;
     while (bytes) {
         uint32_t sector = (uint32_t)(position / 512u);
         unsigned skip = (unsigned)(position % 512u);
@@ -35,30 +40,32 @@ bool fs_read_bytes(const File *file, uint32_t offset, void *out, size_t bytes) {
             unsigned sectors = bytes / 512u;
             if (sectors > 32u)
                 sectors = 32u;
-            if (!disk_read_blocks(file->disk, sector, sectors, destination))
-                return false;
+            if (!disk_read_blocks(disk, sector, sectors, destination))
+                break;
             count = sectors * 512u;
         } else {
             uint8_t block[512];
             count = 512u - skip;
             if (count > bytes)
                 count = bytes;
-            if (!disk_read_on(file->disk, sector, block))
-                return false;
+            if (!disk_read_on(disk, sector, block))
+                break;
             memcpy(destination, block + skip, count);
         }
         destination += count;
         position += count;
         bytes -= count;
     }
-    return true;
+    disk_readers--;
+    return bytes == 0;
 }
 bool fs_read_text(const File *file, char *out, size_t capacity) {
     if (!file || file->dir || !out || !capacity || file->size >= capacity)
         return false;
-    if (!fs_read_bytes(file, 0, out, file->size))
+    uint32_t size = file->size;
+    if (!fs_read_bytes(file, 0, out, size))
         return false;
-    out[file->size] = 0;
+    out[size] = 0;
     return true;
 }
 bool fs_materialize(File *file) {
@@ -68,14 +75,23 @@ bool fs_materialize(File *file) {
         return true;
     if (file->size == UINT32_MAX)
         return false;
-    char *data = heap_allocate_owned((size_t)file->size + 1u, 1);
+    File snapshot = *file;
+    File *table = files;
+    char *data = heap_allocate_owned((size_t)snapshot.size + 1u, 1);
     if (!data)
         return false;
-    if (!fs_read_bytes(file, 0, data, file->size)) {
+    if (!fs_read_bytes(&snapshot, 0, data, snapshot.size) || files != table ||
+        !file->used || file->dir || file->size != snapshot.size ||
+        file->disk != snapshot.disk || file->disk_offset != snapshot.disk_offset ||
+        strcmp(file->path, snapshot.path)) {
         heap_release(data);
         return false;
     }
-    data[file->size] = 0;
+    if (file->data) {
+        heap_release(data);
+        return true;
+    }
+    data[snapshot.size] = 0;
     file->data = data;
     return true;
 }
@@ -300,7 +316,7 @@ void fs_discard_state(FileState *state) {
         drop_state(state);
 }
 void fs_restore_state(FileState *backup) {
-    if (fs_locked)
+    if (fs_locked || disk_readers)
         return;
     if (!backup || !backup->files)
         return;
@@ -315,7 +331,7 @@ void fs_restore_state(FileState *backup) {
 }
 
 int fs_create(const char *path, bool dir) {
-    if (fs_locked)
+    if (fs_locked || disk_readers)
         return -1;
     char p[PATH_CAP], parent[PATH_CAP];
     if (!fs_path(path, p))
@@ -360,7 +376,7 @@ int fs_create(const char *path, bool dir) {
     return -4;
 }
 int fs_remove(const char *path) {
-    if (fs_locked)
+    if (fs_locked || disk_readers)
         return -1;
     File *f=fs_find(path);
     if(!f || !strcmp(f->path,"/") || !strcmp(f->path,cwd))return -1;
@@ -374,7 +390,7 @@ int fs_remove(const char *path) {
     return 0;
 }
 int fs_write_bytes(const char *path, const void *data, size_t n, bool add) {
-    if (fs_locked)
+    if (fs_locked || disk_readers)
         return -1;
     if((n && !data) || n>data_limit || n>UINT32_MAX)return -1;
     File *f=fs_find(path);
@@ -396,9 +412,14 @@ int fs_write_bytes(const char *path, const void *data, size_t n, bool add) {
     }
     char *new_data=allocate_data(wanted);
     if(!new_data)return -3;
-    if (off && !fs_read_bytes(f, 0, new_data, off)) {
-        heap_release(new_data);
-        return -3;
+    if (off) {
+        fs_locked = true;
+        bool read_ok = fs_read_bytes(f, 0, new_data, off);
+        fs_locked = false;
+        if (!read_ok) {
+            heap_release(new_data);
+            return -3;
+        }
     }
     if(n)memcpy(new_data+off,data,n);
     new_data[wanted]=0; /* Text callers retain a sentinel; bytes may include NUL. */
@@ -710,7 +731,7 @@ static bool save_snapshot(unsigned destination) {
     return true;
 }
 bool fs_load(void) {
-    if (fs_locked)
+    if (fs_locked || disk_readers)
         return false;
     fs_locked = true;
     bool result = load_snapshot();
@@ -718,7 +739,7 @@ bool fs_load(void) {
     return result;
 }
 bool fs_save_to(unsigned destination) {
-    if (fs_locked)
+    if (fs_locked || disk_readers)
         return false;
     fs_locked = true;
     bool result = save_snapshot(destination);
@@ -729,7 +750,7 @@ bool fs_save(void) {
     return fs_save_to(disk_boot_index());
 }
 void fs_init(void) {
-    if (fs_locked)
+    if (fs_locked || disk_readers)
         return;
     if (fs_load()) {
         serial_write("LunaFS: restored snapshot\n");
@@ -855,7 +876,7 @@ bool fs_write_part(const void *data, size_t bytes) {
     return true;
 }
 bool fs_begin_write(const char *path, bool append_data, uint32_t owner) {
-    if (fs_locked)
+    if (fs_locked || disk_readers)
         return false;
     char canonical[PATH_CAP], parent[PATH_CAP];
     if (!fs_path(path, canonical))
@@ -1068,7 +1089,7 @@ int fs_copy(const char *source, const char *destination) {
 }
 
 int fs_rename(const char *source, const char *destination) {
-    if (fs_locked)
+    if (fs_locked || disk_readers)
         return -1;
     char path[PATH_CAP], parent[PATH_CAP];
     if (!fs_path(destination, path))

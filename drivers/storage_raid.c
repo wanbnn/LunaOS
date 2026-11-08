@@ -33,12 +33,13 @@ static int issue(RaidHost *h) {
     volatile uint8_t *f=h->frame.cpu;
     drv_memory_barrier();wr(h,0x40,h->frame.bus);
     uint32_t start=drv_now_ms();
+    unsigned polls = 0;
     while(f[2]==0xff) {
         if((uint32_t)(drv_now_ms()-start)>10000) {
             /* Never reuse a command or DMA buffer after an uncertain completion. */
             h->dead=true;drv_pci_master(&h->pci,false);return DRV_ETIMEDOUT;
         }
-        __asm__ volatile("pause");
+        storage_poll_wait(&polls);
     }
     drv_memory_barrier();return f[2] || f[3]?DRV_EIO:0;
 }

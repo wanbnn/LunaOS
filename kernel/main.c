@@ -43,13 +43,21 @@ void kmain(void) {
     gui_draw();
     serial_write("READY\n");
     uint32_t last_clock = ticks, next_frame = frame_clock * prefs.frame_hz + 1000;
-    uint32_t next_driver = 0, next_net = 0, next_audio = 0;
+    uint32_t next_driver = 0, next_net = 0, next_audio = 0, next_cursor = 0;
     bool cursor_pending = false;
     for (;;) {
-                input_poll();
-        int c;
-        while ((c = input_key()) >= 0)
-            gui_key(c);
+        if (input_pending()) {
+            PerfArea previous = perf_enter(PERF_INPUT);
+            input_poll();
+            int c, x, y, buttons;
+            while ((c = input_key()) >= 0)
+                gui_key(c);
+            while (input_pointer(&x, &y, &buttons)) {
+                gui_pointer(x, y, buttons);
+                cursor_pending = true;
+            }
+            perf_leave(previous);
+        }
         for (int i = 0; i < 1; i++) {
             int s = serial_get();
             if (s < 0)
@@ -61,56 +69,45 @@ void kmain(void) {
             }
         }
         setup_poll();
-        clock_poll();
-        /* Deferred driver work and the polled devices run on their own
-         * deadlines. An idle kernel no longer polls every service a thousand
-         * times per second just because the PIT ticks at 1 kHz. */
-        if (frame_clock >= next_driver) {
+        if (drv_work_pending() || (int32_t)(frame_clock - next_driver) >= 0) {
+            PerfArea previous = perf_enter(PERF_DRIVERS);
             driver_services_poll(16);
-            wifi_poll();
+            perf_leave(previous);
             next_driver = frame_clock + 5;
         }
-        if (frame_clock >= next_net) {
+        if ((int32_t)(frame_clock - next_net) >= 0) {
             net_poll();
+            clock_poll();
             next_net = frame_clock + 5;
         }
-        if (frame_clock >= next_audio) {
+        if ((int32_t)(frame_clock - next_audio) >= 0) {
+            PerfArea previous = perf_enter(PERF_DRIVERS);
             audio_poll();
+            perf_leave(previous);
             next_audio = frame_clock + 20;
-        }
-        if (mouse_changed) {
-            int x, y, buttons;
-            while (input_pointer(&x, &y, &buttons))
-                gui_pointer(x, y, buttons);
-            mouse_changed = false;
-            cursor_pending = true;
         }
         if (ticks - last_clock >= 100) {
             last_clock = ticks;
             calendar_refresh();
             acpi_battery_poll();
             settings_network_refresh();
-            gui_damage(W - 340, 8, 330, 37);
-            gui_invalidate_app(APP_TASKS);
-            gui_damage(W - 136, 8, 130, 28); /* the clock in the top bar */
+            gui_refresh_status();
         }
         gui_motion_poll();
-        if (ui_dirty || cursor_pending) {
-            uint32_t now = frame_clock * prefs.frame_hz;
-                        if ((int32_t)(now - next_frame) >= 0) {
-                if (ui_dirty) {
-                    gui_draw();
-                    if (compositor_render_ms * prefs.frame_hz > 1000)
-                        compositor_missed++;
-                } else
-                    gfx_cursor_present();
-                cursor_pending = false;
-                /* The next frame is scheduled one interval from now: a late
-                 * frame is dropped instead of a backlog accumulating. */
-                next_frame = frame_clock * prefs.frame_hz + 1000;
-            }
+        uint32_t now = frame_clock * prefs.frame_hz;
+        if (ui_dirty && (int32_t)(now - next_frame) >= 0) {
+            gui_draw();
+            if (compositor_render_ms * prefs.frame_hz > 1000)
+                compositor_missed++;
+            cursor_pending = false;
+            next_frame = frame_clock * prefs.frame_hz + 1000;
+        } else if (cursor_pending && (int32_t)(frame_clock - next_cursor) >= 0) {
+            /* Keep motion responsive between expensive desktop frames. */
+            gfx_cursor_present();
+            cursor_pending = false;
+            next_cursor = frame_clock + 8;
         }
-        task_yield();
+        task_yield_ready();
         task_idle();
     }
 }

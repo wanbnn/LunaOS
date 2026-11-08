@@ -1,3 +1,4 @@
+#include "perf.h"
 /* Browser surface for the Luna web engine: document lifecycle, painting,
  * scrolling and link activation. */
 #include "webengine.h"
@@ -8,6 +9,7 @@ static int style_rule_count;
 static char document_url[256];
 static char document_error[256];
 static int scroll_offset;
+static bool styles_pending, images_pending;
 static int layout_width;
 static int viewport_height;
 static size_t decoded_image_bytes;
@@ -53,17 +55,21 @@ static void styles_rebuild(void) {
     style_rules = 0;
     style_rule_count = 0;
     css_parse_sheet(sheet_text ? sheet_text : "", &style_rules, &style_rule_count);
-    if (document_root) {
-        css_apply(document_root, style_rules, style_rule_count);
-        web_layout(document_root, layout_width, viewport_height);
-    }
+    web_relayout();
 }
 void web_add_stylesheet(const char *css, size_t len) {
     if (!css || !len)
         return;
     sheet_append(css, len);
     sheet_append("\n", 1);
-    styles_rebuild();
+    styles_pending = true;
+}
+void web_finish_resources(void) {
+    if (styles_pending)
+        styles_rebuild();
+    else if (images_pending)
+        web_relayout();
+    styles_pending = images_pending = false;
 }
 /* True when the media attribute of a link element selects a screen. */
 static bool media_selects_screen(const char *media) {
@@ -173,11 +179,12 @@ bool web_set_image(int index, const unsigned char *data, size_t len) {
         return false;
     }
     decoded_image_bytes = decoded_image_bytes - old + bytes;
-    web_relayout();
+    images_pending = true;
     return true;
 }
 void web_reset(void) {
     web_js_release();
+    web_js_clear_dirty();
     if (document_root)
         web_free_tree(document_root);
     document_root = 0;
@@ -189,7 +196,7 @@ void web_reset(void) {
     if (sheet_text)
         sheet_text[0] = 0;
     scroll_offset = 0;
-    layout_width = 0;
+    styles_pending = images_pending = false;
     document_error[0] = 0;
     web_free_fragments();
 }
@@ -202,8 +209,15 @@ void web_close(void) {
 void web_relayout(void) {
     if (!document_root)
         return;
+    PerfArea previous = perf_enter(PERF_WEB_LAYOUT);
     css_apply(document_root, style_rules, style_rule_count);
     web_layout(document_root, layout_width, viewport_height);
+    perf_leave(previous);
+}
+void web_set_viewport(int width, int height) {
+    layout_width = width;
+    viewport_height = height;
+    css_set_viewport(width);
 }
 bool web_load_document(const char *url, const char *html, size_t len, char *error, size_t ecap) {
     web_reset();
@@ -233,7 +247,13 @@ bool web_load_document(const char *url, const char *html, size_t len, char *erro
         /* A script error is reported but the document stays on screen. */
         strcpy(document_error, js_error);
     }
-    web_relayout();
+    PerfArea previous = perf_enter(PERF_WEB_LAYOUT);
+    if (web_js_dirty()) {
+        web_js_clear_dirty();
+        css_apply(document_root, style_rules, style_rule_count);
+    }
+    web_layout(document_root, layout_width, viewport_height);
+    perf_leave(previous);
     return true;
 }
 const char *web_document_url(void) { return document_url; }
@@ -241,9 +261,10 @@ const char *web_error_text(void) { return document_error; }
 bool web_has_document(void) { return document_root != 0; }
 int web_content_height(void) { return web_document_height(); }
 int web_scroll_offset(void) { return scroll_offset; }
-void web_scroll_by(int delta) {
+bool web_scroll_by(int delta) {
     if (!document_root)
-        return;
+        return false;
+    int previous = scroll_offset;
     int maximum = web_document_height() - viewport_height;
     if (maximum < 0)
         maximum = 0;
@@ -252,22 +273,31 @@ void web_scroll_by(int delta) {
         scroll_offset = 0;
     if (scroll_offset > maximum)
         scroll_offset = maximum;
+    return previous != scroll_offset;
 }
 void web_render(int x, int y, int w, int h) {
     if (!document_root)
         return;
     viewport_height = h;
     if (w != layout_width) {
-        layout_width = w;
-        css_set_viewport(w);
+        web_set_viewport(w, h);
         styles_rebuild();
     }
     if (web_js_dirty()) {
         web_js_clear_dirty();
         web_relayout();
     }
+    PerfArea previous = perf_enter(PERF_WEB_PAINT);
+    int saved[4];
+    gfx_get_clip(saved);
+    int left = x > saved[0] ? x : saved[0], top = y > saved[1] ? y : saved[1];
+    int right = x + w < saved[0] + saved[2] ? x + w : saved[0] + saved[2];
+    int bottom = y + h < saved[1] + saved[3] ? y + h : saved[1] + saved[3];
+    gfx_clip(left, top, right > left ? right - left : 0, bottom > top ? bottom - top : 0);
     rect(x, y, w, h, 0xffffff);
     web_paint(document_root, x, y - scroll_offset);
+    gfx_clip(saved[0], saved[1], saved[2], saved[3]);
+    perf_leave(previous);
     if (web_document_height() > h) {
         int track = h - 4;
         int ratio = h * h / web_document_height();

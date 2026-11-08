@@ -39,10 +39,11 @@ static void w32(Nvme *n,uint32_t off,uint32_t value) {
 }
 static bool wait_rdy(Nvme *n,bool expected) {
     uint32_t start=drv_now_ms();
+    unsigned polls = 0;
     while(!!(r32(n,NVME_CSTS)&1u)!=expected) {
         if(r32(n,NVME_CSTS)&2u)return false;
         if((uint32_t)(drv_now_ms()-start)>5000u)return false;
-        __asm__ volatile("pause");
+        storage_poll_wait(&polls);
     }
     return true;
 }
@@ -72,21 +73,30 @@ static int cmd(Nvme *n,NvmeQueue *q,uint8_t opcode,uint32_t nsid,
     drv_memory_barrier();
     w32(n,NVME_DOORBELLS+2u*q->id*n->stride,q->tail);
     uint32_t start=drv_now_ms();
+    unsigned polls = 0;
     volatile uint32_t *cq=(volatile uint32_t *)((uint8_t *)q->cq.cpu+q->head*16u);
+    uint32_t result;
     for(;;) {
-        uint32_t result=cq[3];
-        if(((result>>16)&1u)==q->phase) {
-            if((result&0xffffu)!=cid || (result>>17))return DRV_EIO;
+        result=cq[3];
+        if(((result>>16)&1u)==q->phase)
             break;
+        if((uint32_t)(drv_now_ms()-start)>5000u) {
+            n->active = false;
+            drv_pci_master(&n->pci, false);
+            return DRV_ETIMEDOUT;
         }
-        if((uint32_t)(drv_now_ms()-start)>5000u)return DRV_ETIMEDOUT;
-        __asm__ volatile("pause");
+        storage_poll_wait(&polls);
+    }
+    if ((result & 0xffffu) != cid) {
+        n->active = false;
+        drv_pci_master(&n->pci, false);
+        return DRV_EIO;
     }
     q->head++;
     if(q->head==NVME_QUEUE_DEPTH){q->head=0;q->phase^=1u;}
     drv_memory_barrier();
     w32(n,NVME_DOORBELLS+(2u*q->id+1u)*n->stride,q->head);
-    return 0;
+    return result >> 17 ? DRV_EIO : 0;
 }
 static int identify(Nvme *n,unsigned nsid,unsigned cns) {
     memset(n->page.cpu,0,4096);

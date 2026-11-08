@@ -6,7 +6,8 @@
 #define MAX_TIMERS 32
 static bool polling;
 static unsigned work_count;
-static DrvWork *work_head, *work_tail;
+static DrvWork *volatile work_head;
+static DrvWork *work_tail;
 static DrvTimer *timers[MAX_TIMERS];
 static uint32_t cycles_per_us;
 static unsigned interrupt_depth;
@@ -58,6 +59,9 @@ void drv_unlock(DrvLock *lock, uint32_t flags) {
 }
 uint32_t drv_now_ms(void) {
     return frame_clock;
+}
+uint32_t drv_cycles_per_us(void) {
+    return cycles_per_us;
 }
 static uint64_t rdtsc(void) {
     uint32_t lo, hi;
@@ -222,6 +226,10 @@ int drv_timer_cancel(DrvTimer *timer) {
     drv_irq_restore(flags);
     return result;
 }
+bool drv_work_pending(void) {
+    return work_head != NULL;
+}
+
 void driver_services_poll(unsigned budget) {
     if (!drv_irqs_enabled() || drv_in_irq() || polling)
         return;

@@ -112,8 +112,17 @@ void time_settings_click(int x, int y) {
 void calendar_refresh(void) {
     extern void settings_clock_refresh(void);
     settings_clock_refresh();
-    if (open)
-        gui_damage(W - 376, 52, 364, 405);
+    if (open) {
+        static int displayed_day;
+        DateTime now;
+        int today = clock_local(&now) ? now.year * 512 + now.month * 32 + now.day : 0;
+        if (today != displayed_day) {
+            displayed_day = today;
+            gui_damage(W - 376, 52, 364, 405);
+        } else {
+            gui_damage(W - 356, 415, 165, 20);
+        }
+    }
 }
 void calendar_draw(void) {
     if (!open)

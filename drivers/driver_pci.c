@@ -366,7 +366,7 @@ static void pic_line(unsigned line, bool enable) {
     uint8_t mask = inb(port), bit = 1u << (line % 8);
     outb(port, enable ? (mask & ~bit) : (mask | bit));
     if (line >= 8) {
-        bool slave = false;
+        bool slave = input_uses_irq();
         for (unsigned i = 8; i < 16; i++)
             slave |= line_used(i);
         mask = inb(0x21);
@@ -383,8 +383,8 @@ int drv_irq_request(DrvPci *p, DrvIrqHandler fn, void *arg, DrvIrq *out) {
         drv_irq_restore(flags);
         return DRV_EINVAL;
     }
-    if (p->irq < 3 || p->irq > 15 || p->irq == 8 || p->irq == 13 || p->irq >= 14 || !p->pin ||
-        p->pin > 4) {
+    if (p->irq < 3 || (p->irq == 4 && serial_uses_irq()) || p->irq == 8 ||
+        (p->irq == 12 && input_uses_irq()) || p->irq >= 13 || !p->pin || p->pin > 4) {
         drv_irq_restore(flags);
         return DRV_ENOTSUP;
     }
@@ -460,13 +460,15 @@ void driver_irq_dispatch(unsigned line) {
         }
     }
     driver_irq_enter();
-    bool handled = false;
+    bool uart = line == 4 && serial_uses_irq();
+    bool ps2 = (line == 1 || line == 12) && input_uses_irq();
+    bool handled = (uart && serial_interrupt()) || (ps2 && input_interrupt());
     for (unsigned i = 0; i < IRQ_SLOTS; i++)
         if (irq_slots[i].fn && irq_slots[i].line == line)
             handled |= irq_slots[i].fn(irq_slots[i].arg);
     if (handled)
         unhandled[line] = 0;
-    else if (++unhandled[line] >= 32)
+    else if (!uart && !ps2 && ++unhandled[line] >= 32)
         pic_line(line, false);
     if (line >= 8)
         outb(0xa0, 0x20);

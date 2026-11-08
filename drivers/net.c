@@ -860,7 +860,7 @@ static void copy_rx_frame(void *out, unsigned position, unsigned bytes) {
     if (bytes > first)
         memcpy((uint8_t *)out + first, rx, bytes - first);
 }
-void net_poll(void) {
+static void network_poll(void) {
     /* Synchronous DNS/TCP/ICMP callers may occupy the GUI loop that normally
      * services the radio. Drain/decrypt Wi-Fi RX before consuming its IP queue. */
     wifi_poll();
@@ -908,6 +908,11 @@ void net_poll(void) {
     outw(io + 0x3e, 0xffff);
     tcp_flush_ack();
     time_network_poll();
+}
+void net_poll(void) {
+    PerfArea previous = perf_enter(PERF_NETWORK);
+    network_poll();
+    perf_leave(previous);
 }
 void net_init(void) {
     for (int b = 0; b < 256; b++)

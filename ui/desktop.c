@@ -18,6 +18,13 @@ static char css_body[CSS_CAP];
 static char pending_url[256], files_dir[PATH_CAP] = "/home/luna";
 static bool browser_edit, browser_loading;
 static int selected_file, *file_indices, file_count, file_capacity;
+static struct {
+    char path[PATH_CAP], text[2048];
+    uint64_t disk_offset;
+    uint32_t size;
+    unsigned disk;
+    bool pending, ready, ok;
+} file_preview;
 static uint32_t selected_pid, graph_tick, cpu_history[48];
 static unsigned graph_head;
 static char task_search[32];
@@ -201,6 +208,7 @@ static void browser_load_stylesheets(const char *base) {
         if (length > 0)
             web_add_stylesheet(css_body, (size_t)length);
     }
+    web_finish_resources();
     /* Bound both transfers and decoded memory for this small native engine. */
     for (int i = 0; i < 8; i++) {
         if (!web_image_link(i, href, sizeof(href)))
@@ -213,6 +221,7 @@ static void browser_load_stylesheets(const char *base) {
         if (length > 0)
             web_set_image(i, (const unsigned char *)css_body, (size_t)length);
     }
+    web_finish_resources();
 }
 
 static void browser_load(const char *url) {
@@ -224,6 +233,9 @@ static void browser_load(const char *url) {
     browser_edit = false;
     browser_loading = true;
     gui_invalidate_app(APP_BROWSER);
+    PerfArea previous = perf_enter(PERF_WEB_LOAD);
+    Window *window = &windows[APP_BROWSER];
+    web_set_viewport(window->w - 40, window->h - 120);
     if (!strcmp(target, "luna://welcome")) {
         web_reset();
         browser_body[0] = 0;
@@ -269,6 +281,7 @@ static void browser_load(const char *url) {
             browser_load_stylesheets(browser_url);
         }
     }
+    perf_leave(previous);
     browser_loading = false;
     gui_invalidate_app(APP_BROWSER);
 }
@@ -288,6 +301,7 @@ void app_reset(int app) {
     if (app == APP_FILES) {
         strcpy(files_dir, account_home());
         selected_file = 0;
+        file_preview.pending = file_preview.ready = false;
     } else if (app == APP_BROWSER) {
         strcpy(browser_url, "luna://welcome");
         browser_body[0] = 0;
@@ -363,26 +377,31 @@ void app_key(int app, int key) {
         int n = strlen(browser_url);
         if (key == 10 && !browser_loading)
             browser_load(browser_url);
-        else if (key == KEY_DOWN && !browser_edit && !browser_loading) {
-            web_scroll_by(96);
-        } else if (key == KEY_UP && !browser_edit && !browser_loading) {
-            web_scroll_by(-96);
-        } else if (key == 8) {
+        else if ((key == KEY_DOWN || key == KEY_UP) && !browser_edit && !browser_loading) {
+            if (web_scroll_by(key == KEY_DOWN ? 96 : -96))
+                gui_invalidate_browser_viewport();
+            return;
+        } else if (key == 8 && !browser_loading) {
             if (!browser_edit) {
                 browser_url[0] = 0;
                 browser_edit = true;
-            } else if (n)
+            } else if (n) {
                 browser_url[n - 1] = 0;
+            } else {
+                return;
+            }
         } else if (key >= 32 && key < 127 && !browser_loading) {
             if (!browser_edit) {
                 browser_url[0] = 0;
                 browser_edit = true;
                 n = 0;
             }
-            if (n < 254) {
-                browser_url[n] = key;
-                browser_url[n + 1] = 0;
-            }
+            if (n >= 254)
+                return;
+            browser_url[n] = key;
+            browser_url[n + 1] = 0;
+        } else {
+            return;
         }
     } else if (app == APP_TASKS) {
         if (key == 127)
@@ -451,6 +470,8 @@ void app_click(int app, int x, int y) {
         }
     } else if (app == APP_BROWSER) {
         if (y >= 0 && y < 42 && !browser_loading) {
+            if (!browser_url[0] && browser_edit)
+                return;
             browser_url[0] = 0;
             browser_edit = true;
         } else if (y >= height - 66 && y < height - 30 && !strcmp(browser_url, "luna://welcome")) {
@@ -462,7 +483,12 @@ void app_click(int app, int x, int y) {
                 char target[256];
                 resolve_link(browser_url, href, target, sizeof(target));
                 browser_load(target);
+            } else if (web_js_dirty()) {
+                gui_invalidate_browser_viewport();
             }
+            return;
+        } else {
+            return;
         }
     } else if (app == APP_SETTINGS) {
         if (y >= 280 && y < 318 && x >= 42) {
@@ -500,6 +526,27 @@ void app_click(int app, int x, int y) {
     }
     gui_invalidate_app(app);
 }
+static bool preview_matches(const File *file) {
+    return file && !file->dir && file->size == file_preview.size &&
+           file->disk == file_preview.disk && file->disk_offset == file_preview.disk_offset &&
+           !strcmp(file->path, file_preview.path);
+}
+static void load_file_preview(void) {
+    File *file = fs_find(file_preview.path);
+    size_t n = file_preview.size;
+    if (n >= sizeof(file_preview.text))
+        n = sizeof(file_preview.text) - 1;
+    char buffer[sizeof(file_preview.text)];
+    bool ok = preview_matches(file) && fs_read_bytes(file, 0, buffer, n);
+    if (ok) {
+        memcpy(file_preview.text, buffer, n);
+        file_preview.text[n] = 0;
+    }
+    file_preview.ok = ok;
+    file_preview.ready = true;
+    file_preview.pending = false;
+    gui_invalidate_app(APP_FILES);
+}
 void app_event(int app, AppEvent e) {
     if (e.type == EVENT_DRAG && app == APP_SETTINGS) {
         settings_drag(e.a, e.b, windows[app].w - 40, windows[app].h - 66);
@@ -514,7 +561,8 @@ void app_event(int app, AppEvent e) {
         app_click(app, e.a, e.b);
     else if (e.type == EVENT_NAVIGATE && app == APP_BROWSER)
         browser_load(pending_url);
-    gui_invalidate_app(app);
+    else if (e.type == EVENT_FILE_PREVIEW && app == APP_FILES)
+        load_file_preview();
 }
 static void home(int x, int y, int w, int h) {
     label(x + 12, y + 12, "INDEPENDENT BY DESIGN");
@@ -584,14 +632,31 @@ static void file_view(int x, int y, int w, int h) {
         File *f = &files[file_indices[selected_file]];
         text(x + split + 28, y + 69, basename(f->path), 16, WHITE);
         label(x + split + 28, y + 106, f->dir ? "FOLDER" : "DOCUMENT PREVIEW");
-        char preview[2048];
-        size_t n = f->size < sizeof(preview) - 1u ? f->size : sizeof(preview) - 1u;
-        bool readable = f->dir || fs_read_bytes(f, 0, preview, n);
-        preview[readable ? n : 0] = 0;
-        wrapped(x + split + 28, y + 140, w - split - 40,
-                f->dir     ? "Enter to open this folder."
-                : readable ? preview
-                           : "Disk read failed.",
+        char cached[sizeof(file_preview.text)];
+        const char *preview;
+        if (f->dir) {
+            preview = "Enter to open this folder.";
+        } else if (f->data || !f->size) {
+            size_t n = f->size < sizeof(cached) - 1 ? f->size : sizeof(cached) - 1;
+            if (n)
+                memcpy(cached, f->data, n);
+            cached[n] = 0;
+            preview = cached;
+        } else if (file_preview.ready && preview_matches(f)) {
+            preview = file_preview.ok ? file_preview.text : "Disk read failed.";
+        } else {
+            preview = "Reading preview...";
+            if (!file_preview.pending &&
+                task_post(windows[APP_FILES].pid, (AppEvent){EVENT_FILE_PREVIEW, 0, 0})) {
+                strcpy(file_preview.path, f->path);
+                file_preview.disk_offset = f->disk_offset;
+                file_preview.disk = f->disk;
+                file_preview.size = f->size;
+                file_preview.ready = false;
+                file_preview.pending = true;
+            }
+        }
+        wrapped(x + split + 28, y + 140, w - split - 40, preview,
                 13, (h - 150) / 21, false);
     }
 }

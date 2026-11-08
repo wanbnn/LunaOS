@@ -1,6 +1,6 @@
 #ifndef LUNA_TASK_H
 #define LUNA_TASK_H
-#include "luna.h"
+#include "perf.h"
 #define TASK_MAX 20
 #define TASK_EVENTS 64
 #define APP_COUNT 7
@@ -16,6 +16,8 @@
 #define EVENT_NAVIGATE 3
 #define EVENT_INIT 4
 #define EVENT_DRAG 5
+#define EVENT_FILE_PREVIEW 6
+#define EVENT_SERVICE 7
 #define CAP_UI 1u
 #define CAP_TASK_CONTROL 2u
 #define CAP_SYSTEM 4u
@@ -61,6 +63,9 @@ typedef struct {
     uint32_t read_event, write_event;
     AppEvent delivered;
     bool event_pending, system;
+    void (*service)(void);
+    PerfArea perf_area;
+    unsigned storage_depth;
 } Task;
 typedef struct {
     uint64_t ram_bytes, heap_committed, heap_live;
@@ -74,6 +79,7 @@ extern Task tasks[TASK_MAX];
 extern int current_task;
 void task_init(void);
 uint32_t task_spawn(int, const char *, unsigned, unsigned);
+uint32_t task_spawn_service(const char *, void (*service)(void));
 Task *task_by_pid(uint32_t);
 Task *task_for_app(int);
 Task *task_current(void);
@@ -82,6 +88,9 @@ bool task_kill(uint32_t);
 void task_yield(void);
 void task_sleep(uint32_t);
 void task_idle(void);
+void task_yield_ready(void);
+void task_sleep_ms(uint32_t);
+bool task_framebuffer_wc(uint32_t physical, uint32_t bytes);
 void task_list(char *, size_t);
 void task_ring_tests(char *, size_t);
 const char *task_state_name(TaskState);

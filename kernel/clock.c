@@ -5,6 +5,7 @@
 #include "luna.h"
 #include "net_time.h"
 #include "web.h"
+#include "task.h"
 static uint64_t wall;
 static int64_t correction;
 static uint32_t last_tick, deadline, backoff = 16000;
@@ -98,6 +99,16 @@ static bool persist(void) {
     if (!ok)
         strcpy(state, "Time applied; disk save failed");
     return ok;
+}
+static void persist_clock_service(void) {
+    persist();
+}
+static void persist_in_background(void) {
+    static uint32_t pid;
+    if (!pid)
+        pid = task_spawn_service("Clock persistence", persist_clock_service);
+    if (!pid || !task_post(pid, (AppEvent){EVENT_SERVICE, 0, 0}))
+        strcpy(state, "Time synchronized; disk save could not be queued");
 }
 void clock_init(void) {
     DateTime d;
@@ -237,7 +248,7 @@ void clock_poll(void) {
             backoff = 16000;
             deadline = frame_clock + 21600000;
             requested = false;
-            persist();
+            persist_in_background();
         } else {
             strcpy(state, "NTP unavailable / invalid reply; retry scheduled");
             deadline = frame_clock + backoff;

@@ -24,6 +24,7 @@ static int large_owner = -1;
 static int motion_y[APP_COUNT];
 _Static_assert(APP_COUNT == MOTION_CHANNELS, "one motion channel per app");
 static bool surface_valid[APP_COUNT], surface_focus[APP_COUNT];
+static bool browser_viewport_dirty;
 static bool launcher_open;
 static char launcher_query[64];
 static int launcher_selected;
@@ -88,6 +89,7 @@ void gui_damage_all(void) {
 }
 static int dock_left(void);
 static int dock_top(void);
+static bool window_covered(int z);
 /* A glass panel spreads its shadow six pixels sideways and drops it a little
  * further below. The damaged region has to cover that whole reach: the
  * painter clips to it, so a region that stops at the panel border would cut
@@ -149,7 +151,21 @@ void gui_invalidate_app(int app) {
     if (app < 0 || app >= APP_COUNT)
         return;
     surface_valid[app] = false;
-    damage_window(app);
+    if (windows[app].open && !windows[app].minimized)
+        for (int z = 0; z < zcount; z++)
+            if (zorder[z] == app && !window_covered(z)) {
+                damage_window(app);
+                break;
+            }
+}
+void gui_invalidate_browser_viewport(void) {
+    Window *w = &windows[APP_BROWSER];
+    if (!w->open || w->minimized) {
+        surface_valid[APP_BROWSER] = false;
+        return;
+    }
+    browser_viewport_dirty = true;
+    gui_damage(w->x + 20, w->y + motion_y[APP_BROWSER] + 100, w->w - 40, w->h - 120);
 }
 void gui_invalidate_all(void) {
     memset(surface_valid, 0, sizeof(surface_valid));
@@ -180,13 +196,20 @@ static void remove_z(int app) {
             break;
         }
 }
+static void set_active_app(int app) {
+    if (active_app != app) {
+        active_app = app;
+        gui_damage(120, 8, 225, 37);
+    }
+}
 static void next_focus(void) {
-    active_app = -1;
+    int next = -1;
     for (int i = zcount - 1; i >= 0; i--)
         if (windows[zorder[i]].open && !windows[zorder[i]].minimized) {
-            active_app = zorder[i];
+            next = zorder[i];
             break;
         }
+    set_active_app(next);
 }
 void window_focus(int app) {
     Window *w = &windows[app];
@@ -197,7 +220,7 @@ void window_focus(int app) {
     w->minimized = false;
     remove_z(app);
     zorder[zcount++] = app;
-    active_app = app;
+    set_active_app(app);
 
     if (previous >= 0 && previous != app)
         damage_titlebar(previous);
@@ -573,6 +596,32 @@ static bool window_covered(int z) {
     }
     return false;
 }
+void gui_refresh_status(void) {
+    static char previous_clock[48], previous_battery[64];
+    static bool previous_wifi;
+    char clock[48], battery[64];
+    rtc_string(clock);
+    acpi_battery_text(battery, sizeof(battery));
+    if (strcmp(clock + 12, previous_clock)) {
+        strcpy(previous_clock, clock + 12);
+        gui_damage(W - 136, 8, 130, 37);
+    }
+    if (strcmp(battery, previous_battery)) {
+        strcpy(previous_battery, battery);
+        gui_damage(W - 340, 8, 75, 37);
+        if (controls_open)
+            gui_damage_quick();
+    }
+    WifiState radio;
+    bool wifi = !wifi_state(&radio);
+    if (wifi != previous_wifi) {
+        previous_wifi = wifi;
+        gui_damage(W - 266, 8, 28, 37);
+    }
+    if (windows[APP_TASKS].open && !windows[APP_TASKS].minimized)
+        gui_invalidate_app(APP_TASKS);
+}
+
 static void draw_topbar(void) {
     round_rect(12, 8, W - 24, 37, 18, 0x182e48, 45);
     icon(26, 14, ICON_MOON, 24, 0xffffff);
@@ -603,8 +652,16 @@ static bool update_surface(Window *w, bool large, uint32_t *surface, int stride)
     int app = w->app;
     bool focused = app == active_app;
     bool content = !surface_valid[app] || (large && large_owner != app);
-    if (!content && surface_focus[app] == focused)
-        return false;
+    bool viewport = app == APP_BROWSER && browser_viewport_dirty;
+    if (!content && surface_focus[app] == focused) {
+        if (!viewport)
+            return false;
+        gfx_set_target(surface, stride, large ? GFX_MAX_H : GFX_CACHE_H, w->x, w->y);
+        gfx_clip(20, 100, w->w - 40, w->h - 120);
+        app_draw(app, 20, 46, w->w - 40, w->h - 66);
+        browser_viewport_dirty = false;
+        return true;
+    }
 
     if (content && !large &&
         (!glass_valid || glass_app != app || glass_x != w->x || glass_y != w->y ||
@@ -631,9 +688,14 @@ static bool update_surface(Window *w, bool large, uint32_t *surface, int stride)
     Window paint = *w;
     paint.x = paint.y = 0;
     titlebar(&paint, focused);
-    if (content) {
-        gfx_clip(12, 36, w->w - 24, w->h - 48);
+    if (content || viewport) {
+        if (content)
+            gfx_clip(12, 36, w->w - 24, w->h - 48);
+        else
+            gfx_clip(20, 100, w->w - 40, w->h - 120);
         app_draw(app, 20, 46, w->w - 40, w->h - 66);
+        if (app == APP_BROWSER)
+            browser_viewport_dirty = false;
     }
     if (large)
         large_owner = app;
@@ -657,13 +719,18 @@ static void damage_changed_surfaces(void) {
 }
 /* Repaints one damaged rectangle: wallpaper, top bar, every window that
  * intersects it in stacking order, then the dock and the overlays. */
-static void paint_region(int rx, int ry, int rw, int rh) {
+static void paint_region(int rx, int ry, int rw, int rh, int first) {
+    if (rw <= 0 || rh <= 0)
+        return;
     Damage region = {rx, ry, rw, rh};
     gfx_scene_target();
     gfx_clip(rx, ry, rw, rh);
-    gfx_fill_wallpaper();
-    draw_topbar();
-    for (int z = 0; z < zcount; z++) {
+    if (first < 0) {
+        gfx_fill_wallpaper();
+        if (ry < 45 && ry + rh > 8)
+            draw_topbar();
+    }
+    for (int z = first < 0 ? 0 : first; z < zcount; z++) {
         Window *w = &windows[zorder[z]];
         if (!w->open || w->minimized || window_covered(z))
             continue;
@@ -681,7 +748,8 @@ static void paint_region(int rx, int ry, int rw, int rh) {
         gfx_blit_surface(surface, stride, w->x, visible_y, w->w, w->h, 20);
     }
     gfx_occlusion_clear();
-    dock();
+    if (damage_overlap(region, (Damage){dock_left() - 70, dock_top() - 46, 678, 146}))
+        dock();
     if (controls_open)
         quick_draw();
     if (launcher_open)
@@ -693,6 +761,27 @@ static void paint_region(int rx, int ry, int rw, int rh) {
         icon((W - 468) / 2 + 20, H - 192, app_icons[active_app], 28, 0xffffff);
         text((W - 468) / 2 + 64, H - 190, app_name(active_app), 20, 0xffffff);
     }
+}
+/* The opaque middle of the frontmost dragged window replaces every layer
+ * behind it. Only the newly exposed strips and rounded edges need those layers. */
+static void paint_damage(Damage region) {
+    int x = region.x, y = region.y, right = x + region.w, bottom = y + region.h;
+    if (drag >= 0 && zcount && zorder[zcount - 1] == drag && !motion_y[drag]) {
+        Window *w = &windows[drag];
+        int left = w->x > x ? w->x : x;
+        int top = w->y + 20 > y ? w->y + 20 : y;
+        int inner_right = w->x + w->w < right ? w->x + w->w : right;
+        int inner_bottom = w->y + w->h - 20 < bottom ? w->y + w->h - 20 : bottom;
+        if (left < inner_right && top < inner_bottom) {
+            paint_region(x, y, region.w, top - y, -1);
+            paint_region(x, inner_bottom, region.w, bottom - inner_bottom, -1);
+            paint_region(x, top, left - x, inner_bottom - top, -1);
+            paint_region(inner_right, top, right - inner_right, inner_bottom - top, -1);
+            paint_region(left, top, inner_right - left, inner_bottom - top, zcount - 1);
+            return;
+        }
+    }
+    paint_region(x, y, region.w, region.h, -1);
 }
 /* Called by the kernel loop. Repaint only old/new footprints, at most once
  * per frame; dormant channels consume no redraw time. */
@@ -725,7 +814,9 @@ void gui_motion_poll(void) {
 }
 void gui_draw(void) {
     if (setup_active) {
+        PerfArea previous = perf_enter(PERF_COMPOSE);
         setup_draw();
+        perf_leave(previous);
         damage_count = 0;
         damage_full = false;
         return;
@@ -742,11 +833,15 @@ void gui_draw(void) {
         ui_dirty = false;
         return;
     }
+    PerfArea previous = perf_enter(PERF_COMPOSE);
     for (int i = 0; i < damage_count; i++)
-        paint_region(damage[i].x, damage[i].y, damage[i].w, damage[i].h);
+        paint_damage(damage[i]);
+    perf_leave(previous);
+    previous = perf_enter(PERF_SCANOUT);
     for (int i = 0; i < damage_count; i++)
         gfx_present_region(damage[i].x, damage[i].y, damage[i].w, damage[i].h);
     gfx_cursor_present();
+    perf_leave(previous);
     damage_count = 0;
     compositor_render_ms = frame_clock - started;
     frames++;
@@ -808,11 +903,11 @@ void gui_pointer(int x, int y, int buttons) {
             w->y = 50;
         if (w->y > H - 90)
             w->y = H - 90;
-        /* Both the old and the new footprint must be repainted. */
-        gui_damage(ox - SHADOW_SIDE, oy - SHADOW_SIDE, w->w + 2 * SHADOW_SIDE,
-                   w->h + SHADOW_DROP);
-        gui_damage(w->x - SHADOW_SIDE, w->y - SHADOW_SIDE, w->w + 2 * SHADOW_SIDE,
-                   w->h + SHADOW_DROP);
+        if (ox != w->x || oy != w->y) {
+            gui_damage(ox - SHADOW_SIDE, oy - SHADOW_SIDE, w->w + 2 * SHADOW_SIDE,
+                       w->h + SHADOW_DROP);
+            damage_window(drag);
+        }
     }
     previous_buttons = buttons;
     if (controls_open && (buttons & 1)) {

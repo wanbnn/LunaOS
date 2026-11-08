@@ -1,6 +1,7 @@
 #include "boot.h"
 #include "install.h"
 #include "storage.h"
+#include "task.h"
 static DiskInfo disks[4];
 static unsigned boot_index;
 static const uint8_t *ram_source;
@@ -8,6 +9,7 @@ static uint32_t cd_image_lba;
 static int cd_cached_device = -1;
 static uint32_t cd_cached_lba;
 static uint8_t cd_cache[2048];
+static bool legacy_busy[2];
 static uint16_t port(unsigned index) {
     return index < 2 ? 0x1f0 : 0x170;
 }
@@ -15,9 +17,10 @@ static uint8_t read_status(unsigned index) {
     return inb(port(index) + 7);
 }
 static bool idle(unsigned index, bool data) {
-    uint16_t base = port(index);
-    for (unsigned i = 0; i < 1000000; i++) {
-        uint8_t status = inb(base + 7);
+    uint32_t start = drv_now_ms();
+    unsigned polls = 0;
+    do {
+        uint8_t status = read_status(index);
         if (!status || status == 255)
             return false;
         if (!(status & 0x80)) {
@@ -26,8 +29,31 @@ static bool idle(unsigned index, bool data) {
             if (!data || (status & 8))
                 return true;
         }
-    }
+        storage_poll_wait(&polls);
+    } while (drv_now_ms() - start < 5000);
     return false;
+}
+static bool not_busy(unsigned index) {
+    uint32_t start = drv_now_ms();
+    unsigned polls = 0;
+    while (read_status(index) & 0x80) {
+        if (drv_now_ms() - start >= 5000)
+            return false;
+        storage_poll_wait(&polls);
+    }
+    return true;
+}
+static bool enter_channel(unsigned index) {
+    unsigned channel = index / 2;
+    uint32_t start = drv_now_ms();
+    unsigned polls = 32;
+    while (legacy_busy[channel]) {
+        if (!current_task || !drv_irqs_enabled() || drv_in_irq() || drv_now_ms() - start >= 5000)
+            return false;
+        storage_poll_wait(&polls);
+    }
+    legacy_busy[channel] = true;
+    return true;
 }
 static void select_drive(unsigned index, uint8_t head) {
     uint16_t base = port(index);
@@ -48,13 +74,7 @@ static bool command(unsigned index, uint32_t lba, unsigned count, uint8_t cmd) {
         return false;
     uint16_t base = port(index);
     select_drive(index, 0xe0 | ((lba >> 24) & 15));
-    bool available = false;
-    for (unsigned i = 0; i < 1000000; i++)
-        if (!(inb(base + 7) & 0x80)) {
-            available = true;
-            break;
-        }
-    if (!available)
+    if (!not_busy(index))
         return false;
     /* Polling backend: do not leave an unhandled IDE IRQ pending on shared PIC lines. */
     outb(base + 0x206, 2);
@@ -71,13 +91,7 @@ static bool atapi_read(unsigned index, uint32_t lba, unsigned blocks, void *data
         return false;
     uint16_t base = port(index);
     select_drive(index, 0xa0);
-    bool available = false;
-    for (unsigned i = 0; i < 1000000; i++)
-        if (!(inb(base + 7) & 0x80)) {
-            available = true;
-            break;
-        }
-    if (!available)
+    if (!not_busy(index))
         return false;
     outb(base + 0x206, 2);
     outb(base + 1, 0);
@@ -146,9 +160,21 @@ static bool cd_read_image(unsigned index, uint32_t lba, unsigned count, void *da
     }
     return true;
 }
-bool disk_read_blocks(unsigned index, uint32_t lba, unsigned count, void *data) {
+static bool native_transfer(unsigned index, uint32_t lba, unsigned count, void *data, bool write) {
+    uint32_t start = drv_now_ms();
+    unsigned polls = 32;
+    int result;
+    do {
+        result = storage_transfer(index, lba, count, data, write);
+        if (result != DRV_EBUSY || !current_task || !drv_irqs_enabled() || drv_in_irq())
+            return result == 0;
+        storage_poll_wait(&polls);
+    } while (drv_now_ms() - start < 5000);
+    return false;
+}
+static bool read_blocks(unsigned index, uint32_t lba, unsigned count, void *data) {
     if(index>=STORAGE_NATIVE_BASE)
-        return storage_transfer(index,lba,count,data,false)==0;
+        return native_transfer(index, lba, count, data, false);
     if (index == 4 && ram_source) {
         if (!data || !count || count > 128 || (uint64_t)lba + count > LUNA_IMAGE_BYTES / 512)
             return false;
@@ -173,9 +199,9 @@ bool disk_read_blocks(unsigned index, uint32_t lba, unsigned count, void *data) 
     }
     return true;
 }
-bool disk_write_blocks(unsigned index, uint32_t lba, unsigned count, const void *data) {
+static bool write_blocks(unsigned index, uint32_t lba, unsigned count, const void *data) {
     if(index>=STORAGE_NATIVE_BASE)
-        return storage_transfer(index,lba,count,(void *)data,true)==0;
+        return native_transfer(index, lba, count, (void *)data, true);
     unsigned group = index < 4 && count >= disks[index].multiple && disks[index].multiple > 1
                          ? disks[index].multiple
                          : 1;
@@ -192,13 +218,35 @@ bool disk_write_blocks(unsigned index, uint32_t lba, unsigned count, const void 
     }
     return idle(index, false);
 }
+bool disk_read_blocks(unsigned index, uint32_t lba, unsigned count, void *data) {
+    bool legacy = index < 4;
+    if (legacy && !enter_channel(index))
+        return false;
+    PerfArea previous = perf_enter(PERF_STORAGE);
+    bool ok = read_blocks(index, lba, count, data);
+    perf_leave(previous);
+    if (legacy)
+        legacy_busy[index / 2] = false;
+    return ok;
+}
+bool disk_write_blocks(unsigned index, uint32_t lba, unsigned count, const void *data) {
+    bool legacy = index < 4;
+    if (legacy && !enter_channel(index))
+        return false;
+    PerfArea previous = perf_enter(PERF_STORAGE);
+    bool ok = write_blocks(index, lba, count, data);
+    perf_leave(previous);
+    if (legacy)
+        legacy_busy[index / 2] = false;
+    return ok;
+}
 bool disk_read_on(unsigned index, uint32_t lba, void *data) {
     return disk_read_blocks(index, lba, 1, data);
 }
 bool disk_write_on(unsigned index, uint32_t lba, const void *data) {
     return disk_write_blocks(index, lba, 1, data);
 }
-bool disk_flush(unsigned index) {
+static bool flush_disk(unsigned index) {
     if(index>=STORAGE_NATIVE_BASE)
         return storage_flush(index)==0;
     if (index >= 4 || !disks[index].present || !disks[index].supported || disks[index].optical)
@@ -206,6 +254,17 @@ bool disk_flush(unsigned index) {
     select_drive(index, 0xe0);
     outb(port(index) + 7, 0xe7);
     return idle(index, false);
+}
+bool disk_flush(unsigned index) {
+    bool legacy = index < 4;
+    if (legacy && !enter_channel(index))
+        return false;
+    PerfArea previous = perf_enter(PERF_STORAGE);
+    bool ok = flush_disk(index);
+    perf_leave(previous);
+    if (legacy)
+        legacy_busy[index / 2] = false;
+    return ok;
 }
 bool disk_read(uint32_t lba, void *data) {
     return disk_read_on(boot_index, lba, data);

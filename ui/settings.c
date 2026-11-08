@@ -125,9 +125,39 @@ static void network_connect(void) {
     network_message = rc ? system_text("Cannot connect. Check password (8-63 characters) and retry.",
                                        "Falha ao conectar. Verifique a senha (8-63 caracteres).") : "";
 }
+static bool refresh_network_results(void) {
+    WifiState state;
+    if (wifi_state(&state) || state.link == WIFI_SCANNING)
+        return false;
+    WifiAp results[WIFI_MAX_APS] = {0};
+    unsigned count = 0;
+    if (wifi_scan_results(results, WIFI_MAX_APS, &count))
+        return false;
+    if (count == network_count && !memcmp(results, network_aps, count * sizeof(WifiAp)))
+        return false;
+    memcpy(network_aps, results, count * sizeof(WifiAp));
+    network_count = count;
+    if (network_first >= network_count)
+        network_first = 0;
+    return true;
+}
 void settings_network_refresh(void) {
-    if (page == 5 && windows[APP_SETTINGS].open) gui_invalidate_app(APP_SETTINGS);
-    if (controls_open) gui_damage_quick();
+    bool settings_visible = page == 5 && windows[APP_SETTINGS].open &&
+                            !windows[APP_SETTINGS].minimized;
+    if (!settings_visible && !controls_open)
+        return;
+    static const char *previous_state;
+    static char previous_ssid[WIFI_MAX_SSID + 1];
+    static bool previous_net;
+    const char *state = network_state(), *ssid = wifi_connection_ssid();
+    bool changed = state != previous_state || strcmp(ssid, previous_ssid);
+    previous_state = state;
+    strcpy(previous_ssid, ssid);
+    if (settings_visible && (refresh_network_results() || changed))
+        gui_invalidate_app(APP_SETTINGS);
+    if (controls_open && (changed || net_ready != previous_net))
+        gui_damage_quick();
+    previous_net = net_ready;
 }
 static void network_draw(int a, int b, int width) {
     WifiState state;
@@ -140,11 +170,7 @@ static void network_draw(int a, int b, int width) {
         button(a + width - 170, b + 215, 80, "<");
         button(a + width - 80, b + 215, 80, ">");
     }
-    if (ready && state.link != WIFI_SCANNING) {
-        unsigned count = 0;
-        if (!wifi_scan_results(network_aps, WIFI_MAX_APS, &count)) network_count = count;
-    }
-    if (network_first >= network_count) network_first = 0;
+    refresh_network_results();
     for (unsigned i = 0; i < 3 && network_first + i < network_count; i++) {
         WifiAp *ap = &network_aps[network_first + i];
         row(a, b + 258 + i * 55, width, ap->ssid,
@@ -514,12 +540,13 @@ void quick_pointer(int x, int y, bool pressed, bool released) {
             v = 0;
         if (v > 261)
             v = 261;
-        if (quick_slider == 0)
-            prefs.brightness = 30 + v * 70 / 261;
-        else
-            prefs.volume = v * 100 / 261;
-        settings_changed();
-        gui_damage_quick();
+        int *setting = quick_slider == 0 ? &prefs.brightness : &prefs.volume;
+        int value = quick_slider == 0 ? 30 + v * 70 / 261 : v * 100 / 261;
+        if (*setting != value) {
+            *setting = value;
+            settings_changed();
+            gui_damage_quick();
+        }
     }
 }
 void quick_key(int key) {

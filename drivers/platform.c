@@ -3,6 +3,9 @@
 volatile uint32_t ticks, frame_clock;
 uint32_t memory_mb;
 static uint32_t beep_end;
+static uint8_t serial_rx[256];
+static volatile unsigned serial_read, serial_write_at;
+static bool serial_irq;
 void serial_init(void) {
     outb(0x3f9, 0);
     outb(0x3fb, 0x80);
@@ -26,8 +29,32 @@ void serial_write(const char *s) {
         serial_put(*s++);
     }
 }
+bool serial_uses_irq(void) {
+    return serial_irq;
+}
+bool serial_interrupt(void) {
+    bool handled = false;
+    for (unsigned n = 0; n < 32 && (inb(0x3fd) & 1); n++) {
+        unsigned next = (serial_write_at + 1) % sizeof(serial_rx);
+        uint8_t byte = inb(0x3f8);
+        if (next != serial_read) {
+            serial_rx[serial_write_at] = byte;
+            __asm__ volatile("" ::: "memory");
+            serial_write_at = next;
+        }
+        handled = true;
+    }
+    return handled;
+}
 int serial_get(void) {
-    return (inb(0x3fd) & 1) ? inb(0x3f8) : -1;
+    if (!serial_irq)
+        return -1;
+    if (serial_read == serial_write_at)
+        return -1;
+    int byte = serial_rx[serial_read];
+    __asm__ volatile("" ::: "memory");
+    serial_read = (serial_read + 1) % sizeof(serial_rx);
+    return byte;
 }
 struct Gate {
     uint16_t low, selector;
@@ -74,8 +101,11 @@ void platform_init(void) {
     outb(0xa1, 2);
     outb(0x21, 1);
     outb(0xa1, 1);
-    outb(0x21, 0xfe);
+    serial_irq = inb(0x3fd) != 0xff;
+    outb(0x21, serial_irq ? 0xee : 0xfe);
     outb(0xa1, 0xff);
+    if (serial_irq)
+        outb(0x3f9, 1); /* UART receive interrupt */
     outb(0x43, 0x36);
     outb(0x40, 1193 & 255);
     outb(0x40, 1193 >> 8);

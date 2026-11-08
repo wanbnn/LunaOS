@@ -19,6 +19,7 @@ typedef struct {
 
 static WebFragment *fragments;
 static int fragment_count, fragment_capacity;
+static uint64_t fragment_epoch;
 static WebInlineItem *items;
 static int item_count, item_capacity;
 static int layout_document_height;
@@ -63,13 +64,21 @@ static void fragment_add(int x, int y, const char *text, int len, int size, uint
         fragments = next;
         fragment_capacity = grown;
     }
-    WebFragment *f = &fragments[fragment_count++];
+    int index = ++fragment_count;
+    if (owner->fragment_epoch != fragment_epoch) {
+        owner->fragment_epoch = fragment_epoch;
+        owner->first_fragment = index;
+    } else {
+        fragments[owner->last_fragment - 1].next = index;
+    }
+    owner->last_fragment = index;
+    WebFragment *f = &fragments[index - 1];
+    f->next = 0;
     f->x = x;
     f->y = y;
     f->size = size;
     f->color = color;
     f->underline = underline;
-    f->owner = owner;
     f->text = web_strndup(text, (size_t)len);
 }
 static void run_append(const char *text, int len) {
@@ -463,10 +472,10 @@ static void move_box(WebNode *node, int dx, int dy) {
     node->y += dy;
     node->content_x += dx;
     node->content_y += dy;
-    for (int i = 0; i < fragment_count; i++)
-        if (fragments[i].owner == node) {
-            fragments[i].x += dx;
-            fragments[i].y += dy;
+    if (node->fragment_epoch == fragment_epoch)
+        for (int i = node->first_fragment; i; i = fragments[i - 1].next) {
+            fragments[i - 1].x += dx;
+            fragments[i - 1].y += dy;
         }
     for (WebNode *c = node->first_child; c; c = c->next)
         move_box(c, dx, dy);
@@ -634,6 +643,7 @@ static int layout_block(WebNode *node, int x, int y, int avail_width, bool shrin
 void web_layout(WebNode *root, int width, int height) {
     (void)height;
     fragments_reset();
+    fragment_epoch++;
     item_count = 0;
     layout_document_height = 0;
     if (!root)
@@ -722,14 +732,16 @@ static void paint_tree(WebNode *node, int ox, int oy) {
         if (value) text(node->content_x + ox, node->content_y + oy, value,
                         web_font_size(node->style.font_size), node->style.color);
     }
-    for (int i = 0; i < fragment_count; i++) {
-        WebFragment *f = &fragments[i];
-        if (f->owner != node) continue;
-        text(f->x + ox, f->y + oy, f->text, f->size, f->color);
-        if (f->underline)
-            line(f->x + ox, f->y + oy + f->size + 3,
-                 f->x + ox + text_width(f->text, f->size), f->y + oy + f->size + 3, f->color);
-    }
+    if (node->fragment_epoch == fragment_epoch)
+        for (int i = node->first_fragment; i; i = fragments[i - 1].next) {
+            const WebFragment *f = &fragments[i - 1];
+            int y = f->y + oy;
+            text(f->x + ox, y, f->text, f->size, f->color);
+            if (f->underline && y + f->size + 3 >= saved[1] &&
+                y + f->size + 3 < saved[1] + saved[3])
+                line(f->x + ox, y + f->size + 3,
+                     f->x + ox + text_width(f->text, f->size), y + f->size + 3, f->color);
+        }
     for (WebNode *c = node->first_child; c; c = c->next)
         paint_tree(c, ox, oy);
     gfx_clip(saved[0], saved[1], saved[2], saved[3]);

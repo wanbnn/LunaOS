@@ -1,9 +1,16 @@
 #include "luna.h"
 #include "settings.h"
+#include "driver.h"
 int mouse_x = 512, mouse_y = 384, mouse_buttons;
-bool mouse_changed;
+static uint16_t raw_input[1024];
+static volatile unsigned raw_read, raw_write;
+static volatile bool input_lost;
+static bool ps2_irq;
+static bool absolute_pending;
+static uint32_t fallback_at;
 static struct {
     int x, y, buttons;
+    bool edge;
 } pointers[64];
 static unsigned pointer_read, pointer_write;
 static int shift, caps, extended, packet_n, alt, ctrl;
@@ -25,16 +32,20 @@ static void vmcall(uint32_t command, uint32_t argument, uint32_t result[4]) {
     result[0] = a; result[1] = b; result[2] = c; result[3] = d;
 }
 static void queue_pointer(void) {
+    static int previous_buttons;
+    bool edge = previous_buttons != mouse_buttons;
+    previous_buttons = mouse_buttons;
     unsigned last = (pointer_write + 63) % 64;
-    if (pointer_write != pointer_read && pointers[last].buttons == mouse_buttons) {
+    if (!edge && pointer_write != pointer_read && !pointers[last].edge) {
         pointers[last].x = mouse_x; pointers[last].y = mouse_y;
     } else {
         unsigned next = (pointer_write + 1) % 64;
         if (next == pointer_read) pointer_read = (pointer_read + 1) % 64;
         pointers[pointer_write].x = mouse_x; pointers[pointer_write].y = mouse_y;
-        pointers[pointer_write].buttons = mouse_buttons; pointer_write = next;
+        pointers[pointer_write].buttons = mouse_buttons;
+        pointers[pointer_write].edge = edge;
+        pointer_write = next;
     }
-    mouse_changed = true;
 }
 static void absolute_poll(void) {
     if (!absolute_pointer) return;
@@ -73,7 +84,7 @@ static bool wait_write(void) {
 }
 static int wait_read(void) {
     for (int i = 0; i < 100000; i++)
-        if (inb(0x64) & 1)
+        if ((inb(0x64) & 0xc1) == 1)
             return inb(0x60);
     return -1;
 }
@@ -86,9 +97,35 @@ static void mouse_command(int c) {
         }
     }
 }
+/* Capture bytes promptly while a frame or an application callback is running.
+ * Decode on the desktop task so pointer coordinates stay stable during painting. */
+bool input_interrupt(void) {
+    bool handled = false;
+    for (unsigned n = 0; n < 64; n++) {
+        uint8_t status = inb(0x64);
+        if (status == 0xff || !(status & 1))
+            break;
+        uint8_t data = inb(0x60);
+        unsigned next = (raw_write + 1) % 1024;
+        if (next == raw_read) {
+            input_lost = true;
+        } else {
+            raw_input[raw_write] = ((uint16_t)status << 8) | data;
+            __asm__ volatile("" ::: "memory");
+            raw_write = next;
+        }
+        handled = true;
+    }
+    return handled;
+}
+
 void input_init(void) {
-    while (inb(0x64) & 1)
+    for (unsigned n = 0; n < 64; n++) {
+        uint8_t status = inb(0x64);
+        if (status == 0xff || !(status & 1))
+            break;
         inb(0x60);
+    }
     if (wait_write())
         outb(0x64, 0xa8);
     if (wait_write())
@@ -117,22 +154,68 @@ void input_init(void) {
             }
         }
     }
-}
-void input_poll(void) {
-    /* The absolute pointer is polled on its own deadline: the VMMouse
-     * backdoor is a port read and the kernel wakes up every millisecond. */
-    static uint32_t next_absolute;
-    if (frame_clock >= next_absolute) {
-        absolute_poll();
-        next_absolute = frame_clock + 5;
+    if (config >= 0 && wait_write()) {
+        outb(0x64, 0x60);
+        if (wait_write()) {
+            uint32_t flags = drv_irq_save();
+            outb(0x60, (config | 0x43) & ~0x30);
+            outb(0x21, inb(0x21) & ~6u);
+            outb(0xa1, inb(0xa1) & ~0x10u);
+            ps2_irq = true;
+            input_interrupt();
+            drv_irq_restore(flags);
+        }
     }
-    for (int n = 0; n < 256; n++) {
-        uint8_t st = inb(0x64);
-        if (!(st & 1))
-            break;
-        uint8_t c = inb(0x60);
+}
+bool input_uses_irq(void) {
+    return ps2_irq;
+}
+
+bool input_pending(void) {
+    return raw_read != raw_write || input_lost || (int32_t)(frame_clock - fallback_at) >= 0;
+}
+
+void input_poll(void) {
+    /* Keep a low-rate safety poll for firmware that routes i8042 differently.
+     * Virtual absolute pointers can deliver data via the VMware backdoor. */
+    if ((int32_t)(frame_clock - fallback_at) >= 0) {
+        uint32_t flags = drv_irq_save();
+        input_interrupt();
+        drv_irq_restore(flags);
+        absolute_pending = true;
+        fallback_at = frame_clock + (ps2_irq && !absolute_pointer ? 20 : 5);
+    }
+    if (input_lost) {
+        uint32_t flags = drv_irq_save();
+        raw_read = raw_write;
+        input_lost = false;
+        drv_irq_restore(flags);
+        bool release_alt = alt;
+        packet_n = extended = shift = ctrl = alt = 0;
+        if (release_alt)
+            queue_key(KEY_ALT_RELEASE);
+        if (mouse_buttons) {
+            mouse_buttons = 0;
+            queue_pointer();
+        }
+    }
+    for (int n = 0; n < 1024 && raw_read != raw_write; n++) {
+        uint16_t entry = raw_input[raw_read];
+        __asm__ volatile("" ::: "memory");
+        raw_read = (raw_read + 1) % 1024;
+        uint8_t st = entry >> 8, c = entry;
+        if (st & 0xc0) {
+            if (st & 0x20)
+                packet_n = 0;
+            else
+                extended = 0;
+            continue;
+        }
         if (st & 0x20) {
-            if (absolute_pointer) continue;
+            if (absolute_pointer) {
+                absolute_pending = true;
+                continue;
+            }
             if (!packet_n && !(c & 8))
                 continue;
             packet[packet_n++] = c;
@@ -143,9 +226,9 @@ void input_poll(void) {
                 int dx = packet[1] - ((packet[0] & 0x10) ? 256 : 0);
                 int dy = packet[2] - ((packet[0] & 0x20) ? 256 : 0);
                 if (packet[0] & 0x40)
-                    dx = (packet[0] & 0x10) ? -255 : 255;
+                    dx = 0;
                 if (packet[0] & 0x80)
-                    dy = (packet[0] & 0x20) ? -255 : 255;
+                    dy = 0;
                 fraction_x += dx * prefs.mouse_speed;
                 fraction_y += dy * prefs.mouse_speed;
                 mouse_x += fraction_x / 100;
@@ -164,21 +247,7 @@ void input_poll(void) {
                 if (prefs.left_handed)
                     mouse_buttons = (mouse_buttons & 4) | ((mouse_buttons & 1) << 1) |
                                     ((mouse_buttons & 2) >> 1);
-                unsigned last = (pointer_write + 63) % 64;
-                if (pointer_write != pointer_read && pointers[last].buttons == mouse_buttons) {
-                    pointers[last].x = mouse_x;
-                    pointers[last].y = mouse_y;
-                    mouse_changed = true;
-                    continue;
-                }
-                unsigned next = (pointer_write + 1) % 64;
-                if (next == pointer_read)
-                    pointer_read = (pointer_read + 1) % 64;
-                pointers[pointer_write].x = mouse_x;
-                pointers[pointer_write].y = mouse_y;
-                pointers[pointer_write].buttons = mouse_buttons;
-                pointer_write = next;
-                mouse_changed = true;
+                queue_pointer();
             }
             continue;
         }
@@ -263,6 +332,10 @@ void input_poll(void) {
             a = shifted[c];
         if (a)
             queue_key(a);
+    }
+    if (absolute_pending) {
+        absolute_pending = false;
+        absolute_poll();
     }
 }
 int input_key(void) {

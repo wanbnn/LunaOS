@@ -26,6 +26,7 @@ int drv_lock(DrvLock *, uint32_t *flags);
 void drv_unlock(DrvLock *, uint32_t flags);
 void drv_memory_barrier(void);
 uint32_t drv_now_ms(void);
+uint32_t drv_cycles_per_us(void);
 int drv_udelay(unsigned us);
 int drv_sleep_ms(uint32_t ms);
 typedef struct {
@@ -54,6 +55,7 @@ int drv_timer_start(DrvTimer *, uint32_t delay_ms);
 int drv_timer_cancel(DrvTimer *);
 void driver_services_init(void);
 void driver_services_poll(unsigned budget);
+bool drv_work_pending(void);
 
 /* CPU and device addresses are intentionally separate. x86 PCI, no IOMMU. */
 typedef struct {

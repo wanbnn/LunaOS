@@ -28,19 +28,21 @@ static void wr(SdHost *h,unsigned off,unsigned width,uint32_t v) {
 static bool wait_bits(SdHost *h,unsigned off,unsigned width,uint32_t mask,
                       uint32_t value,unsigned ms) {
     uint32_t start=drv_now_ms();
+    unsigned polls = 0;
     do {
         if((rd(h,off,width)&mask)==value)return true;
-        __asm__ volatile("pause");
+        storage_poll_wait(&polls);
     } while((uint32_t)(drv_now_ms()-start)<ms);
     return false;
 }
 static int status(SdHost *h,uint32_t wanted) {
     uint32_t start=drv_now_ms();
+    unsigned polls = 0;
     do {
         uint32_t v=rd(h,0x30,4);
         if(v&0xffff8000u)return DRV_EIO;
         if(v&wanted){wr(h,0x30,4,wanted);return 0;}
-        __asm__ volatile("pause");
+        storage_poll_wait(&polls);
     } while((uint32_t)(drv_now_ms()-start)<2000);
     return DRV_ETIMEDOUT;
 }

@@ -1272,7 +1272,6 @@ bool web_js_run(WebNode *root, char *error, size_t ecap) {
         web_js_dispatch(root, "load", root);
         drain_jobs();
     }
-    js_document_dirty = true;
     return !failed;
 }
 void web_js_pump(void) {

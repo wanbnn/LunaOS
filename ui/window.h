@@ -9,6 +9,7 @@ typedef struct {
 extern Window windows[APP_COUNT];
 const char *app_name(int);
 bool browser_is_loading(void);
+void gui_invalidate_browser_viewport(void);
 void window_close(int);
 void window_minimize(int);
 void window_maximize(int);

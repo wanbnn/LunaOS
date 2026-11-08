@@ -23,9 +23,10 @@ static uint32_t rd(UsbHost *h,unsigned off) {
 static void wr(UsbHost *h,unsigned off,uint32_t v){drv_mmio_write(&h->io,off,4,v);}
 static bool wait_bits(UsbHost *h,unsigned off,uint32_t mask,uint32_t value,unsigned ms) {
     uint32_t start=drv_now_ms();
+    unsigned polls = 0;
     do {
         if((rd(h,off)&mask)==value)return true;
-        __asm__ volatile("pause");
+        storage_poll_wait(&polls);
     } while((uint32_t)(drv_now_ms()-start)<ms);
     return false;
 }
@@ -64,9 +65,10 @@ static int packet(UsbHost *h,unsigned address,unsigned ep,unsigned mps,
     wr(h,h->op+0x18,h->schedule.bus);
     wr(h,h->op,rd(h,h->op)|0x21u);
     volatile uint32_t *token=&td[2];uint32_t start=drv_now_ms();int rc=0;
+    unsigned polls = 0;
     while(*token&0x80u) {
         if((uint32_t)(drv_now_ms()-start)>3000){rc=DRV_ETIMEDOUT;break;}
-        __asm__ volatile("pause");
+        storage_poll_wait(&polls);
     }
     wr(h,h->op,rd(h,h->op)&~0x20u);
     if(!wait_bits(h,h->op+4,1u<<15,0,1000)){fatal(h);return DRV_ETIMEDOUT;}

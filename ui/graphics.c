@@ -3,6 +3,8 @@
 #include "icons.h"
 #include "luna.h"
 #include "settings.h"
+#include "perf.h"
+#include "task.h"
 int screen_width = GFX_BOOT_W, screen_height = GFX_BOOT_H;
 static uint32_t scene[GFX_MAX_W * GFX_MAX_H], wall[GFX_MAX_W * GFX_MAX_H];
 static uint32_t image[64 * 64];
@@ -15,7 +17,8 @@ static uint32_t red_table[256], green_table[256], blue_table[256];
 static volatile uint8_t *fb;
 static uint32_t pitch;
 static int bpp;
-static bool bochs_modes;
+static bool bochs_modes, framebuffer_wc;
+static bool raw_scanout;
 int display_mode;
 static const int mode_w[] = {1024, 1280, 1360, 1600, 1920};
 static const int mode_h[] = {768, 720, 768, 900, 1080};
@@ -119,6 +122,14 @@ static void shape_box(int x, int y, int w, int h, int *bx, int *by, int *bw, int
         x1 = clip_x + clip_w;
     if (y1 > clip_y + clip_h)
         y1 = clip_y + clip_h;
+    if (x0 < 0)
+        x0 = 0;
+    if (y0 < 0)
+        y0 = 0;
+    if (x1 > target_w)
+        x1 = target_w;
+    if (y1 > target_h)
+        y1 = target_h;
     if (x1 < x0)
         x1 = x0;
     if (y1 < y0)
@@ -190,8 +201,9 @@ void gfx_init(void) {
             kernel_fault();
         gfx_scene_target();
     }
-    if (*(volatile uint16_t *)(v + 18) != W || *(volatile uint16_t *)(v + 20) != H ||
-        (bpp != 24 && bpp != 32) || !fb) {
+    if (pitch < (uint32_t)W * (bpp / 8) || *(volatile uint16_t *)(v + 18) != W || *(volatile uint16_t *)(v + 20) != H ||
+        (bpp != 24 && bpp != 32) || !fb || red_pos > bpp - 8 ||
+        green_pos > bpp - 8 || blue_pos > bpp - 8) {
         serial_write("Unsupported VBE framebuffer\n");
         kernel_fault();
     }
@@ -218,6 +230,9 @@ void gfx_init(void) {
         green_pos = 8;
         blue_pos = 0;
     }
+    uint32_t framebuffer_bytes = bochs_modes ? GFX_MAX_W * GFX_MAX_H * 4u : pitch * H;
+    framebuffer_wc = task_framebuffer_wc((uintptr_t)fb, framebuffer_bytes);
+    serial_write(framebuffer_wc ? "Video: write-combining framebuffer\n" : "Video: firmware framebuffer cache policy\n");
     gfx_transform_changed();
     if (prefs.wallpaper == 4)
         gfx_load_wallpaper(prefs.wallpaper_path);
@@ -342,11 +357,12 @@ void gfx_fill_wallpaper(void) {
 }
 void gfx_transform_changed(void) {
     display_brightness = prefs.brightness;
+    raw_scanout = gfx_fast_scanout() && prefs.brightness == 100 && !prefs.night_light;
     for (int i = 0; i < 256; i++) {
         int v = i * prefs.brightness / 100;
-        red_table[i] = (uint32_t)v << 16;
-        green_table[i] = (uint32_t)(prefs.night_light ? v * 86 / 100 : v) << 8;
-        blue_table[i] = prefs.night_light ? v * 64 / 100 : v;
+        red_table[i] = (uint32_t)v << red_pos;
+        green_table[i] = (uint32_t)(prefs.night_light ? v * 86 / 100 : v) << green_pos;
+        blue_table[i] = (uint32_t)(prefs.night_light ? v * 64 / 100 : v) << blue_pos;
     }
 }
 static uint32_t output_color(uint32_t c) {
@@ -355,78 +371,91 @@ static uint32_t output_color(uint32_t c) {
 bool gfx_fast_scanout(void) {
     return bpp == 32 && red_pos == 16 && green_pos == 8 && blue_pos == 0;
 }
+static void write_scanline(int x, int y, const uint32_t *pixels, unsigned count) {
+    volatile uint8_t *dst = fb + y * pitch + x * (bpp / 8);
+    if (raw_scanout) {
+        memcpy((void *)dst, pixels, count * 4);
+    } else if (bpp == 32 && !((uintptr_t)dst & 3)) {
+        volatile uint32_t *words = (volatile uint32_t *)dst;
+        for (unsigned i = 0; i < count; i++)
+            words[i] = output_color(pixels[i]);
+    } else {
+        unsigned bytes = bpp / 8;
+        for (unsigned i = 0; i < count; i++, dst += bytes) {
+            uint32_t color = output_color(pixels[i]);
+            dst[0] = color;
+            dst[1] = color >> 8;
+            dst[2] = color >> 16;
+            if (bytes == 4)
+                dst[3] = color >> 24;
+        }
+    }
+}
+
+#define CURSOR_SIZE 24
+/* Publish the cursor and its background together. The scene always remains
+ * cursor-free, including when the cursor crosses a partially redrawn window. */
 static void present_span(int x0, int y0, int x1, int y1) {
-    if (x1 > W)
-        x1 = W;
-    if (y1 > H)
-        y1 = H;
-    if (x0 < 0)
-        x0 = 0;
-    if (y0 < 0)
-        y0 = 0;
+    if (x1 > W) x1 = W;
+    if (y1 > H) y1 = H;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
     if (x1 <= x0 || y1 <= y0)
         return;
-    if (gfx_fast_scanout() && prefs.brightness == 100 && !prefs.night_light) {
-        for (int y = y0; y < y1; y++)
-            memcpy((void *)(fb + y * pitch + x0 * 4), scene + y * W + x0, (size_t)(x1 - x0) * 4);
-    } else
-        for (int y = y0; y < y1; y++) {
-            volatile uint8_t *d = fb + y * pitch + x0 * (bpp / 8);
-            for (int x = x0; x < x1; x++) {
-                uint32_t c = output_color(scene[y * W + x]);
-                uint32_t native = (((c >> 16) & 255) << red_pos) | (((c >> 8) & 255) << green_pos) |
-                                  ((c & 255) << blue_pos);
-                d[0] = native;
-                d[1] = native >> 8;
-                d[2] = native >> 16;
-                if (bpp == 32)
-                    d[3] = native >> 24;
-                d += bpp / 8;
-            }
+    int cx = mouse_x - 4, cy = mouse_y - 4;
+    int left = x0 > cx ? x0 : cx;
+    int right = x1 < cx + CURSOR_SIZE ? x1 : cx + CURSOR_SIZE;
+    const uint8_t *mask = icon_atlases[2] + ICON_CURSOR * (CURSOR_SIZE * CURSOR_SIZE / 2);
+    for (int y = y0; y < y1; y++) {
+        const uint32_t *row = scene + y * W;
+        if (left >= right || y < cy || y >= cy + CURSOR_SIZE) {
+            write_scanline(x0, y, row + x0, x1 - x0);
+            continue;
         }
+        uint32_t overlay[CURSOR_SIZE];
+        for (int x = left; x < right; x++) {
+            unsigned offset = (y - cy) * CURSOR_SIZE + x - cx;
+            int alpha = ((mask[offset / 2] >> (4 * (offset % 2))) & 15) * 17;
+            overlay[x - left] = alpha ? blend(row[x], 0xffffff, alpha) : row[x];
+        }
+        if (left > x0)
+            write_scanline(x0, y, row + x0, left - x0);
+        write_scanline(left, y, overlay, right - left);
+        if (right < x1)
+            write_scanline(right, y, row + right, x1 - right);
+    }
+}
+
+static void scanout_fence(void) {
+    if (framebuffer_wc)
+        __asm__ volatile("sfence" ::: "memory");
 }
 void gfx_present(void) {
+    PerfArea previous = perf_enter(PERF_SCANOUT);
     present_span(0, 0, W, H);
-    cursor_x = cursor_y = -100;
-    gfx_cursor_present();
+    scanout_fence();
+    cursor_x = mouse_x - 4;
+    cursor_y = mouse_y - 4;
+    perf_leave(previous);
 }
-/* Uploads only the damaged rectangle; the cursor is restored by the caller. */
+
 void gfx_present_region(int x, int y, int w, int h) {
     present_span(x, y, x + w, y + h);
 }
-static void scan_pixel(int x, int y, uint32_t color) {
-    if ((unsigned)x >= (unsigned)W || (unsigned)y >= (unsigned)H)
-        return;
-    color = output_color(color);
-    uint32_t native = (((color >> 16) & 255) << red_pos) | (((color >> 8) & 255) << green_pos) |
-                      ((color & 255) << blue_pos);
-    volatile uint8_t *d = fb + y * pitch + x * (bpp / 8);
-    d[0] = native;
-    d[1] = native >> 8;
-    d[2] = native >> 16;
-    if (bpp == 32)
-        d[3] = native >> 24;
-}
+
 void gfx_cursor_present(void) {
-    if (cursor_x > -50)
-        for (int j = 0; j < 24; j++)
-            for (int i = 0; i < 24; i++) {
-                int x = cursor_x + i, y = cursor_y + j;
-                if ((unsigned)x < (unsigned)W && (unsigned)y < (unsigned)H)
-                    scan_pixel(x, y, scene[y * W + x]);
-            }
-    cursor_x = mouse_x - 4;
-    cursor_y = mouse_y - 4;
-    int atlas = 2;
-    const uint8_t *mask = icon_atlases[atlas] + ICON_CURSOR * ((24 * 24 + 1) / 2);
-    for (int j = 0; j < 24; j++)
-        for (int i = 0; i < 24; i++) {
-            unsigned off = j * 24 + i;
-            int alpha = ((mask[off / 2] >> (4 * (off % 2))) & 15) * 17;
-            int x = cursor_x + i, y = cursor_y + j;
-            if (alpha && (unsigned)x < (unsigned)W && (unsigned)y < (unsigned)H)
-                scan_pixel(x, y, blend(scene[y * W + x], 0xffffff, alpha));
-        }
+    int x = mouse_x - 4, y = mouse_y - 4;
+    if (x != cursor_x || y != cursor_y) {
+        PerfArea previous = perf_enter(PERF_CURSOR);
+        /* Write the new cursor first. A subsequent restore also includes any
+         * overlap, so it cannot expose the background under the new cursor. */
+        present_span(x, y, x + CURSOR_SIZE, y + CURSOR_SIZE);
+        present_span(cursor_x, cursor_y, cursor_x + CURSOR_SIZE, cursor_y + CURSOR_SIZE);
+        cursor_x = x;
+        cursor_y = y;
+        perf_leave(previous);
+    }
+    scanout_fence();
 }
 void gfx_draw_wall_preview(int x, int y, int w, int h, int theme) {
     for (int j = 0; j < h; j++)
@@ -457,9 +486,18 @@ void gfx_draw_wall_preview(int x, int y, int w, int h, int theme) {
 void rect(int x, int y, int w, int h, uint32_t c) {
     int bx, by, bw, bh;
     shape_box(x, y, w, h, &bx, &by, &bw, &bh);
-    for (int j = by; j < by + bh; j++)
-        for (int i = bx; i < bx + bw; i++)
-            pixel(x + i, y + j, c, 255);
+    if (!bw)
+        return;
+    for (int j = by; j < by + bh; j++) {
+        if (cover_count) {
+            for (int i = bx; i < bx + bw; i++)
+                pixel(x + i, y + j, c, 255);
+        } else {
+            uint32_t *row = back + (y + j + origin_y) * target_w + x + bx + origin_x;
+            unsigned count = bw;
+            __asm__ volatile("cld; rep stosl" : "+D"(row), "+c"(count) : "a"(c) : "memory");
+        }
+    }
 }
 /* Four-by-four subpixel coverage, evaluated only in the rounded corners.
  * Interior pixels stay on the solid fast path. All native shapes share this rasterizer. */
@@ -543,31 +581,37 @@ void glass(int x, int y, int w, int h, int r, int dark) {
     gfx_window_shadow(x, y, w, h, r);
     int bx, by, bw, bh;
     shape_box(x, y, w, h, &bx, &by, &bw, &bh);
-    for (int j = by; j < by + bh; j++)
+    bool shaded = dark || prefs.dark;
+    for (int j = by; j < by + bh; j++) {
+        int highlight = 18 * (h - j) / h;
+        int sy = y + j + wall_y + origin_y;
+        sy = sy < 0 ? 0 : sy >= H ? H - 1 : sy;
         for (int i = bx; i < bx + bw; i++) {
             int px = x + i, py = y + j;
-            int outer = rounded_coverage(i, j, w, h, r);
+            bool interior = (i >= r && i < w - r && j > 0 && j < h - 1) ||
+                            (j >= r && j < h - r && i > 0 && i < w - 1);
+            int outer = interior ? 255 : rounded_coverage(i, j, w, h, r);
             if (!outer)
                 continue;
-            int sx = px + wall_x + origin_x, sy = py + wall_y + origin_y;
+            int sx = px + wall_x + origin_x;
             if (sx < 0)
                 sx = 0;
             if (sx >= W)
                 sx = W - 1;
-            if (sy < 0)
-                sy = 0;
-            if (sy >= H)
-                sy = H - 1;
             uint32_t c = wall[sy * W + sx];
-            c = blend(c, (dark || prefs.dark) ? 0x142239 : 0x29445d,
-                      (dark || prefs.dark) ? 184 : 80);
-            c = blend(c, 0xffffff, 18 * (h - j) / h);
+            c = blend(c, shaded ? 0x142239 : 0x29445d, shaded ? 184 : 80);
+            c = blend(c, 0xffffff, highlight);
+            if (interior && !cover_count) {
+                back[(py + origin_y) * target_w + px + origin_x] = c;
+                continue;
+            }
             pixel(px, py, c, outer);
             int inner = rounded_coverage(i - 1, j - 1, w - 2, h - 2, r - 1);
             int edge = outer - inner;
             if (edge > 0)
                 pixel(px, py, 0xffffff, (edge * (j < h / 2 ? 112 : 45) + 127) / 255);
         }
+    }
 }
 void line(int x0, int y0, int x1, int y1, uint32_t c) {
     int dx = x1 > x0 ? x1 - x0 : x0 - x1, sx = x0 < x1 ? 1 : -1, dy = y1 > y0 ? y0 - y1 : y1 - y0,
@@ -631,7 +675,7 @@ int text_width(const char *s, int size) {
 }
 void text(int x, int y, const char *s, int size, uint32_t color) {
     int fi = font_index(size), start = x;
-    while (*s) {
+    while (*s && y + origin_y < clip_y + clip_h) {
         int c = decode(&s);
         if (c == '\n') {
             y += size + 7;
@@ -640,8 +684,10 @@ void text(int x, int y, const char *s, int size, uint32_t color) {
         }
         int index = c >= 32 && c < 127 ? c - 32 : c >= 160 && c < 256 ? c - 160 + 95 : '?' - 32;
         const Glyph *g = &font_glyphs[fi][index];
-        for (unsigned j = 0; j < g->h; j++)
-            for (unsigned i = 0; i < g->w; i++) {
+        int bx, by, bw, bh;
+        shape_box(x, y, g->w, g->h, &bx, &by, &bw, &bh);
+        for (int j = by; j < by + bh; j++)
+            for (int i = bx; i < bx + bw; i++) {
                 unsigned off = g->offset + j * g->w + i;
                 int a = (font_data[fi][off / 2] >> (4 * (off % 2))) & 15;
                 if (a)
@@ -713,11 +759,20 @@ void gfx_blit_surface(const uint32_t *surface, int stride, int x, int y, int w, 
             end = W - x;
         if (begin >= end)
             continue;
-        if (j >= r && j < h - r) {
-            memcpy(scene + yy * W + x + begin, surface + j * stride + begin, (end - begin) * 4);
-            continue;
+        int left = begin, right = end;
+        if (j < r || j >= h - r) {
+            left = r > begin ? r : begin;
+            if (left > end) left = end;
+            right = w - r < end ? w - r : end;
+            if (right < left) right = left;
         }
+        if (left < right)
+            memcpy(scene + yy * W + x + left, surface + j * stride + left, (right - left) * 4);
         for (int i = begin; i < end; i++) {
+            if (i == left)
+                i = right;
+            if (i == end)
+                break;
             int coverage = rounded_coverage(i, j, w, h, r);
             if (coverage)
                 pixel(x + i, yy, surface[j * stride + i], coverage);
