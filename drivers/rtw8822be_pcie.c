@@ -12,7 +12,8 @@
 #include "web.h"
 #define RX_COUNT 16u
 #define RX_BYTES 11520u
-#define TX_RING_STRIDE 256u /* independently aligned PCIe TX queue rings */
+#define TX_RING_COUNT 16u
+#define TX_RING_STRIDE (TX_RING_COUNT*16u) /* 16 16-byte PCIe TXBD entries per queue */
 static struct {
     bool present, master, powered, ready, emulated;
     const char *stage;
@@ -86,8 +87,8 @@ static int allocate_rings(void) {
     if(!rc) rc=drv_dma_alloc(RX_COUNT*RX_BYTES,4096,UINT32_MAX,0,&dev.payload);
     if(!rc) rc=drv_dma_alloc(8*TX_RING_STRIDE,256,UINT32_MAX,0,&dev.txbd);
     if(!rc) rc=drv_dma_alloc(4096+48,256,UINT32_MAX,0,&dev.tx);
-    /* Two 2-descriptor TX rings (BE and MGMT), each 2048-byte DMA slot. */
-    if(!rc) rc=drv_dma_alloc(4*2048,256,UINT32_MAX,0,&dev.txframes);
+    /* Sixteen descriptors for MGMT and BE, isolated 2048-byte DMA slots. */
+    if(!rc) rc=drv_dma_alloc(2*TX_RING_COUNT*2048u,256,UINT32_MAX,0,&dev.txframes);
     return rc;
 }
 static int rings(void) {
@@ -102,7 +103,7 @@ static int rings(void) {
     rc=bits(0x303,1,0,0xf7); /* Stop ordinary TX DMA queues. Beacon reserved page remains usable. */
     for(unsigned i=0;i<8 && !rc;i++) {
         rc=write(bases[i],4,dev.txbd.bus+i*TX_RING_STRIDE);
-        if(!rc && i) rc=write(counts[i],2,2);
+        if(!rc && i) rc=write(counts[i],2,TX_RING_COUNT);
     }
     if(!rc) rc=write(0x382,2,RX_COUNT);
     if(!rc) rc=write(0x338,4,dev.descriptors.bus);
@@ -239,10 +240,10 @@ static int tx_mpdu(void *ctx,const uint8_t *mpdu,unsigned n,bool mgmt) {
     int rc=read32(idxreg,&index);
     if(rc) {dev.tx_errors++;return rc;}
     unsigned rp=(index>>16)&0xfffu;
-    if(rp>=2) {dev.tx_errors++;return DRV_EIO;}
-    unsigned wp=dev.txwp[queue], next=(wp+1)%2u;
+    if(rp>=TX_RING_COUNT) {dev.tx_errors++;return DRV_EIO;}
+    unsigned wp=dev.txwp[queue], next=(wp+1)%TX_RING_COUNT;
     if(next==rp) {dev.tx_busy++;return -16;}
-    unsigned slot=(mgmt?0:2)+wp;
+    unsigned slot=(mgmt?0:TX_RING_COUNT)+wp;
     uint8_t *pkt=(uint8_t *)dev.txframes.cpu+slot*2048u;
     uint32_t bus=dev.txframes.bus+slot*2048u;
     uint8_t *bd=(uint8_t *)dev.txbd.cpu+queue*TX_RING_STRIDE+wp*16u;
