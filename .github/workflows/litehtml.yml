@@ -1,0 +1,33 @@
+name: Luna litehtml C++ renderer integration
+on:
+  pull_request:
+    paths:
+      - '.gitmodules'
+      - 'third_party/litehtml'
+      - 'ui/litehtml_bridge.h'
+      - 'ui/litehtml_bridge.cpp'
+      - 'tests/litehtml_bridge_test.cpp'
+      - '.github/workflows/litehtml.yml'
+  push:
+    branches:
+      - main
+jobs:
+  host-renderer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Build pinned litehtml v0.10 with C++17 runtime
+        run: |
+          cmake -S third_party/litehtml -B build/litehtml-host -DCMAKE_BUILD_TYPE=Release -DLITEHTML_BUILD_TESTING=OFF
+          cmake --build build/litehtml-host --parallel 2
+      - name: Compile Luna C ABI container with warnings as errors
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -Ithird_party/litehtml/include -Ithird_party/litehtml/src -c ui/litehtml_bridge.cpp -o build/litehtml-bridge.o
+      - name: Flexbox layout and graphics callback smoke test
+        run: |
+          find build/litehtml-host -name '*.a' -print
+          c++ -std=c++17 -Ithird_party/litehtml/include -Ithird_party/litehtml/src tests/litehtml_bridge_test.cpp build/litehtml-bridge.o build/litehtml-host/liblitehtml.a build/litehtml-host/src/gumbo/libgumbo.a -o build/litehtml-bridge-test
+          ./build/litehtml-bridge-test
