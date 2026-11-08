@@ -121,12 +121,17 @@ WebNode *web_node_root(WebNode *node) {
         node = node->parent;
     return node;
 }
+WebNode *web_node_root_composed(WebNode *node) {
+    WebNode *root = web_node_root(node);
+    /* The shadow tree is separate, but composed traversal proceeds from
+     * ShadowRoot to its host, potentially through nested shadow trees. */
+    while (root && root->type == WEB_SHADOW_ROOT && root->host)
+        root = web_node_root(root->host);
+    return root;
+}
 bool web_node_is_connected(const WebNode *node) {
-    if (!node)
-        return false;
-    while (node->parent)
-        node = node->parent;
-    return node->tag && !strcmp(node->tag, "#document");
+    WebNode *root = web_node_root_composed((WebNode *)node);
+    return root && root->tag && !strcmp(root->tag, "#document");
 }
 bool web_node_replace_child(WebNode *parent, WebNode *replacement, WebNode *old_child) {
     if (!parent || !replacement || !old_child || old_child->parent != parent)
