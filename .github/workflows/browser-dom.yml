@@ -24,3 +24,5 @@ jobs:
       - uses: actions/checkout@v4
       - name: HTML/DOM regression tests (ASan and UBSan)
         run: make test-webengine
+      - name: QuickJS DOM bindings compile syntax check
+        run: gcc -std=gnu11 -Wall -Wextra -Werror -fsyntax-only -Ithird_party/quickjs -Ikernel -Ibuild ui/web_js.c
