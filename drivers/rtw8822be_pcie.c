@@ -30,6 +30,7 @@ static struct {
     unsigned rp, tag, received, dropped, rx_invalid_tag, rx_invalid_packet, rx_c2h;
     unsigned rx_dma_polls, rx_pending, rx_last_index;
     uint32_t diag_cr, diag_rcr, diag_pcictrl, diag_rxfilter;
+    uint32_t diag_rxdma_status, diag_rf_rxpath, diag_rxigi;
 } dev;
 static int rd(void *ctx,uint32_t reg,unsigned width,uint32_t *out) {
     (void)ctx; return drv_mmio_read(&dev.mmio,reg,width,out);
@@ -159,7 +160,9 @@ static int tune(void *ctx,uint8_t channel) {
     }
     drv_memory_barrier();
     if(!rc) rc=write(0x3b4,2,dev.rp);
-    if(!rc) rc=bits(0x100,2,0x40,0x80);
+    /* Restore both MAC RX and MAC TX after retuning. Clearing bit 6
+     * here silently disabled every later authentication/data transmit. */
+    if(!rc) rc=bits(0x100,2,0,0xc0);
     if(rc) { dev.error=rc; dev.ready=false; dev.stage="channel/RF"; }
     return rc;
 }
@@ -177,6 +180,9 @@ static int receive(void *ctx,uint8_t *out,unsigned capacity,unsigned *bytes,int1
         (void)read32(0x608,&dev.diag_rcr);
         (void)read32(0x300,&dev.diag_pcictrl);
         (void)read32(0x6a0,&dev.diag_rxfilter);
+        (void)read32(0x288,&dev.diag_rxdma_status);
+        (void)read32(0x808,&dev.diag_rf_rxpath);
+        (void)read32(0xc50,&dev.diag_rxigi);
     }
     if(wp>=RX_COUNT) return DRV_EIO;
     if(wp==dev.rp) return 0;
@@ -217,8 +223,10 @@ static int receive(void *ctx,uint8_t *out,unsigned capacity,unsigned *bytes,int1
 static int tx_mpdu(void *ctx,const uint8_t *mpdu,unsigned n,bool mgmt) {
     (void)ctx;
     if(!dev.ready || dev.error || !mpdu || n<24 || n>1540) return DRV_EINVAL;
-    unsigned queue=mgmt ? 6 : 2;
-    uint32_t idxreg=mgmt ? 0x384 : 0x380, index=0;
+    /* rtw88 PCI order: BCN=0 H2C=1 MGMT=2 BK=3 BE=4 VI=5 VO=6 HI=7.
+     * Index registers are NOT the count registers. */
+    unsigned queue=mgmt ? 2 : 4;
+    uint32_t idxreg=mgmt ? 0x3b0 : 0x3a8, index=0;
     int rc=read32(idxreg,&index);
     if(rc) {dev.tx_errors++;return rc;}
     unsigned rp=(index>>16)&0xfffu;
@@ -437,6 +445,9 @@ void rtw8822be_status(char *out,size_t cap) {
     append(out," RCR=",cap);hex(n,dev.diag_rcr);append(out,n,cap);
     append(out," PCICTRL=",cap);hex(n,dev.diag_pcictrl);append(out,n,cap);
     append(out," RXFLTMAP=",cap);hex(n,dev.diag_rxfilter);append(out,n,cap);
+    append(out,"\nRXDMA status=",cap);hex(n,dev.diag_rxdma_status);append(out,n,cap);
+    append(out," RXPSEL=",cap);hex(n,dev.diag_rf_rxpath);append(out,n,cap);
+    append(out," RXIGI_A=",cap);hex(n,dev.diag_rxigi);append(out,n,cap);
     append(out," rp=",cap); number(n,dev.rp); append(out,n,cap);
     append(out," tag=",cap); number(n,dev.tag); append(out,n,cap);
     append(out,"\nScan active=",cap); number(n,dev.scanner.scanning ? 1u : 0u);append(out,n,cap);
