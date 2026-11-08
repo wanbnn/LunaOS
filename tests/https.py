@@ -9,6 +9,7 @@ import shutil
 import ssl
 import subprocess
 import threading
+import time
 
 from guest import ROOT, TEST, Guest, memory, symbol_address, wait_until
 
@@ -134,6 +135,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 part = body[offset : offset + 17000]
                 self.wfile.write(f"{len(part):X};fixture=test\r\n".encode() + part + b"\r\n")
             self.wfile.write(b"0\r\nX-Fixture: complete\r\n\r\n")
+        elif self.path == "/nested/large.css":
+            self.wfile.write(body[:1024])
+            self.wfile.flush()
+            time.sleep(2.5)
+            self.wfile.write(body[1024:])
         else:
             self.wfile.write(body)
 
@@ -256,7 +262,7 @@ try:
             "existing file preserved on failed downloads",
             "HTTPS and ping still work after multi-megabyte download",
             "truncated HTTP body rejected",
-            "complete 350 KB linked CSS transferred to the browser over TLS",
+            "complete 350 KB linked CSS transferred to the browser over TLS after a 2.5-second receive pause",
             "subsequent HTTPS and ICMP after large CSS",
             "QuickJS native ECMAScript runtime",
             "BigInt and modern JS syntax",

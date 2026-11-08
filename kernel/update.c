@@ -131,7 +131,13 @@ void update_run(void) {
             char index[] = "chunk-000.z";
             index[6] = '0' + i / 100; index[7] = '0' + i / 10 % 10; index[8] = '0' + i % 10;
             strcpy(url, base); append(url, index, sizeof(url));
-            n = net_https(url, (char *)packed[i], bytes + 1, detail, sizeof(detail));
+            for (unsigned attempt = 0; attempt < 3; attempt++) {
+                n = net_https(url, (char *)packed[i], bytes + 1, detail, sizeof(detail));
+                if (n >= 0 && (unsigned)n == bytes)
+                    break;
+                if (attempt < 2)
+                    task_sleep(250u * (attempt + 1u));
+            }
             if (n < 0 || (unsigned)n != bytes) {
                 state("Download failed. The installed system was not changed.", "Download falhou. O sistema instalado não foi alterado.", 0); goto done;
             }

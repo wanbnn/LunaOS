@@ -60,7 +60,8 @@ static struct {
 static void time_network_poll(void);
 static void time_network_input(const uint8_t [4],const uint8_t *,unsigned);
 #define TCP_MSS 1200u
-#define TCP_REORDER 4u
+#define TCP_REORDER 64u
+#define TCP_RECEIVE_IDLE_MS 15000u
 static const char *transport_error="No transfer attempted.";
 static uint32_t tcp_gaps,tcp_duplicates,tcp_queue_drops,tcp_resets,tcp_timeouts;
 static struct {
@@ -261,14 +262,25 @@ static void tcp_payload(uint32_t seq,const uint8_t *data,unsigned bytes,bool fin
         tcp_gaps++;
         unsigned gap=seq-tcp.ack,window=sizeof(tcp.data)-tcp.used-1;
         if(bytes<=1460 && gap<window && bytes<=window-gap) {
+            int available = -1;
             for(unsigned i=0;i<TCP_REORDER;i++) {
-                if(tcp.pending[i].valid) {
-                    if(tcp.pending[i].seq==seq && tcp.pending[i].bytes==bytes &&
-                       tcp.pending[i].fin==fin) { tcp_duplicates++;send_tcp(0x10,NULL,0);return; }
+                if (!tcp.pending[i].valid) {
+                    if (available < 0)
+                        available = (int)i;
                     continue;
                 }
+                if (tcp.pending[i].seq == seq && tcp.pending[i].bytes == bytes &&
+                    tcp.pending[i].fin == fin) {
+                    tcp_duplicates++;
+                    send_tcp(0x10, NULL, 0);
+                    return;
+                }
+            }
+            if (available >= 0) {
+                unsigned i = (unsigned)available;
                 tcp.pending[i].seq=seq;tcp.pending[i].bytes=bytes;tcp.pending[i].fin=fin;
-                if(bytes) memcpy(tcp.pending[i].data,data,bytes);
+                if (bytes)
+                    memcpy(tcp.pending[i].data, data, bytes);
                 tcp.pending[i].valid=true;send_tcp(0x10,NULL,0);return;
             }
         }
@@ -961,7 +973,7 @@ int stream_write(const void *data, unsigned n) {
     return total;
 }
 int stream_read(void *out, unsigned n) {
-    uint32_t start = ticks;
+    uint32_t start = ticks, last_ack = ticks;
     while (!tcp.used) {
         net_poll();
         /* The peer may close the connection in the same packet that carries
@@ -976,9 +988,13 @@ int stream_read(void *out, unsigned n) {
             if(tcp.state!=-1) transport_error="Network link or IPv4 configuration lost.";
             return -1;
         }
-        if(ticks-start>1500) {
+        if (ticks - start > TCP_RECEIVE_IDLE_MS) {
             tcp_timeouts++;transport_error="TCP receive timed out waiting for missing data.";
             return -1;
+        }
+        if (ticks - last_ack >= 1000u) {
+            send_tcp(0x10, NULL, 0);
+            last_ack = ticks;
         }
         task_yield();
     }

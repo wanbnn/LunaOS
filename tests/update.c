@@ -17,6 +17,7 @@ static uint8_t source_manifest[UPDATE_MANIFEST_BYTES];
 static unsigned requests, writes, reads, restarts, allocations;
 static int fail_download, corrupt_chunk, fail_write, fail_read, fail_flush, corrupt_readback, fail_alloc, bad_manifest;
 static bool save_ok = true, same_commit;
+static unsigned transient_failures;
 Task *task_current(void) { return &current; }
 const char *system_text(const char *en, const char *pt) { (void)pt; return en; }
 void gui_invalidate_app(int app) { assert(app == APP_SETTINGS); }
@@ -73,6 +74,11 @@ int net_https(const char *url, char *out, size_t cap, char *error, size_t ecap) 
         return sizeof(source_manifest);
     }
     const char *name = strrchr(url, '/'); assert(name);
+    if (transient_failures) {
+        transient_failures--;
+        snprintf(error, ecap, "Transport interrupted.");
+        return -1;
+    }
     if (fail_download) { snprintf(error, ecap, "HTTP status 503."); return -1; }
     char path[256]; snprintf(path, sizeof(path), "build/update-test%s", name);
     FILE *f = fopen(path, "rb"); assert(f);
@@ -84,6 +90,7 @@ int net_https(const char *url, char *out, size_t cap, char *error, size_t ecap) 
 static void reset(void) {
     memcpy(disk, original, LUNA_IMAGE_BYTES);
     requests = writes = reads = restarts = allocations = 0;
+    transient_failures = 0;
     fail_download = corrupt_chunk = fail_write = fail_read = fail_flush = corrupt_readback = fail_alloc = bad_manifest = 0;
     net_ready = save_ok = true; same_commit = setup_active = false; memory_mb = 256;
 }
@@ -127,7 +134,10 @@ int main(void) {
     reset(); fail_write = 11; update_run(); unchanged(); assert(writes > 11);
     reset(); fail_flush = 1; update_run(); unchanged(); assert(writes);
     reset(); corrupt_readback = 1; update_run(); unchanged(); assert(writes);
-    reset(); update_run();
+    reset();
+    transient_failures = 2;
+    update_run();
+    assert(!transient_failures);
     memcpy(wanted + 432, original + 432, 78);
     memcpy(wanted + 8192 * 512, original + 8192 * 512, 4096 * 1024);
     assert(restarts == 1 && !memcmp(wanted, disk, LUNA_IMAGE_BYTES));

@@ -9,6 +9,7 @@ volatile uint32_t ticks,frame_clock;
 static uint8_t last_tx[1514];
 static unsigned last_bytes, transmitted;
 static bool auto_ack,pending_ack;
+static uint32_t delayed_at;
 static unsigned data_sends,drop_sends,data_sizes[8];
 static uint32_t data_sequences[8];
 static void segment(uint32_t,unsigned,const char *,unsigned);
@@ -31,6 +32,10 @@ int netif_transmit(NetInterface *nic,const uint8_t *p,unsigned n) {
 }
 void netif_poll(NetInterface *nic,uint32_t now,void (*input)(void *,uint8_t *,unsigned),void *ctx) {
     (void)nic;(void)now;(void)input;(void)ctx;
+    if (delayed_at && ticks >= delayed_at) {
+        delayed_at = 0;
+        segment(tcp.ack, 0x18, "late", 4);
+    }
     if(pending_ack) {pending_ack=false;segment(tcp.ack,0x10,NULL,0);}
 }
 static void setup(void) {
@@ -45,7 +50,8 @@ static void setup(void) {
     memcpy(external_nic.dhcp.config.mask,netmask,4);
     tcp.state=2;tcp.port=40000;tcp.remote_port=80;tcp.ack=100;tcp.seq=tcp.remote_ack=1000;
     tcp.peer_mss=536;auto_ack=pending_ack=false;data_sends=drop_sends=0;
-    last_bytes=transmitted=0;
+    last_bytes = transmitted = 0;
+    delayed_at = 0;
 }
 static void segment_options(uint32_t seq,unsigned flags,const char *data,unsigned n,
                             const uint8_t *options,unsigned option_bytes) {
@@ -107,10 +113,44 @@ int main(void) {
     assert(data_sends==4 && data_sizes[0]==64 && data_sizes[1]==64 && data_sizes[2]==64 && data_sizes[3]==2);
     assert(data_sequences[0]==data_sequences[1] && data_sequences[2]==data_sequences[0]+64);
     setup();
-    for(unsigned i=0;i<5;i++) segment(101+i,0x18,"x",1);
+    for (unsigned i = 0; i < TCP_REORDER + 1u; i++)
+        segment(101 + i, 0x18, "x", 1);
     segment(100,0x18,"a",1);
-    assert(tcp.used==5 && tcp.ack==105); /* four queued, fifth remains unacknowledged */
-    segment(105,0x18,"x",1);assert(tcp.used==6 && tcp.ack==106);
+    assert(tcp.used == TCP_REORDER + 1u && tcp.ack == 101 + TCP_REORDER);
+    segment(tcp.ack, 0x18, "x", 1);
+    assert(tcp.used == TCP_REORDER + 2u);
+    setup();
+    char payload[1200];
+    for (unsigned i = 1; i < 49; i++) {
+        memset(payload, (int)i, sizeof(payload));
+        segment(100 + i * 1200u, 0x18, payload, sizeof(payload));
+    }
+    memset(payload, 0, sizeof(payload));
+    segment(100, 0x18, payload, sizeof(payload));
+    assert(tcp.used == 49u * 1200u && tcp.ack == 100u + 49u * 1200u);
+    for (unsigned i = 0; i < 49; i++)
+        for (unsigned j = 0; j < 1200; j++)
+            assert((uint8_t)tcp.data[i * 1200u + j] == i);
+    /* Duplicate detection must search beyond a freed earlier queue slot. */
+    setup();
+    segment(102, 0x18, "b", 1);
+    segment(104, 0x18, "d", 1);
+    segment(100, 0x18, "aa", 2);
+    segment(104, 0x18, "d", 1);
+    unsigned queued = 0;
+    for (unsigned i = 0; i < TCP_REORDER; i++)
+        queued += tcp.pending[i].valid;
+    assert(queued == 1);
+    /* An entire burst survives a delayed missing leading segment. */
+    setup();
+    for (unsigned i = 0; i < 48; i++)
+        segment(104 + i, 0x18, "x", 1);
+    delayed_at = ticks + 3000u;
+    assert(stream_read(out, sizeof(out)) == sizeof(out));
+    assert(!memcmp(out, "latexxxxxxxxxxxx", sizeof(out)) && !delayed_at);
+    setup();
+    unsigned before = tcp_timeouts;
+    assert(stream_read(out, sizeof(out)) < 0 && tcp_timeouts == before + 1u);
     setup();tcp.used=sizeof(tcp.data)-2;
     segment(100,0x18,"ab",2);assert(tcp.ack==100 && tcp.used==sizeof(tcp.data)-2);
     assert(be16(last_tx+48)==1); /* advertise actual remaining receive window */
