@@ -57,7 +57,7 @@ static void crypt(const br_aes_ct_cbcenc_keys *k,const uint8_t *f,
 static unsigned header(const uint8_t *f,size_t len,bool encrypted,bool from_ds) {
     if(!f || len<24 || (f[0]!=0x08 && f[0]!=0x88) ||
        (f[1]&0x03)!=(from_ds ? 0x02 : 0x01) ||
-       (f[1]&0x80) || (f[22]&15) || (f[1]&0x0c) ||
+       (f[1]&0x80) || (f[22]&15) || (f[1]&0x04) ||
        !!(f[1]&0x40)!=encrypted) return 0;
     if(f[0]==0x88 && (len<26 || (f[24]&0x80))) return 0; /* no A-MSDU */
     return f[0]==0x88 ? 26 : 24;

@@ -24,6 +24,8 @@ static int txslot;
 static uint32_t rxpos, rxcount, txcount;
 static uint16_t ipid, dnsid = 0x1234;
 static bool ping_done, dns_done;
+static const char *connect_error = "No connection attempted.";
+static uint32_t arp_requests, arp_received, dns_requests, dns_answers, tcp_syns;
 /* The task that currently owns the network service; nobody else may poll it. */
 static uint32_t network_owner;
 static uint8_t resolved[4];
@@ -109,6 +111,7 @@ static bool send_frame(const uint8_t *p, unsigned n) {
     return true;
 }
 static void arp_request_to(const uint8_t target[4]) {
+    arp_requests++;
     uint8_t p[60];
     memset(p, 0, sizeof(p));
     memset(p, 255, 6);
@@ -241,6 +244,7 @@ static void receive(uint8_t *p, unsigned n) {
             return;
         unsigned opcode=be16(a+6);
         if ((opcode!=1 && opcode!=2) || (a[8]&1) || !equal(a+8,p+6,6)) return;
+        arp_received++;
         if (equal(a + 14, gateway, 4)) {
             memcpy(gateway_mac, a + 8, 6);
             gateway_known = true;
@@ -294,8 +298,10 @@ static void receive(uint8_t *p, unsigned n) {
     if (h[9] == 17 && len >= 8 && be16(d) == 53 && be16(d + 2) == 53000 &&
         equal(h + 12, dns_ip, 4)) {
         unsigned u = be16(d + 4);
-        if (u >= 8 && u <= len)
+        if (u >= 8 && u <= len) {
+            dns_answers++;
             dns_receive(d + 8, u - 8);
+        }
     }
     if (h[9] != 6 || len < 20 || !tcp.state || !equal(h + 12, tcp.ip, 4) ||
         be16(d) != tcp.remote_port || be16(d + 2) != tcp.port)
@@ -469,6 +475,14 @@ void net_status(char *out, size_t cap) {
                      : "Ethernet: no supported RTL8139 found\n",
            cap);
     if (net_ready) {
+        append(out, gateway_known ? "Gateway ARP: resolved\n" : "Gateway ARP: unresolved\n", cap);
+        const uint32_t values[]={arp_requests,arp_received,dns_requests,dns_answers,tcp_syns};
+        const char *names[]={"ARP requests: ","ARP received: ","DNS requests: ","DNS responses: ","TCP SYN attempts: "};
+        for(unsigned i=0;i<5;i++) {
+            char value[16]; number(value,values[i]);
+            append(out,names[i],cap); append(out,value,cap); append(out,"\n",cap);
+        }
+        append(out,"Last connection: ",cap); append(out,connect_error,cap); append(out,"\n",cap);
         append(out, "MAC: ", cap);
         for (int i = 0; i < 6; i++) {
             char b[4] = {"0123456789abcdef"[mac[i] >> 4], "0123456789abcdef"[mac[i] & 15],
@@ -667,6 +681,7 @@ static bool resolve(const char *host, uint8_t *out) {
     put16(p + 4, pos);
     dns_done = false;
     for (int a = 0; a < 3; a++) {
+        dns_requests++;
         send_ip(dns_ip, 17, p, pos);
         uint32_t t = ticks;
         while (ticks - t < 100) {
@@ -719,9 +734,15 @@ static bool ping_impl(const char *host, char *out, size_t cap) {
     return false;
 }
 int stream_connect(const char *host, unsigned port) {
-    if (!net_ready || !ensure_gateway())
+    net_poll();
+    connect_error="Network interface has no IPv4 configuration.";
+    if (!net_ready)
+        return -1;
+    connect_error="Gateway did not answer ARP. Check Wi-Fi data traffic.";
+    if (!ensure_gateway())
         return -1;
     uint8_t ip[4];
+    connect_error="DNS resolution failed. Check the configured DNS server.";
     if (!resolve(host, ip))
         return -1;
     memset(&tcp, 0, sizeof(tcp));
@@ -731,6 +752,7 @@ int stream_connect(const char *host, unsigned port) {
     tcp.seq = ticks * 7919 + 1000;
     tcp.state = 1;
     for (int attempt = 0; attempt < 3 && tcp.state == 1; attempt++) {
+        tcp_syns++;
         send_tcp(2, 0, 0);
         uint32_t start = ticks;
         while (tcp.state == 1 && ticks - start < 100) {
@@ -739,9 +761,11 @@ int stream_connect(const char *host, unsigned port) {
         }
     }
     if (tcp.state != 2) {
+        connect_error=tcp.state<0 ? "TCP connection reset by peer." : "TCP connection timed out after DNS resolution.";
         tcp.state = 0;
         return -1;
     }
+    connect_error="TCP connected.";
     return 0;
 }
 int stream_write(const void *data, unsigned n) {
@@ -876,7 +900,7 @@ static int http_once(const char *url, char *out, size_t cap, char *error, size_t
         }
     }
     if (stream_connect(host, port) < 0) {
-        append(error, "TCP or DNS connection failed.", ecap);
+        append(error, connect_error, ecap);
         return -1;
     }
     if (secure && !tls_connect(host, error, ecap)) {

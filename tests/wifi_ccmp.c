@@ -45,5 +45,14 @@ int main(void) {
     assert(wifi_ccmp_decrypt(&c,f,&len)==-13); /* replay */
     assert(c.rx_pairwise_pn[16]==1);
     wifi_ccmp_clear(&c);assert(!c.active && c.tx_pn==0);
+    /* Retry is masked out of CCMP AAD. A retransmission may be the first
+     * copy received; authenticate it and let the PN check reject duplicates. */
+    assert(!wifi_ccmp_install(&c,&keys));
+    ap_frame(f);f[1]|=0x08;len=53;
+    assert(!wifi_ccmp_decrypt(&c,f,&len));
+    assert(len==37 && !memcmp(f+24,llc,13));
+    ap_frame(f);f[1]|=0x08;len=53;
+    assert(wifi_ccmp_decrypt(&c,f,&len)==-13);
+    wifi_ccmp_clear(&c);
     puts("PASS: independent AESCCM vectors, MIC tampering, replay, PN and safe key teardown");
 }

@@ -105,16 +105,24 @@ static int rx_msdu(void *v,uint8_t *out,unsigned cap,unsigned *bytes,bool *encry
         if(luna80211_header(f,n,&h) || h.type!=2 || (h.subtype!=0 && h.subtype!=8) ||
            h.from_ds!=1 || h.to_ds || memcmp(h.bssid,c->ap.bssid,6) ||
            (memcmp(h.destination,c->mac,6) && !(h.destination[0]&1))) continue;
+        c->data_rx++;
         bool crypted=h.protected_frame;
         if(crypted) {
             /* CCMP authentication precedes decapsulation, even for broadcasts. */
             size_t mpdu_len=n;
             if(c->station.wpa.phase!=WPA2_AUTHORIZED ||
-               wifi_ccmp_decrypt(&c->ccmp,f,&mpdu_len)) continue;
+               wifi_ccmp_decrypt(&c->ccmp,f,&mpdu_len)) {
+                c->decrypt_errors++;
+                continue;
+            }
             n=(unsigned)mpdu_len;
         }
         size_t count=0;
-        if(luna80211_to_ethernet(f,n,out,cap,&count)) continue;
+        if(luna80211_to_ethernet(f,n,out,cap,&count)) {
+            c->decap_errors++;
+            continue;
+        }
+        c->ethernet_rx++;
         *bytes=count;*encrypted=crypted;return 1;
     }
     return 0;

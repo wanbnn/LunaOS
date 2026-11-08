@@ -615,6 +615,11 @@ void rtw8822be_status(char *out,size_t cap) {
     append(out," error=",cap);append_error(out,cap,dev.client.error);
     append(out," attempts=",cap);number(n,dev.client.attempts);append(out,n,cap);
     append(out," mgmt_rx=",cap);number(n,dev.client.mgmt_rx);append(out,n,cap);
+    append(out,"\nData RX=",cap);number(n,dev.client.data_rx);append(out,n,cap);
+    append(out," decrypt_fail=",cap);number(n,dev.client.decrypt_errors);append(out,n,cap);
+    append(out," decap_fail=",cap);number(n,dev.client.decap_errors);append(out,n,cap);
+    append(out," ethernet_rx=",cap);number(n,dev.client.ethernet_rx);append(out,n,cap);
+    append(out,"\nMME",cap);
     append(out," foreign=",cap);number(n,dev.client.foreign_rx);append(out,n,cap);
     append(out," auth_rx=",cap);number(n,dev.client.auth_rx);append(out,n,cap);
     append(out," assoc_rx=",cap);number(n,dev.client.assoc_rx);append(out,n,cap);
