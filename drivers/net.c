@@ -4,6 +4,7 @@
 #include "task.h"
 #include "web.h"
 #include "netif.h"
+#include "wifi.h"
 #include "net_time.h"
 #include "../include/net/time_dns.h"
 bool net_ready;
@@ -374,6 +375,9 @@ bool net_driver_ipv4(const NetDeviceOps *ops, void *ctx, NetIpv4Config *out) {
     return true;
 }
 void net_poll(void) {
+    /* Synchronous DNS/TCP/ICMP callers may occupy the GUI loop that normally
+     * services the radio. Drain/decrypt Wi-Fi RX before consuming its IP queue. */
+    wifi_poll();
     if (external_nic.started) {
         netif_poll(&external_nic,frame_clock,external_input,0);
         if (external_nic.dhcp.configured) {

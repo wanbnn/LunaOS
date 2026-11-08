@@ -12,6 +12,10 @@ static unsigned sends, installs, clears;
 static uint8_t sent[1514], rx[16][1514];
 static unsigned sent_len, rx_len[16], head,count;
 static bool rx_encrypted[16], ready=true, last_encrypted;
+static WifiStation *polled_station;
+void wifi_poll(void) {
+    if(polled_station) wifi_station_poll(polled_station,frame_clock);
+}
 static bool radio_ready(void *ctx) { (void)ctx; return ready; }
 static int random_data(void *ctx,uint8_t *out,size_t n) {
     (void)ctx;for(size_t i=0;i<n;i++) out[i]=33+i;return 0;
@@ -88,7 +92,9 @@ int main(void) {
     assert(net_ready && s.link==WIFI_ONLINE);
     unsigned before=sends;enqueue(a,sizeof(a),false);wifi_station_poll(&s,7);net_poll();
     assert(sends==before); /* plaintext injection after authorization blocked */
-    enqueue(a,sizeof(a),true);wifi_station_poll(&s,8);net_poll();
+    /* A synchronous network caller must advance radio RX without a GUI tick. */
+    polled_station=&s;
+    enqueue(a,sizeof(a),true);frame_clock=8;net_poll();
     assert(sends==before+1 && last_encrypted && sent[20]==0 && sent[21]==2);
     assert(!memcmp(sent,ap_mac,6) && !memcmp(sent+28,"\xc0\xa8\x32\x09",4));
     uint8_t echo[42]={0};memcpy(echo,sta_mac,6);memcpy(echo+6,ap_mac,6);put16(echo+12,0x800);
@@ -109,5 +115,6 @@ int main(void) {
     assert(installs==1 && net_ready && s.link==WIFI_ONLINE); /* no key/DHCP reset */
     ready=false;wifi_station_poll(&s,11);assert(!net_ready && s.link==WIFI_DOWN);
     wifi_station_disconnect(&s);
+    polled_station=0;
     puts("PASS: simulated radio -> real WPA2 -> controlled port -> DHCP -> native ARP/IPv4/ICMP -> encrypted TX; disconnect invalidates IP");
 }

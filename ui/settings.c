@@ -108,6 +108,12 @@ static const char *network_state(void) {
 static void network_scan(void) {
     network_password = false;
     memset(network_secret, 0, sizeof(network_secret));
+    WifiState state;
+    if (!wifi_state(&state) && state.link >= WIFI_ASSOCIATING) {
+        network_message = system_text("Scan paused while connected or connecting.",
+                                      "Busca pausada durante a conexão.");
+        return;
+    }
     int rc = wifi_scan_start();
     network_message = rc ? system_text("Scan unavailable or busy. Retry.", "Busca indisponível ou ocupada. Tente novamente.") : "";
     network_first = 0;
