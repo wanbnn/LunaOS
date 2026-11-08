@@ -45,6 +45,7 @@ jobs:
           make LUNA_LEXBOR=1 lexbor-native
           make LUNA_LEXBOR=1 build/ui/web_dom.o build/ui/web_lexbor.o
           make LUNA_LEXBOR=1 build/kernel.elf
+          make LUNA_LEXBOR=1 all
           file build/ui/web_dom.o build/ui/web_lexbor.o build/lexbor-native/liblexbor_static.a
       - name: Lexbor HTML5 parser adapter integration
         run: |
