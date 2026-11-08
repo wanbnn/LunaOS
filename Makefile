@@ -39,9 +39,7 @@ build/ui/windows.o build/ui/desktop.o: ui/window.h
 FORCE:
 build/luna_build_version.h: FORCE
 	@mkdir -p build
-	@printf '#ifndef LUNA_BUILD_VERSION_H\n#define LUNA_BUILD_VERSION_H\n#define LUNA_BUILD_COMMIT "%s"\n#endif\n' "$$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)" > build/luna_build_version.h.tmp
-	@cmp -s build/luna_build_version.h.tmp $@ || mv build/luna_build_version.h.tmp $@
-	@rm -f build/luna_build_version.h.tmp
+	$(PYTHON) tools/build-version.py
 build/ui/desktop.o: build/luna_build_version.h
 
 third_party/musl/config.mak: third_party/musl/configure
@@ -110,7 +108,7 @@ run-iso: all
 	LUNA_IMAGE=dist/LunaOS.iso tools/run-qemu.sh
 run: all
 	tools/run-qemu.sh
-test: all test-storage test-storage-sdhci test-lunafs2 test-lunasdk-hardware test-lunapy test-devkit test-motion test-pmm test-heap test-wpa2 test-wifi-ccmp test-wifi-client test-rtw8822be-tx-dma test-dhcp test-wifi-station test-iwl-firmware test-iwl-pcie test-wifi-intel test-wifi-scan test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
+test: all test-rtw8822be-coex test-rtw8822be-fifo test-storage test-storage-sdhci test-lunafs2 test-lunasdk-hardware test-lunapy test-devkit test-motion test-pmm test-heap test-wpa2 test-wifi-ccmp test-wifi-client test-rtw8822be-tx-dma test-dhcp test-wifi-station test-iwl-firmware test-iwl-pcie test-wifi-intel test-wifi-scan test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
 	$(PYTHON) tests/smoke.py
 	$(PYTHON) tests/multitask.py
 	$(PYTHON) tests/desktop.py
@@ -122,7 +120,7 @@ test: all test-storage test-storage-sdhci test-lunafs2 test-lunasdk-hardware tes
 	$(PYTHON) tests/iso.py
 test-iso-install: all
 	LUNA_SETUP_ISO=1 LUNA_TEST_DIR=build/test-iso-install $(PYTHON) tests/setup.py
-check: all test-storage test-storage-sdhci test-lunafs2 test-lunasdk-hardware test-lunapy test-devkit test-motion test-pmm test-heap test-wpa2 test-dhcp test-wifi-station test-iwl-firmware test-iwl-pcie test-wifi-intel test-wifi-scan test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
+check: all test-rtw8822be-coex test-rtw8822be-fifo test-storage test-storage-sdhci test-lunafs2 test-lunasdk-hardware test-lunapy test-devkit test-motion test-pmm test-heap test-wpa2 test-dhcp test-wifi-station test-iwl-firmware test-iwl-pcie test-wifi-intel test-wifi-scan test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
 	$(PYTHON) tools/check_image.py
 	$(PYTHON) tools/check_iso.py
 clean:
@@ -320,3 +318,15 @@ test-rtw8822be-tx-dma:
 	@mkdir -p build
 	$(CC) -std=c11 -O2 -ffunction-sections -fdata-sections -Wall -Wextra -Werror -Ikernel tests/rtw8822be_tx_dma.c -Wl,--gc-sections -o build/rtw8822be-tx-dma-test
 	./build/rtw8822be-tx-dma-test
+
+.PHONY: test-rtw8822be-fifo
+test-rtw8822be-fifo:
+	@mkdir -p build
+	$(CC) -std=c11 -O2 -ffunction-sections -fdata-sections -Wall -Wextra -Werror -Ikernel tests/rtw8822be_fifo.c -Wl,--gc-sections -o build/rtw8822be-fifo-test
+	./build/rtw8822be-fifo-test
+
+.PHONY: test-rtw8822be-coex
+test-rtw8822be-coex:
+	@mkdir -p build
+	$(CC) -std=c11 -O2 -ffunction-sections -fdata-sections -Wall -Wextra -Werror -Ikernel tests/rtw8822be_coex.c -Wl,--gc-sections -o build/rtw8822be-coex-test
+	./build/rtw8822be-coex-test

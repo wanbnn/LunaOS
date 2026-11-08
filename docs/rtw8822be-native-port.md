@@ -54,6 +54,43 @@ The Wi-Fi diagnostics report initialization, RX count, TX count, queue-full
 events, and errors. Scanning an SSID is not connection proof; an online IPv4
 state plus actual bidirectional traffic on the physical RTL8822BE is required.
 
+## Authentication timeout investigation
+
+Physical RTL8822BE testing reported working scans (27 APs), but authentication
+failed with `-110`, `auth_rx=0` and `TX MGMT index=0x00000006`: six submitted
+TX descriptors and no hardware read-pointer progress. This isolates the observed
+failure to the pre-WPA2 path; software enqueue counts do not prove RF transmission.
+
+The native initialization now follows the pinned rtw88 `txdma_queue_mapping()` /
+`__priority_queue_cfg()` order: program queue mapping, reset/enable CR (`0 -> ff`),
+then load FIFO page allocation and initialize LLT, and clear CR+3 for normal TX.
+Previously CR was enabled only after FIFO/LLT setup, even though firmware download
+restores the disabled pre-download CR. This ordering correction still requires
+physical confirmation that the MGMT read pointer advances and auth responses arrive.
+`wifidiag` now reads MGQ's actual EXTRA queue credits (`0x23e`) and public credits
+(`0x242`); the former HQ counter (`0x232`) was for a different priority queue.
+
+`make test-rtw8822be-fifo` checks the initialization order and stops on MMIO errors.
+It is a register-sequence model, not a physical reproduction of the timeout.
+
+A subsequent physical test of the FIFO-order correction reported
+`TX MGMT index=0x00030003`, `MGQ/EXQ avail=61`, public credits 1739,
+`txpkt_empty=0x0dff`, and no authentication response. PCIe consumed all three
+requests, but three pages remained occupied in the internal management queue.
+This moves the investigation beyond the host DMA ring; it does not prove RF TX.
+
+The driver now configures WLAN-only coexistence, adapted from the pinned
+`coex.c` ANT_WONLY path and RTL8822B RFE/antenna setup: WLAN owns the path,
+WLAN RF/BB grants are software high, BT grants are software low, LTE arbitration
+is disabled, and the external switch is selected for the active WLAN band after
+every channel change. This port has no Bluetooth driver or shared-radio PTA
+policy; simultaneous Bluetooth operation is not supported by this mode.
+The new `RF grants before/init/now/state` and antenna fields in `wifidiag` expose
+readback instead of assuming this fixes the physical blockage. The grant control
+bits masked by `0xff80` must read `0x7700`. `make test-rtw8822be-coex` covers
+indirect register masks, band selection, bounded readiness, MMIO faults and
+readback failure. Actual authentication/RF operation still needs physical testing.
+
 ## Hardware acceptance sequence
 
 1. Use a WPA2-Personal **AES/CCMP-only** access point with PMF not required
@@ -83,7 +120,7 @@ Selected Linux rtw88 sources are reused from pinned commit
 - `rtw8822b.c`: MAC power transitions, RFE/CCA, channel and TRX path routines.
 - `rtw8822b_table.c`: MAC, BB, AGC and RF A/B register tables (unmodified arrays).
 - `rtw8822b.h` / `reg.h`: PHY register definitions.
-- `pci.c`, `fw.c`, `tx.c`, `mac.c`, `efuse.c`, `phy.c`: adapted DMA descriptors,
+- `pci.c`, `fw.c`, `tx.c`, `mac.c`, `efuse.c`, `phy.c`, `coex.c`, `util.c`: adapted DMA descriptors,
   reserved-page transfer, firmware DDMA flow, efuse parsing and PHY table logic.
 
 The imported files permit `GPL-2.0 OR BSD-3-Clause`; this adaptation selects

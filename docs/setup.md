@@ -44,7 +44,12 @@ O backend oferece quatro slots ATA/IDE legados e oito slots nativos. Além de
 AHCI e NVMe, há leitura, gravação e flush por USB EHCI/BOT, SDHCI/eMMC e
 MegaRAID MFI SAS1078/2108. Todos usam setores lógicos de 512 bytes. O setup
 oferece como destino apenas dispositivos inicializados, graváveis e dentro dos
-limites da API. Use esquerda/direita para navegar pelas páginas de discos.
+limites da API. A lista mostra apenas dispositivos presentes e abre na página
+com o primeiro destino disponível, sem selecioná-lo automaticamente. Use
+esquerda/direita para navegar quando houver mais de quatro dispositivos.
+Se nenhum destino estiver disponível, execute `storage` no Terminal do modo
+live para obter o diagnóstico PCI/ACPI e dos drivers; slots IDE vazios não
+indicam ausência de discos SATA/NVMe/eMMC.
 
 USB exige dispositivo high-speed em porta raiz EHCI e protocolo BOT/SCSI;
 xHCI, hubs, UAS e HC legados continuam sem driver. SDHCI usa PIO 1-bit para

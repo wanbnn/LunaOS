@@ -44,6 +44,14 @@ def start_install(g,expected_index):
     g.key("tab");type_text(g,"testingpass88")
     g.key("tab");type_text(g,"testingpass88")
     g.key("ret");stage(g,6)
+    # The destination must already be visible, without a hidden native page.
+    count=int.from_bytes(memory(g,symbol_address("storage_visible_count"),4),"little")
+    current=int.from_bytes(memory(g,symbol_address("storage_page"),4),"little")
+    entries=memory(g,symbol_address("storage_visible"),count*4)
+    visible=[int.from_bytes(entries[i:i+4],"little") for i in range(0,len(entries),4)]
+    assert expected_index in visible[current*4:current*4+4], (expected_index,visible,current)
+    assert memory(g,symbol_address("selected_disk"),4)==b"\xff"*4
+    g.screenshot("storage-destination-visible")
     # Legacy IDE0 is the protected source; the first native disk is #5.
     g.key("down")
     g.key("ret");stage(g,7)

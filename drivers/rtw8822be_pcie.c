@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause
  * Copyright(c) 2018-2019 Realtek Corporation
  * Native polled RTL8822BE PCIe transport adapted from rtw88/pci.c, fw.c,
- * tx.c and mac.c. No Linux runtime. Passive RX only after firmware bring-up.
+ * tx.c, mac.c, coex.c and util.c. No Linux runtime. Experimental STA TX/RX.
  */
 #include "driver.h"
 #include "rtw8822be_pcie.h"
@@ -31,10 +31,13 @@ static struct {
     unsigned txwp[8], tx_sent, tx_busy, tx_errors;
     uint32_t diag_tx_mgmt_idx, diag_tx_be_idx, diag_txdma_status;
     uint32_t diag_tx_mgmt_base, diag_tx_mgmt_count, diag_tx_pause, diag_tx_offset;
-    uint32_t diag_mgmt_avail_pages, diag_txdma_mapping, diag_tx_pkt_empty, diag_be_edca, diag_tcr;
+    uint32_t diag_mgmt_avail_pages, diag_public_avail_pages, diag_txdma_mapping, diag_tx_pkt_empty, diag_be_edca, diag_tcr;
     uint32_t tx_mgmt_last_rp, tx_mgmt_stall_at, tx_mgmt_rekicks, tx_mgmt_rekick_error;
     uint32_t tx_mgmt_last_bd0, tx_mgmt_last_bd1, tx_mgmt_last_desc0;
     bool tx_mgmt_tracking;
+    uint32_t coex_before, coex_after, diag_coex_ctrl, diag_coex_state;
+    uint32_t diag_coex_owner, diag_ant_select, diag_ant_mux;
+    int diag_coex_error;
     unsigned rp, tag, received, dropped, rx_invalid_tag, rx_invalid_packet, rx_c2h;
     unsigned rx_dma_polls, rx_pending, rx_last_index;
     uint32_t diag_cr, diag_rcr, diag_pcictrl, diag_rxfilter;
@@ -156,6 +159,49 @@ static int reserved(void *ctx,const uint8_t *data,unsigned bytes) {
     r=write(0x101,1,cr); if(!cleanup) cleanup=r;
     return rc ? rc : cleanup;
 }
+/* WLAN-only coexistence subset of rtw88/coex.c (ANT_WONLY) and
+ * rtw8822b_coex_cfg_rfe_type/ant_switch. LunaOS has no Bluetooth driver or
+ * PTA policy: leaving reset/firmware grants in control can stall MAC TX even
+ * after PCIe DMA has delivered frames to the device's management FIFO. */
+static int coex_read(uint16_t reg,uint32_t *value) {
+    int rc=wait_reg(0x1700,4,1u<<29,1u<<29);
+    if(!rc) rc=write(0x1700,4,0x800f0000u|reg);
+    if(!rc) rc=read32(0x1708,value);
+    return rc;
+}
+static int coex_update(uint16_t reg,uint32_t clear,uint32_t set) {
+    uint32_t value;
+    int rc=coex_read(reg,&value);
+    if(!rc) rc=wait_reg(0x1700,4,1u<<29,1u<<29);
+    if(!rc) rc=write(0x1704,4,(value&~clear)|set);
+    if(!rc) rc=write(0x1700,4,0xc00f0000u|reg);
+    return rc;
+}
+static int wlan_antenna(uint8_t channel) {
+    /* Supported RFE 2/3/5 all have a non-inverted external switch upstream.
+     * BB software controls RFE8/9: WLG=2, WLA=1. Preserve other RFE pins. */
+    int rc=bits(0x4e,1,0x80,0);
+    if(!rc) rc=bits(0x4f,1,0,1);
+    if(!rc) rc=write(0xcb4,1,0x77);
+    if(!rc) rc=bits(0xcbd,1,3,channel>14 ? 1 : 2);
+    return rc;
+}
+static int wlan_only_init(void) {
+    int rc=coex_read(0x38,&dev.coex_before);
+    /* GNT_BT RF/BB = SW low (1); GNT_WL RF/BB = SW high (3).
+     * Disable LTE arbitration; retain unrelated bits of the indirect register. */
+    if(!rc) rc=coex_update(0x38,0xff80,0x7700);
+    if(!rc) rc=coex_update(0xa0,0xffff,0xffff);
+    if(!rc) rc=coex_update(0xa4,0xffff,0xffff);
+    if(!rc) rc=bits(0x73,1,0,4); /* WLAN owns the antenna path. */
+    if(!rc) rc=write(0x974,1,0xff); /* External switch buffer mux. */
+    if(!rc) rc=bits(0x1991,1,3,0);
+    if(!rc) rc=bits(0xcbe,1,8,0);
+    if(!rc) rc=wlan_antenna(dev.phy.hal.current_channel);
+    if(!rc) rc=coex_read(0x38,&dev.coex_after);
+    if(!rc && (dev.coex_after&0xff80)!=0x7700) rc=DRV_EIO;
+    return rc;
+}
 static bool radio_ready(void *ctx) { (void)ctx; return dev.ready && !dev.error; }
 static uint32_t now(void *ctx) { (void)ctx; return drv_now_ms(); }
 static int stop(void *ctx) {
@@ -165,8 +211,10 @@ static int stop(void *ctx) {
 }
 static int tune(void *ctx,uint8_t channel) {
     (void)ctx;
-    int rc=bits(0x100,2,0x80,0); /* Stop MAC RX while RF settles. TX is always disabled. */
+    int rc=bits(0x100,2,0x80,0); /* Stop MAC RX while RF settles. */
     if(!rc) rc=rtw8822be_phy_channel(&dev.phy,channel);
+    /* Channel tables touch RFE registers; restore the WLAN band selection. */
+    if(!rc) rc=wlan_antenna(channel);
     /* Discard frames queued on the previous channel before accepting beacons. */
     uint32_t index=0;
     if(!rc) rc=read32(0x3b4,&index);
@@ -391,6 +439,36 @@ static void cleanup(void) {
     if(dev.mmio.cookie) drv_mmio_unmap(&dev.mmio);
     if(dev.pci.cookie && !dev.mmio.cookie) drv_pci_release(&dev.pci);
 }
+/* Follow rtw88/mac.c: txdma_queue_mapping(), then __priority_queue_cfg().
+ * Firmware download restores CR to its pre-download value (TX DMA disabled).
+ * Enable/reset the MAC DMA engines BEFORE loading RQPN and initializing LLT;
+ * enabling CR only afterwards can leave ordinary TX without FIFO credits.
+ * PCI bus mastering stays disabled until all initialization is complete. */
+static int station_fifo_init(void) {
+    int rc;
+#define FIFO_STEP(label,expr) do { dev.stage=label; rc=(expr); if(rc) return rc; } while(0)
+    /* Chip FIFO split from rtw88's PCIe page table (2048 TX pages,
+     * 52 reserved, four 64-page priority queues, one gap page). */
+    FIFO_STEP("queue map",write(0x10c,2,(2u<<4)|(2u<<6)|(1u<<8)|(1u<<10)|(0u<<12)|(3u<<14)));
+    FIFO_STEP("MAC DMA reset",write(0x100,1,0));
+    FIFO_STEP("MAC DMA enable",write(0x100,1,0xff));
+    FIFO_STEP("FIFO high",write(0x230,2,64));
+    FIFO_STEP("FIFO low",write(0x234,2,64));
+    FIFO_STEP("FIFO normal",write(0x238,2,64));
+    FIFO_STEP("FIFO extra",write(0x23c,2,64));
+    FIFO_STEP("FIFO public",write(0x240,2,1739));
+    FIFO_STEP("FIFO load",bits(0x22c,4,0,1u<<31));
+    FIFO_STEP("TX free tail",bits(0x422,1,0,16));
+    FIFO_STEP("reserved boundary",write(0x204,2,1996));
+    FIFO_STEP("beacon boundary",write(0x424,2,1996));
+    FIFO_STEP("beacon1 boundary",write(0x456,2,1996));
+    FIFO_STEP("reserved tail",write(0x206,2,1996));
+    FIFO_STEP("LLT initialization",bits(0x208,1,0,1));
+    FIFO_STEP("LLT ready",wait_reg(0x208,1,1,0));
+    FIFO_STEP("MAC TX normal mode",write(0x103,1,0));
+#undef FIFO_STEP
+    return 0;
+}
 void rtw8822be_init(void) {
     dev.stage="PCI discovery";
     int rc=drv_pci_find(0x10ec,0xb822,0,&dev.pci);
@@ -430,27 +508,13 @@ void rtw8822be_init(void) {
     STEP("DMA rings after firmware",rings());
     STEP("efuse/PHY tables",rtw8822be_phy_prepare(&dev.phy,&dev.io));
     memcpy(dev.mac,dev.phy.efuse.mac,6);
-    /* Chip FIFO split from rtw88's PCIe page table (2048 TX pages,
-     * 52 reserved, four 64-page priority queues, one gap page). */
-    STEP("queue map",write(0x10c,2,(2u<<4)|(2u<<6)|(1u<<8)|(1u<<10)|(0u<<12)|(3u<<14)));
-    STEP("FIFO high",write(0x230,2,64));
-    STEP("FIFO low",write(0x234,2,64));
-    STEP("FIFO normal",write(0x238,2,64));
-    STEP("FIFO extra",write(0x23c,2,64));
-    STEP("FIFO public",write(0x240,2,1739));
-    STEP("FIFO load",bits(0x22c,4,0,1u<<31));
-    STEP("TX free tail",bits(0x422,1,0,16));
-    STEP("reserved boundary",write(0x204,2,1996));
-    STEP("beacon boundary",write(0x424,2,1996));
-    STEP("beacon1 boundary",write(0x456,2,1996));
-    STEP("reserved tail",write(0x206,2,1996));
-    STEP("LLT initialization",bits(0x208,1,0,1));
-    STEP("LLT ready",wait_reg(0x208,1,1,0));
+    STEP("WLAN-only RF grants/antenna",wlan_only_init());
+    rc=station_fifo_init(); if(rc) goto fail;
     STEP("MSR unassociated",write(0x102,1,0));
     STEP("MAC option",write(0x7d8,4,0xb0810041));
     STEP("MAC receive option",write(0x7d4,1,0x98));
     STEP("RX length limit",write(0x60c,1,24));
-    /* Passive 20-MHz monitor receive path. No MAC TX, no probes or association. */
+    /* 20-MHz receive FIFO and PHY status. */
     STEP("RX FIFO",write(0x11c,4,24576-256-1));
     STEP("RX boundary",write(0x116,2,24576-128-1));
     STEP("RX descriptor length",bits(0x115,1,15,15));
@@ -564,7 +628,9 @@ void rtw8822be_status(char *out,size_t cap) {
     (void)rd(NULL,0x380,2,&dev.diag_tx_mgmt_count);
     (void)rd(NULL,0x522,1,&dev.diag_tx_pause);
     (void)read32(0x20c,&dev.diag_tx_offset);
-    (void)rd(NULL,0x232,2,&dev.diag_mgmt_avail_pages);
+    /* MGQ maps to EXTRA (0), not HIGH (3), in the PCIe queue map. */
+    (void)rd(NULL,0x23e,2,&dev.diag_mgmt_avail_pages);
+    (void)rd(NULL,0x242,2,&dev.diag_public_avail_pages);
     (void)rd(NULL,0x10c,2,&dev.diag_txdma_mapping);
     (void)rd(NULL,0x41a,2,&dev.diag_tx_pkt_empty);
     (void)read32(0x508,&dev.diag_be_edca);
@@ -577,11 +643,25 @@ void rtw8822be_status(char *out,size_t cap) {
     append(out," expected=",cap);hex(n,dev.txbd.bus+2*TX_RING_STRIDE);append(out,n,cap);
     append(out,"\nTX pause=",cap);hex(n,dev.diag_tx_pause);append(out,n,cap);
     append(out," offset_check=",cap);hex(n,dev.diag_tx_offset);append(out,n,cap);
-    append(out,"\nTX pages HQ avail=",cap);number(n,dev.diag_mgmt_avail_pages);append(out,n,cap);
+    append(out,"\nTX pages MGQ/EXQ avail=",cap);number(n,dev.diag_mgmt_avail_pages);append(out,n,cap);
+    append(out," public avail=",cap);number(n,dev.diag_public_avail_pages);append(out,n,cap);
     append(out," mapping=",cap);hex(n,dev.diag_txdma_mapping);append(out,n,cap);
     append(out," txpkt_empty=",cap);hex(n,dev.diag_tx_pkt_empty);append(out,n,cap);
     append(out,"\nTX BE EDCA=",cap);hex(n,dev.diag_be_edca);append(out,n,cap);
     append(out," TCR=",cap);hex(n,dev.diag_tcr);append(out,n,cap);
+    dev.diag_coex_error=coex_read(0x38,&dev.diag_coex_ctrl);
+    if(!dev.diag_coex_error) dev.diag_coex_error=coex_read(0x54,&dev.diag_coex_state);
+    (void)rd(NULL,0x73,1,&dev.diag_coex_owner);
+    (void)rd(NULL,0xcbd,1,&dev.diag_ant_select);
+    (void)rd(NULL,0xcb4,1,&dev.diag_ant_mux);
+    append(out,"\nRF grants before=",cap);hex(n,dev.coex_before);append(out,n,cap);
+    append(out," init=",cap);hex(n,dev.coex_after);append(out,n,cap);
+    append(out," now=",cap);hex(n,dev.diag_coex_ctrl);append(out,n,cap);
+    append(out," state=",cap);hex(n,dev.diag_coex_state);append(out,n,cap);
+    append(out," error=",cap);append_error(out,cap,dev.diag_coex_error);
+    append(out,"\nRF owner=",cap);hex(n,dev.diag_coex_owner);append(out,n,cap);
+    append(out," ant_mux=",cap);hex(n,dev.diag_ant_mux);append(out,n,cap);
+    append(out," ant_select=",cap);hex(n,dev.diag_ant_select);append(out,n,cap);
     append(out,"\nTX ring MGMT wp=",cap);number(n,dev.txwp[2]);append(out,n,cap);
     append(out," BE wp=",cap);number(n,dev.txwp[4]);append(out,n,cap);
     append(out," client backpressure=",cap);number(n,dev.client.tx_backpressure);append(out,n,cap);

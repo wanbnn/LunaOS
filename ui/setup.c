@@ -17,7 +17,8 @@ static int greeting, previous_buttons, install_phase;
 static uint32_t install_sector, source_bytes;
 static bool detected, hashing, installed, login_busy;
 static bool eligible[STORAGE_DEVICE_COUNT];
-static unsigned storage_page;
+static unsigned storage_page, storage_visible_count;
+static unsigned storage_visible[STORAGE_DEVICE_COUNT];
 static char username[25], password[65], confirmation[65], erase_text[32], layout_test[64];
 static char radio[512], message[192];
 static WifiAp wifi_aps[WIFI_MAX_APS];
@@ -125,14 +126,16 @@ static void setup_wifi_connect(void) {
     ui_dirty = true;
 }
 static unsigned storage_entry(unsigned row) {
-    return storage_page==0 ? row :
-           STORAGE_NATIVE_BASE+(storage_page-1u)*4u+row;
+    unsigned offset = storage_page * 4u + row;
+    return offset < storage_visible_count ? storage_visible[offset] : STORAGE_DEVICE_COUNT;
 }
 static unsigned storage_page_for(unsigned index) {
-    return index < 4 ? 0 : 1u+(index-STORAGE_NATIVE_BASE)/4u;
+    for (unsigned i = 0; i < storage_visible_count; i++)
+        if (storage_visible[i] == index) return i / 4u;
+    return 0;
 }
 static unsigned storage_pages(void) {
-    return 1u+(STORAGE_NATIVE_SLOTS+3u)/4u;
+    return storage_visible_count ? (storage_visible_count + 3u) / 4u : 1u;
 }
 static bool source_valid(void) {
     uint8_t header[512];
@@ -149,11 +152,13 @@ static bool source_valid(void) {
     return disk_read(LUNA_SOURCES_SECTOR, header) && !memcmp(header, "LUNASRC1", 8);
 }
 static void enumerate_targets(void) {
+    storage_visible_count = 0;
     uint32_t source_id = 0;
     if (disk_read(0, transfer))
         memcpy(&source_id, transfer + 440, 4);
     for (unsigned i = 0; i < STORAGE_DEVICE_COUNT; i++) {
         const DiskInfo *d = i==4 ? 0 : disk_info(i);
+        if (d && d->present) storage_visible[storage_visible_count++] = i;
         eligible[i] = d && d->present && d->supported && !d->optical &&
                       i != disk_boot_index() && d->sectors <= UINT32_MAX &&
                       d->sectors >= LUNA_IMAGE_BYTES / 512;
@@ -164,6 +169,14 @@ static void enumerate_targets(void) {
                 eligible[i] = false;
         }
     }
+    storage_page = 0;
+    /* Reveal a usable destination without preselecting a destructive target. */
+    for (unsigned i = 0; i < storage_visible_count; i++)
+        if (eligible[storage_visible[i]]) {
+            storage_page = i / 4u;
+            break;
+        }
+    if (selected_disk >= 0 && !eligible[selected_disk]) selected_disk = -1;
 }
 void setup_init(void) {
     secret_clear(password, sizeof(password));
@@ -460,6 +473,7 @@ void setup_draw(void) {
                 "Select the whole disk. Existing partitions will be removed.");
         for (unsigned row_index = 0; row_index < 4; row_index++) {
             unsigned i=storage_entry(row_index);
+            if (i >= STORAGE_DEVICE_COUNT) break;
             const DiskInfo *d=disk_info(i);
             char name[96],n[20],detail[128];
             strcpy(name,storage_disk_type(i));
@@ -484,10 +498,21 @@ void setup_draw(void) {
             row(158,279+row_index*65,708,name,detail,
                 selected_disk==(int)i,eligible[i]);
         }
-        char page_info[80]="Discos - página ",n[20];
+        bool available = false;
+        for (unsigned i = 0; i < STORAGE_DEVICE_COUNT; i++)
+            if (eligible[i]) available = true;
+        if (!available && storage_visible_count < 4) {
+            paragraph(279 + (storage_visible_count < 3 ? storage_visible_count : 3) * 65,
+                      tr("Nenhum destino disponível. No modo live, execute storage\n"
+                         "no Terminal para ver o diagnóstico dos controladores.",
+                         "No destination available. In live mode, run storage\n"
+                         "in Terminal to inspect controller diagnostics."), SECONDARY);
+        }
+        char page_info[80],n[20];
+        strcpy(page_info,tr("Discos - página ","Disks - page "));
         number(n,storage_page+1);strcat(page_info,n);
         strcat(page_info,"/");number(n,storage_pages());strcat(page_info,n);
-        strcat(page_info,"  (< / > para trocar)");
+        strcat(page_info,tr("  (< / > para trocar)","  (< / > to switch)"));
         text(160,552,page_info,13,SECONDARY);
     } else if (setup_page == 7) {
         heading("Pronto para instalar?", "Ready to install?",
