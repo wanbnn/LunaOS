@@ -30,7 +30,7 @@ só poderá ser concluída com código, teste oficial e evidência de execução
 - [ ] Cobrir casos oficiais de parsing HTML.
 
 ## 5. Entidades HTML
-- [ ] Integrar tabela completa de referências nomeadas WHATWG.
+- [x] Integrar tabela completa de referências nomeadas WHATWG (2231 entradas em `ui/web_entities.inc`; testes nativos: CI 42530255907).
 - [ ] Implementar regras para entidades com e sem ponto e vírgula.
 - [ ] Completar remapeamento de caracteres numéricos e controles.
 - [ ] Testar ambiguidades em atributos e texto.
@@ -78,3 +78,9 @@ só poderá ser concluída com código, teste oficial e evidência de execução
 - [ ] Falhas residuais identificadas, classificadas e sem afirmar 100% falsamente.
 
 Este arquivo é mantido junto ao código para não depender da memória da conversa.
+
+## Evidência da fase 2 (PR #4)
+- Tabela de 2231 entidades nomeadas integradas e verificadas com testes nativos.
+- `web_node_root`, `web_node_is_connected`, `web_node_replace_child`, `web_node_normalize` e bindings QuickJS para métodos básicos.
+- Pipeline: https://github.com/wanbnn/LunaOS/actions/runs/42530255907 (testes com sanitizers e análise sintática de `ui/web_js.c`).
+- *Ainda sem* html5lib-tests, WPT ou validação do guest/ISO; não marcar os demais critérios como completos.
