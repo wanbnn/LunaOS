@@ -398,7 +398,7 @@ static void parse_attributes(WebParser *ps, WebNode *node) {
             break;
         const char *name_start = ps->p;
         while (ps->p < ps->end && !is_space(*ps->p) && *ps->p != '=' &&
-               *ps->p != '>' && *ps->p != '/')
+               *ps->p != '>' && !(*ps->p == '/' && ps->p + 1 < ps->end && ps->p[1] == '>'))
             ps->p++;
         size_t name_len = (size_t)(ps->p - name_start);
         if (!name_len) {
