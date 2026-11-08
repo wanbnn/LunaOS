@@ -18,7 +18,7 @@ LUNA_LEXBOR ?= 1
 # GCC's host libstdc++.a must pass freestanding link checks before enabling.
 LUNA_LITEHTML ?= 0
 LITEHTML_CXX ?= g++
-LITEHTML_CXXFLAGS := -m32 -std=c++17 -Os -ffreestanding -fno-exceptions -fno-rtti -fno-pie -fno-pic -fno-stack-protector -fno-threadsafe-statics -ffunction-sections -fdata-sections -mno-sse -mno-mmx -mfpmath=387 -Iui -Ithird_party/litehtml/include -Ithird_party/litehtml/src
+LITEHTML_CXXFLAGS := -m32 -std=c++17 -Os -fno-exceptions -fno-rtti -fno-pie -fno-pic -fno-stack-protector -fno-threadsafe-statics -ffunction-sections -fdata-sections -mno-sse -mno-mmx -mfpmath=387 -Iui -Ithird_party/litehtml/include -Ithird_party/litehtml/src
 LITEHTML_LIBSTDCXX := $(shell $(LITEHTML_CXX) -m32 -print-file-name=libstdc++.a)
 LITEHTML_LIBSUPCXX := $(shell $(LITEHTML_CXX) -m32 -print-file-name=libsupc++.a)
 ifeq ($(LUNA_LEXBOR),1)
@@ -112,7 +112,9 @@ build/kernel/entry.o: kernel/entry.S
 	@mkdir -p $(dir $@)
 	$(CC) -m32 -c $< -o $@
 # The bridge and source library are built as 32-bit freestanding objects.
-# Compile step is separate from final kernel link to expose host ABI issues.
+# Compile with hosted C++ headers because GCC 13 refuses <cmath> in
+# -ffreestanding mode. The resulting objects still use no Linux dynamic
+# linker; unresolved host ABI dependencies must fail the kernel link.
 .PHONY: litehtml-native
 litehtml-native: build/litehtml-native/liblitehtml.a build/ui/litehtml_bridge.o build/lib/cxx_runtime.o
 build/litehtml-native/liblitehtml.a:
