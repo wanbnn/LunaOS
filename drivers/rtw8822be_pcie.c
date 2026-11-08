@@ -27,6 +27,7 @@ static struct {
     WifiClient client;
     uint8_t mac[6];
     unsigned txwp[8], tx_sent, tx_busy, tx_errors;
+    uint32_t diag_tx_mgmt_idx, diag_tx_be_idx, diag_txdma_status;
     unsigned rp, tag, received, dropped, rx_invalid_tag, rx_invalid_packet, rx_c2h;
     unsigned rx_dma_polls, rx_pending, rx_last_index;
     uint32_t diag_cr, diag_rcr, diag_pcictrl, diag_rxfilter;
@@ -468,6 +469,15 @@ void rtw8822be_status(char *out,size_t cap) {
     append(out,"\nWPA2 phase=",cap);number(n,dev.client.station.wpa.phase);append(out,n,cap);
     append(out," WPA2 error=",cap);number(n,(uint32_t)dev.client.station.wpa.error);append(out,n,cap);
     append(out," link=",cap);number(n,wifi_client_link(&dev.client));append(out,n,cap);
+    (void)read32(0x3b0,&dev.diag_tx_mgmt_idx);
+    (void)read32(0x3a8,&dev.diag_tx_be_idx);
+    (void)read32(0x210,&dev.diag_txdma_status);
+    append(out,"\nTX MGMT index=",cap);hex(n,dev.diag_tx_mgmt_idx);append(out,n,cap);
+    append(out," BE index=",cap);hex(n,dev.diag_tx_be_idx);append(out,n,cap);
+    append(out," TXDMA status=",cap);hex(n,dev.diag_txdma_status);append(out,n,cap);
+    append(out,"\nTX ring MGMT wp=",cap);number(n,dev.txwp[2]);append(out,n,cap);
+    append(out," BE wp=",cap);number(n,dev.txwp[4]);append(out,n,cap);
+    append(out," client backpressure=",cap);number(n,dev.client.tx_backpressure);append(out,n,cap);
     append(out,"\nTX frames=",cap);number(n,dev.tx_sent);append(out,n,cap);
     append(out," busy=",cap);number(n,dev.tx_busy);append(out,n,cap);
     append(out," errors=",cap);number(n,dev.tx_errors);append(out,n,cap);
