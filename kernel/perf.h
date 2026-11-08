@@ -13,8 +13,19 @@ typedef struct {
 } PerfSample;
 
 extern PerfSample perf_samples[PERF_COUNT];
+#if __STDC_HOSTED__
+/* Host tests exercise driver logic without a kernel scheduler or CPU accounting. */
+static inline PerfArea perf_enter(PerfArea area) {
+    (void)area;
+    return PERF_NONE;
+}
+static inline void perf_leave(PerfArea previous) {
+    (void)previous;
+}
+#else
 PerfArea perf_enter(PerfArea area);
 void perf_leave(PerfArea previous);
+#endif
 void perf_pause(void);
 void perf_resume(void);
 void perf_status(char *out, size_t capacity);

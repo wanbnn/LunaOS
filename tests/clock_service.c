@@ -2,6 +2,7 @@
 #include "../include/net/sntp.h"
 #include "clock.h"
 #include "luna.h"
+#include "task.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -13,6 +14,18 @@ static bool exists, active;
 static int result = -11;
 static uint8_t packet[48];
 static uint64_t hardware = 1794052800;
+static void (*clock_service)(void);
+static bool clock_save_queued;
+uint32_t task_spawn_service(const char *name, void (*service)(void)) {
+    assert(strcmp(name, "Clock persistence") == 0);
+    clock_service = service;
+    return 1;
+}
+bool task_post(uint32_t pid, AppEvent event) {
+    assert(pid == 1 && event.type == EVENT_SERVICE);
+    clock_save_queued = true;
+    return true;
+}
 File *fs_find(const char *s) {
     (void)s;
     return exists ? &saved : NULL;
@@ -108,6 +121,9 @@ int main(void) {
     clock_poll();
     assert(clock_utc_ms() == target * 1000 + 50);
     assert(strstr(clock_status(), "Synchronized"));
+    assert(clock_save_queued && clock_service);
+    clock_save_queued = false;
+    clock_service();
     clock_sync();
     clock_poll();
     assert(active);
