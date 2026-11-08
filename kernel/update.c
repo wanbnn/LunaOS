@@ -251,7 +251,7 @@ static bool download_package(const char *url, const char *target, bool expect_de
             detail[0] = 0;
             append(detail, "Incomplete or wrong update package.", sizeof(detail));
         }
-        if (strstr(detail, "HTTP status 404.")) return false;
+        if (find(detail, "HTTP status 404.")) return false;
         if (attempt < 2) task_sleep(250u * (attempt + 1u));
     }
     return false;
@@ -319,7 +319,7 @@ void update_run(void) {
         got_delta = downloaded;
         /* Only absent differentials may fall back automatically; do not hide
          * TLS, integrity, or transport errors by switching packages. */
-        if (!downloaded && !strstr(detail, "HTTP status 404.")) {
+        if (!downloaded && !find(detail, "HTTP status 404.")) {
             state("Differential download failed. The system was not changed.",
                   "Falha no download diferencial. O sistema não foi alterado.", 0);
             goto done;
