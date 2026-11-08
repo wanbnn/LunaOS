@@ -643,7 +643,7 @@ static void parse_attributes(WebParser *ps, WebNode *node) {
                     ps->p++;
                 size_t raw_len = (size_t)(ps->p - value_start);
                 size_t decoded_len;
-                value = decode_entities(value_start, raw_len, &decoded_len);
+                value = decode_entities(value_start, raw_len, &decoded_len, true);
             }
         } else {
             value = web_strdup("");
