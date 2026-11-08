@@ -771,7 +771,15 @@ static void parse_end_tag(WebParser *ps) {
     web_free(tag);
 }
 
+#ifdef LUNA_USE_LEXBOR
+/* The Lexbor tokenizer and tree builder are authoritative when enabled. */
+bool web_parse_lexbor(const char *html, size_t len, WebNode **root,
+                      char *error, size_t ecap);
+#endif
 bool web_parse(const char *html, size_t len, WebNode **root, char *error, size_t ecap) {
+#ifdef LUNA_USE_LEXBOR
+    return web_parse_lexbor(html, len, root, error, ecap);
+#else
     WebParser ps;
     memset(&ps, 0, sizeof(ps));
     ps.p = html;
@@ -824,4 +832,5 @@ bool web_parse(const char *html, size_t len, WebNode **root, char *error, size_t
     if (ps.failed && error)
         append(error, "Document structure was truncated.", ecap);
     return !ps.failed;
+#endif
 }
