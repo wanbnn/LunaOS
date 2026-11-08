@@ -175,8 +175,8 @@ static void html_dom_regressions(void) {
     check(!strcmp(value, "A & B"), "title RCDATA decodes entities");
     WebNode *unicode = web_find_by_id(root, "unicode");
     web_node_text(unicode, value, sizeof(value));
-    check(strstr(value, "\\xF0\\x9F\\x98\\x80") != 0 &&
-          strstr(value, "\\xEF\\xBF\\xBD") != 0 &&
+    check(strstr(value, "\xF0\x9F\x98\x80") != 0 &&
+          strstr(value, "\xEF\xBF\xBD") != 0 &&
           strstr(value, "&#xZZ; tail") != 0,
           "numeric entities support supplementary planes and preserve malformed references");
     check(web_find_by_id(root, "next")->parent == web_find_by_id(root, "end")->parent,
