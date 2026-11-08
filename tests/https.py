@@ -180,7 +180,7 @@ try:
         f"wget https://luna.test:{secured.server_port}/text-tools /tmp/tools", "Saved", timeout=60
     )
     g.command("head /tmp/tools", "aaaa")
-    g.command("grep needle /tmp/tools && echo GREP_OK", "\nGREP_OK\n")
+    g.command("grep needle /tmp/tools > /tmp/grep-result && echo GREP_OK", "\nGREP_OK\n")
     g.command("tail /tmp/tools", "line-11\n")
     g.command("mv /tmp/tools /tmp/renamed")
     g.command("cp /tmp/renamed /tmp/copied", timeout=60)
