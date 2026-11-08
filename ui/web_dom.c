@@ -112,6 +112,68 @@ bool web_node_insert_before(WebNode *parent, WebNode *child, WebNode *reference)
     }
     return true;
 }
+/* DOM Core helpers. Shadow roots are separate trees; normal parent links
+ * intentionally do not traverse to their host. */
+WebNode *web_node_root(WebNode *node) {
+    if (!node)
+        return 0;
+    while (node->parent)
+        node = node->parent;
+    return node;
+}
+bool web_node_is_connected(const WebNode *node) {
+    if (!node)
+        return false;
+    while (node->parent)
+        node = node->parent;
+    return node->tag && !strcmp(node->tag, "#document");
+}
+bool web_node_replace_child(WebNode *parent, WebNode *replacement, WebNode *old_child) {
+    if (!parent || !replacement || !old_child || old_child->parent != parent)
+        return false;
+    if (replacement == old_child)
+        return true;
+    if (!web_node_insert_before(parent, replacement, old_child))
+        return false;
+    web_node_detach(old_child);
+    return true;
+}
+/* Merge adjacent text nodes and drop empty text nodes without losing text. */
+void web_node_normalize(WebNode *parent) {
+    if (!parent)
+        return;
+    WebNode *node = parent->first_child;
+    while (node) {
+        if (node->type == WEB_TEXT) {
+            while (node->next && node->next->type == WEB_TEXT) {
+                WebNode *other = node->next;
+                size_t a = node->text ? strlen(node->text) : 0;
+                size_t b = other->text ? strlen(other->text) : 0;
+                char *combined = web_malloc(a + b + 1);
+                if (a)
+                    memcpy(combined, node->text, a);
+                if (b)
+                    memcpy(combined + a, other->text, b);
+                combined[a + b] = 0;
+                web_free(node->text);
+                node->text = combined;
+                web_node_detach(other);
+                web_free_tree(other);
+            }
+            if (!node->text || !node->text[0]) {
+                WebNode *next = node->next;
+                web_node_detach(node);
+                web_free_tree(node);
+                node = next;
+                continue;
+            }
+        } else {
+            web_node_normalize(node);
+        }
+        node = node->next;
+    }
+}
+
 void web_node_append(WebNode *parent, WebNode *child) {
     (void)web_node_insert_before(parent, child, 0);
 }
