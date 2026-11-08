@@ -7,13 +7,21 @@ export PYTHONPATH := $(CURDIR)/.tools/python:$(PYTHONPATH)
 CFLAGS := -m32 -std=gnu11 -O2 -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -fno-asynchronous-unwind-tables -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Ikernel -Ibuild
 UACPI_FLAGS := -Ithird_party/uacpi/include -DUACPI_REDUCED_HARDWARE -DUACPI_DEFAULT_LOG_LEVEL=UACPI_LOG_WARN -DUACPI_DEFAULT_LOOP_TIMEOUT_SECONDS=3 -DUACPI_DEFAULT_MAX_CALL_STACK_DEPTH=64
 UACPI_OBJECTS := $(patsubst third_party/uacpi/source/%.c,build/uacpi/%.o,$(wildcard third_party/uacpi/source/*.c))
-SOURCES := $(wildcard kernel/*.c drivers/*.c lib/*.c ui/*.c apps/*.c net/*.c net/wireless/*.c)
+SOURCES := $(filter-out lib/cxx_glibc_compat.c,$(wildcard kernel/*.c drivers/*.c lib/*.c ui/*.c apps/*.c net/*.c net/wireless/*.c))
 MUSLINC := -nostdinc -isystem third_party/musl/include -isystem third_party/musl/arch/i386 -isystem third_party/musl/arch/generic -isystem third_party/musl/obj/include -isystem $(shell $(CC) -print-file-name=include)
 LIBGCC32 := $(firstword $(wildcard .tools/usr/lib/gcc/*/*/32/libgcc.a /usr/lib/gcc/*/*/32/libgcc.a))
 # Lexbor requires a vendored submodule and a separate 32-bit static build.
 # Lexbor is the default HTML5 backend in LunaOS images; set LUNA_LEXBOR=0
 # explicitly for emergency legacy fallback builds.
 LUNA_LEXBOR ?= 1
+# Optional experimental CSS renderer; never silently claim kernel support.
+# GCC's host libstdc++.a must pass freestanding link checks before enabling.
+LUNA_LITEHTML ?= 0
+LITEHTML_CXX ?= g++
+LITEHTML_CXXFLAGS := -m32 -std=c++17 -Os -fexceptions -frtti -fno-pie -fno-pic -fno-stack-protector -fno-threadsafe-statics -ffunction-sections -fdata-sections -mno-sse -mno-mmx -mfpmath=387 -Iui -Ithird_party/litehtml/include -Ithird_party/litehtml/src
+LITEHTML_LIBSTDCXX := $(shell $(LITEHTML_CXX) -m32 -print-file-name=libstdc++.a)
+LITEHTML_LIBSUPCXX := $(shell $(LITEHTML_CXX) -m32 -print-file-name=libsupc++.a)
+LITEHTML_LIBGCC_EH := $(shell $(LITEHTML_CXX) -m32 -print-file-name=libgcc_eh.a)
 ifeq ($(LUNA_LEXBOR),1)
 CFLAGS += -DLUNA_USE_LEXBOR
 LEXBOR_NATIVE_LIB := build/lexbor-native/liblexbor_static.a
@@ -104,8 +112,33 @@ build/apps/user.o: apps/user.S
 build/kernel/entry.o: kernel/entry.S
 	@mkdir -p $(dir $@)
 	$(CC) -m32 -c $< -o $@
+# The bridge and source library are built as 32-bit freestanding objects.
+# Compile with hosted C++ headers because GCC 13 refuses <cmath> in
+# -ffreestanding mode. The resulting objects still use no Linux dynamic
+# linker; unresolved host ABI dependencies must fail the kernel link.
+.PHONY: litehtml-native
+litehtml-native: build/litehtml-native/liblitehtml.a build/ui/litehtml_bridge.o build/lib/cxx_runtime.o
+build/litehtml-native/liblitehtml.a:
+	@test -f third_party/litehtml/CMakeLists.txt || (echo "Run git submodule update --init --recursive" && exit 1)
+	cmake -S third_party/litehtml -B build/litehtml-native -D CMAKE_C_FLAGS="-m32 -Os -ffreestanding -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -mfpmath=387" -DCMAKE_CXX_FLAGS="$(LITEHTML_CXXFLAGS)" -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY -DLITEHTML_BUILD_TESTING=OFF -DLITEHTML_ENABLE_LINT=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=OFF
+	cmake --build build/litehtml-native --target litehtml --parallel 2
+build/ui/litehtml_bridge.o: ui/litehtml_bridge.cpp ui/litehtml_bridge.h
+	@mkdir -p build/ui
+	$(LITEHTML_CXX) $(LITEHTML_CXXFLAGS) -c $< -o $@
+build/lib/cxx_glibc_compat.o: lib/cxx_glibc_compat.c
+	@mkdir -p build/lib
+	$(CC) $(CFLAGS) $(MUSLINC) -c $< -o $@
+build/lib/cxx_runtime.o: lib/cxx_runtime.cpp
+	@mkdir -p build/lib
+	$(LITEHTML_CXX) $(LITEHTML_CXXFLAGS) -c $< -o $@
+ifeq ($(LUNA_LITEHTML),1)
+CFLAGS += -DLUNA_USE_LITEHTML
+OBJECTS += build/ui/litehtml_bridge.o build/lib/cxx_runtime.o build/lib/cxx_glibc_compat.o
+LITEHTML_LIBS := build/litehtml-native/liblitehtml.a build/litehtml-native/src/gumbo/libgumbo.a $(LITEHTML_LIBSTDCXX) $(LITEHTML_LIBSUPCXX) $(LITEHTML_LIBGCC_EH)
+build/kernel.elf: $(LITEHTML_LIBS)
+endif
 build/kernel.elf: $(OBJECTS) build/libbearssl.a $(LEXBOR_NATIVE_LIB) kernel/link.ld
-	$(LD) -m elf_i386 -T kernel/link.ld --gc-sections -Map build/kernel.map -o $@ $(OBJECTS) build/libbearssl.a $(LEXBOR_NATIVE_LIB) third_party/musl/lib/libc.a $(LIBGCC32)
+	$(LD) -m elf_i386 -T kernel/link.ld --gc-sections -Map build/kernel.map -o $@ $(OBJECTS) build/libbearssl.a $(LEXBOR_NATIVE_LIB) $(LITEHTML_LIBS) third_party/musl/lib/libc.a $(LIBGCC32)
 build/kernel.bin: build/kernel.elf
 	objcopy -O binary $< $@
 
