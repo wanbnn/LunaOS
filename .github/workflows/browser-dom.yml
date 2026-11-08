@@ -34,6 +34,10 @@ jobs:
         run: |
           cmake -S third_party/lexbor -B build/lexbor-host -DLEXBOR_BUILD_SHARED=OFF -DLEXBOR_BUILD_STATIC=ON -DLEXBOR_BUILD_TESTS=OFF -DLEXBOR_BUILD_EXAMPLES=OFF
           cmake --build build/lexbor-host --target lexbor_static --parallel 2
+      - name: Install 32-bit GCC libc development headers for kernel link
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gcc-multilib libc6-dev-i386
       - name: Freestanding 32-bit Lexbor native archive and Luna adapter
         run: |
           make LUNA_LEXBOR=1 lexbor-native
