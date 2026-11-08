@@ -22,6 +22,7 @@ bool net_set_dns(const char *);
 int stream_connect(const char *,unsigned);
 void stream_close(void);
 bool random_bytes(void *p,size_t n) { memset(p,42,n);return true; }
+uint32_t memory_mb = 4096;
 volatile uint32_t ticks,frame_clock;
 static unsigned sends, installs, clears;
 static uint8_t sent[1514], rx[16][1514];

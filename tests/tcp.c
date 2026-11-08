@@ -36,16 +36,18 @@ int heap_release(void *p) {
     }
     return 0;
 }
+uint32_t memory_mb = 4096;
 volatile uint32_t ticks,frame_clock;
 static uint8_t last_tx[1514];
 static unsigned last_bytes, transmitted;
 static bool auto_ack,pending_ack;
+static bool flush_each = true;
 static uint32_t delayed_at;
 static unsigned data_sends,drop_sends,data_sizes[8];
 static uint32_t data_sequences[8];
 static void segment(uint32_t,unsigned,const char *,unsigned);
 void wifi_poll(void) {}
-void task_yield(void) { ticks++;frame_clock+=10; }
+void task_yield(void) { frame_clock++;if(frame_clock%10u==0)ticks++; }
 void fs_abort_write(uint32_t owner) {
     (void)owner;
 }
@@ -66,7 +68,7 @@ int netif_transmit(NetInterface *nic,const uint8_t *p,unsigned n) {
 }
 void netif_poll(NetInterface *nic,uint32_t now,void (*input)(void *,uint8_t *,unsigned),void *ctx) {
     (void)nic;(void)now;(void)input;(void)ctx;
-    if (delayed_at && ticks >= delayed_at) {
+    if (delayed_at && frame_clock >= delayed_at) {
         delayed_at = 0;
         segment(tcp.ack, 0x18, "late", 4);
     }
@@ -76,8 +78,9 @@ static void setup(void) {
     tcp_release();
     http_operation.active = false;
     fail_allocate = false;
-    assert(tcp_resize(TCP_RECEIVE_MAX));
+    assert(tcp_resize(TCP_UNSCALED_MAX));
     tcp.goal = tcp.capacity;
+    tcp.limit = tcp.memory_limit = TCP_UNSCALED_MAX;
     tcp.rto = TCP_RTO_MIN;
     memcpy(local_ip,"\x0a\0\2\x0f",4);memcpy(gateway,"\x0a\0\2\2",4);
     memcpy(netmask,"\xff\xff\xff\0",4);memcpy(tcp.ip,gateway,4);
@@ -91,6 +94,7 @@ static void setup(void) {
     tcp.peer_mss=536;auto_ack=pending_ack=false;data_sends=drop_sends=0;
     last_bytes = transmitted = 0;
     delayed_at = 0;
+    flush_each = true;
 }
 static void segment_options(uint32_t seq,unsigned flags,const char *data,unsigned n,
                             const uint8_t *options,unsigned option_bytes) {
@@ -104,7 +108,9 @@ static void segment_options(uint32_t seq,unsigned flags,const char *data,unsigne
     if(option_bytes) memcpy(p+20,options,option_bytes);
     if(n) memcpy(p+20+option_bytes,data,n);
     uint32_t pseudo=be16(ip+12)+be16(ip+14)+be16(ip+16)+be16(ip+18)+6+20+option_bytes+n;
-    put16(p+16,sum(p,20+option_bytes+n,pseudo));receive(frame,54+option_bytes+n);
+    put16(p + 16, sum(p, 20 + option_bytes + n, pseudo));
+    receive(frame,54+option_bytes+n);
+    if(flush_each)tcp_flush_ack();
 }
 static void segment(uint32_t seq,unsigned flags,const char *data,unsigned n) {
     segment_options(seq,flags,data,n,NULL,0);
@@ -140,8 +146,8 @@ int main(void) {
     setup();segment(99,0x14,NULL,0);assert(tcp.state==2); /* stale RST */
     segment(100,0x14,NULL,0);assert(tcp.state==-1);
     setup();tcp.state=1;send_tcp(2,NULL,0);
-    assert(last_bytes==58 && (last_tx[46]>>4)==6);
-    assert(last_tx[54]==2 && last_tx[55]==4 && be16(last_tx+56)==1200);
+    assert(last_bytes == 74 && (last_tx[46] >> 4) == 10);
+    assert(last_tx[54] == 2 && last_tx[55] == 4 && be16(last_tx + 56) == TCP_MSS);
     assert(!sum(last_tx+14,20,0));
     setup();tcp.state=1;
     const uint8_t mss[]={2,4,0,64};segment_options(99,0x12,NULL,0,mss,sizeof(mss));
@@ -185,7 +191,7 @@ int main(void) {
     setup();
     for (unsigned i = 0; i < 48; i++)
         segment(104 + i, 0x18, "x", 1);
-    delayed_at = ticks + 3000u;
+    delayed_at = frame_clock + 3000u;
     assert(stream_read(out, sizeof(out)) == sizeof(out));
     assert(!memcmp(out, "latexxxxxxxxxxxx", sizeof(out)) && !delayed_at);
     setup();
@@ -228,9 +234,9 @@ int main(void) {
     setup();
     send_tcp(0x10, NULL, 0);
     uint32_t edge = tcp.right_edge;
-    ticks += 4000u;
+    frame_clock += 4000u;
     tcp_tune_receive();
-    assert(tcp.goal < tcp.capacity && tcp.capacity == TCP_RECEIVE_MAX);
+    assert(tcp.goal < tcp.capacity && tcp.capacity == TCP_UNSCALED_MAX);
     send_tcp(0x10, NULL, 0);
     assert(tcp.right_edge == edge);
     char read_buffer[1200];
@@ -240,19 +246,19 @@ int main(void) {
         assert((int32_t)(tcp.right_edge - edge) >= 0);
         edge = tcp.right_edge;
     }
-    assert(tcp.capacity < TCP_RECEIVE_MAX && tcp.used == 0);
+    assert(tcp.capacity < TCP_UNSCALED_MAX && tcp.used == 0);
     /* RFC 6298 estimation, Karn exclusion and capped exponential backoff. */
     setup();
     tcp.sample_active = true;
-    tcp.sample_at = ticks;
+    tcp.sample_at = frame_clock;
     tcp.sample_end = tcp.seq;
-    ticks += 200u;
+    frame_clock += 200u;
     tcp_rtt_ack(tcp.seq);
     assert(tcp.srtt == 200 && tcp.rttvar == 100 && tcp.rto == 1000);
     tcp.sample_active = true;
-    tcp.sample_at = ticks;
+    tcp.sample_at = frame_clock;
     tcp.sample_end = tcp.seq;
-    ticks += 4000u;
+    frame_clock += 4000u;
     tcp_rtt_ack(tcp.seq);
     assert(tcp.srtt == 675 && tcp.rttvar == 1025 && tcp.rto == 4775);
     tcp_backoff();
@@ -266,9 +272,9 @@ int main(void) {
     stream_set_read_policy(200, 500);
     assert(tcp_read_budget() == 500);
     tcp.sample_active = true;
-    tcp.sample_at = ticks;
+    tcp.sample_at = frame_clock;
     tcp.sample_end = tcp.seq;
-    ticks += 1;
+    frame_clock += 1;
     uint32_t old_rto = tcp.rto;
     tcp_rtt_ack(tcp.seq);
     assert(tcp.rto >= TCP_RTO_MIN && tcp.rto < old_rto);
@@ -277,7 +283,7 @@ int main(void) {
     tcp.sample_active = true;
     tcp.sample_at = UINT32_MAX - 49u;
     tcp.sample_end = tcp.seq;
-    ticks = 50;
+    frame_clock = 50;
     tcp_rtt_ack(tcp.seq);
     assert(tcp.srtt == 100);
     /* Total HTTP deadlines expire even with a large TCP RTO and steady data. */
@@ -286,12 +292,12 @@ int main(void) {
     stream_set_read_policy(60000, 60000);
     http_begin(20);
     for (unsigned i = 0; i < 19; i++) {
-        ticks++;
+        frame_clock++;
         tcp.data[0] = 'x';
         tcp.used = 1;
         assert(stream_read(out, 1) == 1);
     }
-    ticks++;
+    frame_clock++;
     tcp.data[0] = 'x';
     tcp.used = 1;
     assert(stream_read(out, 1) < 0 && tcp.used == 1 && tcp.rto == TCP_RTO_MAX);
@@ -307,6 +313,89 @@ int main(void) {
     assert(!network_owner && !http_operation.active);
     stream_close();
     assert(!tcp.data && !tcp.pending && !live_allocations);
+    /* Scaled negotiation, unscaled SYN windows and bounded peer scales. */
+    setup();
+    memory_mb = 4096;
+    tcp_memory_profile();
+    assert(tcp.memory_limit == TCP_RECEIVE_MAX && tcp.scale_offer == 14);
+    tcp.state = 1;
+    send_tcp(2, NULL, 0);
+    assert(be16(last_tx + 48) == TCP_UNSCALED_MAX && last_tx[61] == 14);
+    const uint8_t high_options[] = {2, 4,  5, 180, 1, 3,   3, 20, 1, 1,
+                                    8, 10, 0, 0,   0, 100, 0, 0,  0, 0};
+    segment_options(99, 0x12, NULL, 0, high_options, sizeof(high_options));
+    assert(tcp.state == 2 && tcp.scaled && tcp.scale_rx == 14 && tcp.scale_tx == 14);
+    assert(tcp.limit == TCP_RECEIVE_MAX && tcp.timestamps);
+    assert(tcp.peer_right - tcp.seq == 65535u); /* SYN window is never scaled. */
+    uint8_t timestamp_options[] = {1, 1, 8, 10, 0, 0, 0, 101, 0, 0, 0, 0};
+    segment_options(tcp.ack, 0x10, NULL, 0, timestamp_options, sizeof(timestamp_options));
+    assert(tcp.peer_right - tcp.seq == (65535u << 14));
+    uint32_t old_ack = tcp.ack;
+    unsigned drops = tcp_paws_drops;
+    timestamp_options[7] = 99;
+    segment_options(tcp.ack, 0x18, "x", 1, timestamp_options, sizeof(timestamp_options));
+    assert(tcp.ack == old_ack && tcp_paws_drops == drops + 1u);
+    timestamp_options[7] = 102;
+    segment_options(tcp.ack, 0x18, "x", 1, timestamp_options, sizeof(timestamp_options));
+    assert(tcp.ack == old_ack + 1u && be32(last_tx + 62) == 102u);
+    tcp.ts_recent = UINT32_MAX - 50u;
+    timestamp_options[7] = 25;
+    segment_options(tcp.ack, 0x18, "y", 1, timestamp_options, sizeof(timestamp_options));
+    assert(tcp.ack == old_ack + 2u && tcp.ts_recent == 25);
+    /* A peer omitting WS keeps the normal 16-bit receive limit. */
+    setup();
+    tcp_memory_profile();
+    tcp.state = 1;
+    segment(99, 0x12, NULL, 0);
+    assert(!tcp.scaled && !tcp.timestamps && tcp.limit == TCP_UNSCALED_MAX);
+    /* Large buffers are allocated only on demand and survive circular wrap. */
+    setup();
+    tcp.limit = 8u * 1024 * 1024;
+    tcp.scale_rx = 8;
+    tcp_grow(2600000u);
+    assert(tcp.capacity >= 2600000u && tcp.capacity <= tcp.limit);
+    send_tcp(0x10, NULL, 0);
+    assert(be16(last_tx + 48) > 255u && tcp_granted() <= tcp.capacity);
+    setup();
+    assert(tcp_resize(TCP_RECEIVE_MIN));
+    tcp.goal = tcp.capacity;
+    tcp.head = tcp.capacity - 10u;
+    const char *wrapped_text = "abcdefghijklmnopqrst";
+    segment(tcp.ack, 0x18, wrapped_text, 20);
+    char wrapped_out[32];
+    assert(stream_read(wrapped_out, 20) == 20 && !memcmp(wrapped_out, wrapped_text, 20));
+    assert(tcp.head == 10u);
+    segment(tcp.ack, 0x18, wrapped_text, 20);
+    assert(tcp_resize(32768u));
+    assert(stream_read(wrapped_out, 20) == 20 && !memcmp(wrapped_out, wrapped_text, 20));
+    /* A receive burst emits one cumulative ACK at the poll boundary. */
+    setup();
+    flush_each = false;
+    for (unsigned i = 0; i < 10; i++)
+        segment(tcp.ack, 0x18, "x", 1);
+    assert(!transmitted && tcp.ack_pending);
+    tcp_flush_ack();
+    assert(transmitted == 1);
+    /* Delivery-rate/RTT adaptation can open a multi-megabyte window. */
+    setup();
+    tcp.limit = 16u * 1024 * 1024;
+    tcp.scale_rx = 9;
+    tcp.measured = true;
+    tcp.srtt = 30;
+    tcp.rate_at = frame_clock;
+    tcp.rate_bytes = 2600000u;
+    frame_clock += 30u;
+    tcp_delivery_sample(0);
+    assert(tcp.capacity >= 5200000u);
+    /* 10 Gbps at 30 ms needs 37.5 MB in flight, with headroom for delivery. */
+    tcp.limit = TCP_RECEIVE_MAX;
+    tcp.rate_at = frame_clock;
+    tcp.rate_bytes = 37500000u;
+    frame_clock += 30u;
+    tcp_delivery_sample(0);
+    assert(tcp.capacity >= 75000000u && tcp.capacity <= tcp.limit);
+    stream_close();
+    assert(!live_allocations);
     puts("PASS: TCP overlap, reordering, duplicate suppression, FIN gaps, sequence wrap, RST "
          "validation, MSS, adaptive buffers, memory pressure and RTT timers");
 }

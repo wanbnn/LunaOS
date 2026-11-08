@@ -59,10 +59,11 @@ static struct {
 } time_query;
 static void time_network_poll(void);
 static void time_network_input(const uint8_t [4],const uint8_t *,unsigned);
-#define TCP_MSS 1200u
+#define TCP_MSS 1460u
 #define TCP_RECEIVE_MIN 16384u
-/* The unscaled TCP window field bounds this connection's receive credit. */
-#define TCP_RECEIVE_MAX 65535u
+#define TCP_UNSCALED_MAX 65535u
+#define TCP_RECEIVE_MAX (65535u << 14)
+#define TCP_PAWS_AGE_MS (24u * 24u * 60u * 60u * 1000u)
 #define TCP_RTO_MIN 1000u
 #define TCP_RTO_MAX 60000u
 #define HTTP_IDLE_TIMEOUT_MS 60000u
@@ -82,8 +83,16 @@ static struct {
     uint16_t port, remote_port;
     uint32_t seq, ack, remote_ack;
     char *data;
-    unsigned capacity, goal, used, peer_mss;
-    TcpPending *pending;
+    unsigned capacity, goal, used, head, peer_mss, limit, memory_limit;
+    unsigned scale_offer, scale_rx, scale_tx;
+    bool scaled, timestamps, ack_pending, peer_window_valid;
+    uint32_t ts_recent, ts_recent_at, last_ack_sent;
+    uint32_t peer_right, peer_window_seq, peer_window_ack;
+    uint32_t rate_at;
+    uint64_t rate_bytes;
+    uint32_t received_bytes, receive_at, receive_last;
+    bool receive_started;
+    TcpPending *pending, *pending_tail;
     size_t pending_memory;
     uint32_t right_edge, pressure_at;
     bool window_valid;
@@ -99,16 +108,18 @@ static struct {
 } http_operation;
 static uint32_t http_timeouts;
 static uint32_t tcp_last_srtt, tcp_last_rto, tcp_peak_capacity, tcp_allocation_failures;
+static uint32_t tcp_last_scale, tcp_last_limit, tcp_last_receive_bytes, tcp_last_receive_ms;
+static uint32_t tcp_paws_drops, tcp_ack_frames;
 static bool http_expired(void) {
     if (!http_operation.active || !http_operation.limit ||
-        ticks - http_operation.start < http_operation.limit)
+        frame_clock - http_operation.start < http_operation.limit)
         return false;
     transport_error = "HTTP operation deadline exceeded.";
     return true;
 }
 static void http_begin(uint32_t limit) {
     http_operation.active = true;
-    http_operation.start = ticks;
+    http_operation.start = frame_clock;
     http_operation.limit = limit;
 }
 static int http_end(int result, char *out, char *error, size_t capacity) {
@@ -125,6 +136,10 @@ static uint32_t tcp_rto(void) {
     return tcp.rto ? tcp.rto : TCP_RTO_MIN;
 }
 static void tcp_release(void) {
+    if (tcp.receive_started) {
+        tcp_last_receive_bytes = tcp.received_bytes;
+        tcp_last_receive_ms = tcp.receive_last - tcp.receive_at;
+    }
     while (tcp.pending) {
         TcpPending *next = tcp.pending->next;
         heap_release(tcp.pending);
@@ -133,6 +148,29 @@ static void tcp_release(void) {
     if (tcp.data)
         heap_release(tcp.data);
     memset(&tcp, 0, sizeof(tcp));
+}
+static void tcp_copy_data(void *out, unsigned offset, unsigned bytes) {
+    if (!bytes)
+        return;
+    unsigned position = (tcp.head + offset) % tcp.capacity;
+    unsigned first = tcp.capacity - position;
+    if (first > bytes)
+        first = bytes;
+    memcpy(out, tcp.data + position, first);
+    if (bytes > first)
+        memcpy((uint8_t *)out + first, tcp.data, bytes - first);
+}
+static void tcp_memory_profile(void) {
+    uint64_t budget = ((uint64_t)memory_mb << 20) / 4u;
+    if (budget < TCP_RECEIVE_MIN)
+        budget = TCP_RECEIVE_MIN;
+    if (budget > TCP_RECEIVE_MAX)
+        budget = TCP_RECEIVE_MAX;
+    tcp.memory_limit = tcp.limit = (unsigned)budget;
+    tcp.scale_offer = 0;
+    while ((tcp.memory_limit >> tcp.scale_offer) > 65535u && tcp.scale_offer < 14u)
+        tcp.scale_offer++;
+    tcp_last_limit = tcp.memory_limit;
 }
 static bool tcp_resize(unsigned capacity) {
     char *data = heap_allocate_owned((size_t)capacity + 1u, 1);
@@ -143,19 +181,60 @@ static bool tcp_resize(unsigned capacity) {
     if (capacity > tcp_peak_capacity)
         tcp_peak_capacity = capacity;
     if (tcp.used)
-        memcpy(data, tcp.data, tcp.used);
+        tcp_copy_data(data, 0, tcp.used);
     data[tcp.used] = 0;
     if (tcp.data)
         heap_release(tcp.data);
     tcp.data = data;
+    tcp.head = 0;
     tcp.capacity = capacity;
     return true;
+}
+static void tcp_grow(unsigned desired) {
+    unsigned limit = tcp.limit ? tcp.limit : TCP_UNSCALED_MAX;
+    if (desired > limit)
+        desired = limit;
+    if (desired <= tcp.capacity) {
+        if (desired > tcp.goal)
+            tcp.goal = desired;
+        return;
+    }
+    unsigned capacity = tcp.capacity ? tcp.capacity : TCP_RECEIVE_MIN;
+    while (capacity < desired) {
+        if (capacity > limit / 2u) {
+            capacity = limit;
+            break;
+        }
+        capacity *= 2u;
+    }
+    if (tcp_resize(capacity))
+        tcp.goal = capacity;
+}
+static void tcp_delivery_sample(unsigned bytes) {
+    if (!tcp.rate_at)
+        tcp.rate_at = frame_clock;
+    tcp.rate_bytes += bytes;
+    uint32_t elapsed = frame_clock - tcp.rate_at;
+    uint32_t interval = tcp.measured ? tcp.srtt : 10u;
+    if (interval < 10u)
+        interval = 10u;
+    if (elapsed < interval)
+        return;
+    uint64_t target =
+        (uint64_t)tcp.rate_bytes * (tcp.measured ? tcp.srtt : interval) * 2u / elapsed;
+    target += 4u * TCP_MSS;
+    if (target > tcp.goal) {
+        tcp.pressure_at = frame_clock;
+        tcp_grow(target > TCP_RECEIVE_MAX ? TCP_RECEIVE_MAX : (unsigned)target);
+    }
+    tcp.rate_at = frame_clock;
+    tcp.rate_bytes = 0;
 }
 static void tcp_rtt_ack(uint32_t ack) {
     if (!tcp.sample_active || (int32_t)(ack - tcp.sample_end) < 0)
         return;
     tcp.sample_active = false;
-    uint32_t sample = ticks - tcp.sample_at;
+    uint32_t sample = frame_clock - tcp.sample_at;
     if (!sample)
         sample = 1;
     if (sample > TCP_RTO_MAX)
@@ -202,12 +281,14 @@ static void tcp_tune_receive(void) {
         quiet = 2000u;
     if (tcp.pending)
         return;
-    if (ticks - tcp.pressure_at >= quiet && tcp.used <= tcp.goal / 4u &&
-        tcp.goal > TCP_RECEIVE_MIN) {
+    unsigned minimum = 2u * (1u << tcp.scale_rx);
+    if (minimum < TCP_RECEIVE_MIN)
+        minimum = TCP_RECEIVE_MIN;
+    if (frame_clock - tcp.pressure_at >= quiet && tcp.used <= tcp.goal / 4u && tcp.goal > minimum) {
         tcp.goal /= 2u;
-        if (tcp.goal < TCP_RECEIVE_MIN)
-            tcp.goal = TCP_RECEIVE_MIN;
-        tcp.pressure_at = ticks;
+        if (tcp.goal < minimum)
+            tcp.goal = minimum;
+        tcp.pressure_at = frame_clock;
     }
     /* Previously granted bytes remain valid until consumed. Defer physical
      * shrinking until the peer's outstanding credit fits the smaller buffer. */
@@ -354,8 +435,8 @@ static void send_ip(const uint8_t *dest, int proto, const uint8_t *payload, unsi
     }
 }
 static void send_tcp(int flags, const char *data, unsigned n) {
-    uint8_t p[1460];
-    unsigned header=(flags&2) ? 24 : 20;
+    uint8_t p[1480];
+    unsigned header = (flags & 2) ? 40u : tcp.timestamps ? 32u : 20u;
     memset(p, 0, header);
     put16(p, tcp.port);
     put16(p + 2, tcp.remote_port);
@@ -363,18 +444,49 @@ static void send_tcp(int flags, const char *data, unsigned n) {
     put32(p + 8, tcp.ack);
     p[12] = (header/4)<<4;
     p[13] = flags;
-    unsigned window = tcp_window();
+    unsigned shift = (flags & 2) ? 0u : tcp.scale_rx;
+    unsigned window = tcp_window() >> shift;
+    if (window > 65535u)
+        window = 65535u;
     put16(p + 14, window);
     if (!(flags & 2) && tcp.state >= 2) {
-        tcp.right_edge = tcp.ack + window;
+        uint32_t edge = tcp.ack + (window << shift);
+        if (!tcp.window_valid || (int32_t)(edge - tcp.right_edge) > 0)
+            tcp.right_edge = edge;
         tcp.window_valid = true;
+        tcp.last_ack_sent = tcp.ack;
+        tcp.ack_pending = false;
+        tcp_ack_frames++;
     }
-    if(flags&2) { p[20]=2;p[21]=4;put16(p+22,TCP_MSS); }
+    if (flags & 2) {
+        p[20] = 2;
+        p[21] = 4;
+        put16(p + 22, TCP_MSS);
+        p[24] = 1;
+        p[25] = 3;
+        p[26] = 3;
+        p[27] = tcp.scale_offer;
+        p[28] = p[29] = 1;
+        p[30] = 8;
+        p[31] = 10;
+        put32(p + 32, frame_clock);
+        put32(p + 36, 0);
+    } else if (tcp.timestamps) {
+        p[20] = p[21] = 1;
+        p[22] = 8;
+        p[23] = 10;
+        put32(p + 24, frame_clock);
+        put32(p + 28, tcp.ts_recent);
+    }
     if (n)
         memcpy(p + header, data, n);
     uint32_t s = be16(local_ip) + be16(local_ip + 2) + be16(tcp.ip) + be16(tcp.ip + 2) + 6 + header + n;
     put16(p + 16, sum(p, header + n, s));
     send_ip(tcp.ip, 6, p, header + n);
+}
+static void tcp_flush_ack(void) {
+    if (tcp.ack_pending)
+        send_tcp(0x10, NULL, 0);
 }
 /* Consume only the contiguous suffix of a segment, trimming retransmitted
  * prefixes. Comparisons use signed differences to survive sequence wrap. */
@@ -387,19 +499,27 @@ static bool tcp_contiguous(uint32_t seq,const uint8_t *data,unsigned bytes,bool 
     if (fresh > tcp.capacity - tcp.used)
         return false;
     if (fresh && tcp.used + fresh > tcp.goal / 2u) {
-        tcp.pressure_at = ticks;
+        tcp.pressure_at = frame_clock;
         tcp.goal = tcp.capacity;
-        if (tcp.used + fresh > tcp.capacity / 2u && tcp.capacity < TCP_RECEIVE_MAX) {
-            unsigned capacity = tcp.capacity * 2u;
-            if (capacity > TCP_RECEIVE_MAX)
-                capacity = TCP_RECEIVE_MAX;
-            if (tcp_resize(capacity))
-                tcp.goal = capacity;
-        }
+        if (tcp.used + fresh > tcp.capacity / 2u)
+            tcp_grow(tcp.capacity > TCP_RECEIVE_MAX / 2u ? TCP_RECEIVE_MAX : tcp.capacity * 2u);
     }
     if(fresh) {
-        memcpy(tcp.data+tcp.used,data+skip,fresh);
-        tcp.used+=fresh;tcp.ack+=fresh;tcp.data[tcp.used]=0;
+        unsigned tail = (tcp.head + tcp.used) % tcp.capacity;
+        unsigned first = tcp.capacity - tail;
+        if (first > fresh)
+            first = fresh;
+        memcpy(tcp.data + tail, data + skip, first);
+        if (fresh > first)
+            memcpy(tcp.data, data + skip + first, fresh - first);
+        tcp.used += fresh;
+        tcp.ack += fresh;
+        if (!tcp.receive_started) {
+            tcp.receive_started = true;
+            tcp.receive_at = frame_clock;
+        }
+        tcp.received_bytes += fresh;
+        tcp.receive_last = frame_clock;
     } else if(bytes) tcp_duplicates++;
     if(fin && end==tcp.ack) {
         tcp.ack++;send_tcp(0x11,NULL,0);tcp.seq++;tcp.state=3;
@@ -412,6 +532,8 @@ static void tcp_drain_pending(void) {
         if (!tcp_contiguous(packet->seq, packet->data, packet->bytes, packet->fin))
             break;
         tcp.pending = packet->next;
+        if (!tcp.pending)
+            tcp.pending_tail = NULL;
         tcp.pending_memory -= sizeof(*packet) + packet->bytes;
         heap_release(packet);
     }
@@ -425,6 +547,8 @@ static void tcp_payload(uint32_t seq,const uint8_t *data,unsigned bytes,bool fin
         unsigned window = tcp.window_valid ? tcp_granted() : tcp.capacity - tcp.used;
         if(bytes<=1460 && gap<window && bytes<=window-gap) {
             TcpPending **link = &tcp.pending;
+            if (tcp.pending_tail && (int32_t)(seq - tcp.pending_tail->seq) > 0)
+                link = &tcp.pending_tail->next;
             while (*link && (int32_t)((*link)->seq - seq) <= 0) {
                 if ((*link)->seq == seq && (*link)->bytes == bytes && (*link)->fin == fin) {
                     tcp_duplicates++;
@@ -441,6 +565,8 @@ static void tcp_payload(uint32_t seq,const uint8_t *data,unsigned bytes,bool fin
                     if (bytes)
                         memcpy(packet->data, data, bytes);
                     *link = packet;
+                    if (!packet->next)
+                        tcp.pending_tail = packet;
                     tcp.pending_memory += allocation;
                     send_tcp(0x10, NULL, 0);
                     return;
@@ -450,8 +576,12 @@ static void tcp_payload(uint32_t seq,const uint8_t *data,unsigned bytes,bool fin
         }
         tcp_queue_drops++;
     }
-    if (bytes || fin)
-        send_tcp(0x10, NULL, 0);
+    if (bytes || fin) {
+        if ((int32_t)(seq - tcp.ack) > 0 || fin)
+            send_tcp(0x10, NULL, 0);
+        else
+            tcp.ack_pending = true;
+    }
 }
 static int skip_name(const uint8_t *p, int n, int pos) {
     for (int k = 0; k < 128 && pos < n; k++) {
@@ -498,6 +628,43 @@ static void dns_receive(const uint8_t *p, int n) {
         }
         pos += len;
     }
+}
+typedef struct {
+    unsigned mss, scale;
+    bool has_scale, has_time;
+    uint32_t timestamp;
+} TcpOptions;
+static bool tcp_options(const uint8_t *data, unsigned header, TcpOptions *options) {
+    *options = (TcpOptions){.mss = 536};
+    for (unsigned i = 20; i < header;) {
+        unsigned kind = data[i++];
+        if (!kind)
+            break;
+        if (kind == 1)
+            continue;
+        if (i >= header || data[i] < 2 || data[i] > header - i + 1)
+            return false;
+        unsigned count = data[i++];
+        if (kind == 2) {
+            if (count != 4 || !be16(data + i))
+                return false;
+            options->mss = be16(data + i);
+        }
+        if (kind == 3) {
+            if (count != 3 || options->has_scale)
+                return false;
+            options->has_scale = true;
+            options->scale = data[i] > 14 ? 14 : data[i];
+        }
+        if (kind == 8) {
+            if (count != 10 || options->has_time)
+                return false;
+            options->has_time = true;
+            options->timestamp = be32(data + i);
+        }
+        i += count - 2u;
+    }
+    return true;
 }
 static void receive(uint8_t *p, unsigned n) {
     if (n < 14)
@@ -589,14 +756,25 @@ static void receive(uint8_t *p, unsigned n) {
         return;
     }
     if (tcp.state == 1 && (flags & 0x12) == 0x12 && ack == tcp.seq + 1) {
-        tcp.peer_mss=536; /* IPv4 default when the peer omits MSS. */
-        for(unsigned i=20;i<th;) {
-            unsigned kind=d[i++];if(!kind) break;if(kind==1) continue;
-            if(i>=th || d[i]<2 || d[i]>th-i+1) return;
-            unsigned count=d[i++];
-            if(kind==2 && count==4) { unsigned mss=be16(d+i);if(!mss) return;tcp.peer_mss=mss; }
-            i+=count-2;
-        }
+        TcpOptions options;
+        if (!tcp_options(d, th, &options))
+            return;
+        tcp.peer_mss = options.mss;
+        tcp.scaled = options.has_scale;
+        tcp.scale_rx = options.has_scale ? tcp.scale_offer : 0;
+        tcp.scale_tx = options.has_scale ? options.scale : 0;
+        tcp.limit = options.has_scale ? tcp.memory_limit : TCP_UNSCALED_MAX;
+        if (!tcp.limit)
+            tcp.limit = TCP_UNSCALED_MAX;
+        tcp_last_scale = tcp.scale_rx;
+        tcp_last_limit = tcp.limit;
+        tcp.timestamps = options.has_time;
+        tcp.ts_recent = options.timestamp;
+        tcp.ts_recent_at = frame_clock;
+        tcp.peer_right = ack + be16(d + 14);
+        tcp.peer_window_valid = true;
+        tcp.peer_window_seq = seq;
+        tcp.peer_window_ack = ack;
         tcp.seq++;
         tcp.remote_ack=ack;
         tcp_rtt_ack(ack);
@@ -607,10 +785,32 @@ static void receive(uint8_t *p, unsigned n) {
     }
     if (tcp.state < 2)
         return;
+    TcpOptions options;
+    if (!tcp_options(d, th, &options))
+        return;
+    if (tcp.timestamps) {
+        if (!options.has_time || ((int32_t)(options.timestamp - tcp.ts_recent) < 0 &&
+                                  frame_clock - tcp.ts_recent_at < TCP_PAWS_AGE_MS)) {
+            tcp_paws_drops++;
+            send_tcp(0x10, NULL, 0);
+            return;
+        }
+        if ((int32_t)(seq - tcp.last_ack_sent) <= 0) {
+            tcp.ts_recent = options.timestamp;
+            tcp.ts_recent_at = frame_clock;
+        }
+    }
     if(!(flags&0x10) || (int32_t)(ack-tcp.seq)>0) {send_tcp(0x10,NULL,0);return;}
     if ((int32_t)(ack - tcp.remote_ack) > 0) {
         tcp.remote_ack = ack;
         tcp_rtt_ack(ack);
+    }
+    if (!tcp.peer_window_valid || (int32_t)(seq - tcp.peer_window_seq) > 0 ||
+        (seq == tcp.peer_window_seq && (int32_t)(ack - tcp.peer_window_ack) >= 0)) {
+        tcp.peer_right = ack + ((uint32_t)be16(d + 14) << tcp.scale_tx);
+        tcp.peer_window_seq = seq;
+        tcp.peer_window_ack = ack;
+        tcp.peer_window_valid = true;
     }
     unsigned bytes = len - th;
     tcp_payload(seq,d+th,bytes,(flags&1)!=0);
@@ -677,6 +877,7 @@ void net_poll(void) {
             net_ready=true;
         } else { net_ready=false; gateway_known=peer_known=false; pending_bytes=0; tcp.state=0; dns_cache.valid=false; }
         time_network_poll();
+        tcp_flush_ack();
         return;
     }
     if (!net_ready) {
@@ -705,6 +906,7 @@ void net_poll(void) {
         outw(io + 0x38, rxpos - 16);
     }
     outw(io + 0x3e, 0xffff);
+    tcp_flush_ack();
     time_network_poll();
 }
 void net_init(void) {
@@ -795,6 +997,18 @@ void net_status(char *out, size_t cap) {
             char value[16];
             number(value, adaptive[i]);
             append(out, adaptive_fields[i], cap);
+            append(out, value, cap);
+            append(out, "\n", cap);
+        }
+        const uint32_t scaled[] = {tcp_last_scale,      tcp_last_limit, tcp_last_receive_bytes,
+                                   tcp_last_receive_ms, tcp_paws_drops, tcp_ack_frames};
+        const char *scaled_fields[] = {
+            "TCP receive scale: ",   "TCP receive budget bytes: ", "TCP last receive bytes: ",
+            "TCP last receive ms: ", "TCP timestamp drops: ",      "TCP ACK frames: "};
+        for (unsigned i = 0; i < 6; i++) {
+            char value[16];
+            number(value, scaled[i]);
+            append(out, scaled_fields[i], cap);
             append(out, value, cap);
             append(out, "\n", cap);
         }
@@ -1101,28 +1315,32 @@ int stream_connect(const char *host, unsigned port) {
         connect_error = transport_error;
         return -1;
     }
-    if (!tcp_resize(TCP_RECEIVE_MIN)) {
+    tcp_memory_profile();
+    unsigned initial = 2u * (1u << tcp.scale_offer);
+    if (initial < TCP_RECEIVE_MIN)
+        initial = TCP_RECEIVE_MIN;
+    if (!tcp_resize(initial)) {
         connect_error = "Insufficient memory for TCP receive buffer.";
         return -1;
     }
     tcp.goal = tcp.capacity;
     tcp.rto = TCP_RTO_MIN;
-    tcp.pressure_at = ticks;
+    tcp.pressure_at = frame_clock;
     memcpy(tcp.ip, ip, 4);
     tcp.port = 40000 + (++connections % 20000);
     tcp.remote_port = port;
-    tcp.seq = ticks * 7919 + connections*65537u + 1000;
+    tcp.seq = frame_clock * 7919 + connections*65537u + 1000;
     tcp.peer_mss=536;
     transport_error="TCP connecting.";
     tcp.state = 1;
     for (int attempt = 0; attempt < 3 && tcp.state == 1; attempt++) {
         tcp_syns++;
         tcp.sample_active = attempt == 0;
-        tcp.sample_at = ticks;
+        tcp.sample_at = frame_clock;
         tcp.sample_end = tcp.seq + 1u;
         send_tcp(2, 0, 0);
-        uint32_t start = ticks;
-        while (tcp.state == 1 && ticks - start < tcp_rto()) {
+        uint32_t start = frame_clock;
+        while (tcp.state == 1 && frame_clock - start < tcp_rto()) {
             net_poll();
             if (http_expired()) {
                 connect_error = transport_error;
@@ -1155,8 +1373,16 @@ int stream_write(const void *data, unsigned n) {
         if (http_expired())
             return -1;
         unsigned chunk = n - total;
-        if (chunk > TCP_MSS) chunk=TCP_MSS;
+        unsigned maximum = tcp.timestamps ? 1448u : TCP_MSS;
+        if (chunk > maximum)
+            chunk = maximum;
         if (chunk > tcp.peer_mss) chunk=tcp.peer_mss;
+        if (tcp.peer_window_valid) {
+            unsigned credit =
+                (int32_t)(tcp.peer_right - tcp.seq) > 0 ? tcp.peer_right - tcp.seq : 0;
+            if (chunk > credit)
+                chunk = credit ? credit : 1u;
+        }
         uint32_t seq = tcp.seq, next = seq + chunk;
         bool acked = false;
         for (int attempt = 0; attempt < 5 && !acked; attempt++) {
@@ -1164,12 +1390,12 @@ int stream_write(const void *data, unsigned n) {
                 return -1;
             tcp.seq = seq;
             tcp.sample_active = attempt == 0;
-            tcp.sample_at = ticks;
+            tcp.sample_at = frame_clock;
             tcp.sample_end = next;
             send_tcp(0x18, p + total, chunk);
             tcp.seq = next;
-            uint32_t start = ticks;
-            while (ticks - start < tcp_rto()) {
+            uint32_t start = frame_clock;
+            while (frame_clock - start < tcp_rto()) {
                 net_poll();
                 if (http_expired())
                     return -1;
@@ -1195,7 +1421,7 @@ int stream_write(const void *data, unsigned n) {
 int stream_read(void *out, unsigned n) {
     if (!n)
         return 0;
-    uint32_t start = ticks, last_ack = ticks, probe_wait = tcp_rto();
+    uint32_t start = frame_clock, last_ack = frame_clock, probe_wait = tcp_rto();
     if (http_expired())
         return -1;
     while (!tcp.used) {
@@ -1214,7 +1440,7 @@ int stream_read(void *out, unsigned n) {
             if(tcp.state!=-1) transport_error="Network link or IPv4 configuration lost.";
             return -1;
         }
-        if (ticks - start > tcp_read_budget()) {
+        if (frame_clock - start > tcp_read_budget()) {
             if (http_operation.active) {
                 http_timeouts++;
                 transport_error = "HTTP response idle timeout.";
@@ -1224,9 +1450,9 @@ int stream_read(void *out, unsigned n) {
             }
             return -1;
         }
-        if (ticks - last_ack >= probe_wait) {
+        if (frame_clock - last_ack >= probe_wait) {
             send_tcp(0x10, NULL, 0);
-            last_ack = ticks;
+            last_ack = frame_clock;
             if (probe_wait < TCP_RTO_MAX)
                 probe_wait = probe_wait > TCP_RTO_MAX / 2u ? TCP_RTO_MAX : probe_wait * 2u;
         }
@@ -1234,12 +1460,16 @@ int stream_read(void *out, unsigned n) {
     }
     if (n > tcp.used)
         n = tcp.used;
-    memcpy(out, tcp.data, n);
+    tcp_copy_data(out, 0, n);
+    tcp.head = (tcp.head + n) % tcp.capacity;
     tcp.used -= n;
-    memmove(tcp.data, tcp.data + n, tcp.used);
+    tcp_delivery_sample(n);
     tcp_drain_pending();
     tcp_tune_receive();
-    send_tcp(0x10, 0, 0);
+    unsigned window = tcp_window() >> tcp.scale_rx;
+    unsigned granted = tcp_granted() >> tcp.scale_rx;
+    if (tcp.ack_pending || window > granted)
+        send_tcp(0x10, NULL, 0);
     return n;
 }
 void stream_close(void) {

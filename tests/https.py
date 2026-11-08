@@ -244,7 +244,9 @@ try:
                 metrics[name] = int(value)
     assert metrics["TCP receive buffer bytes"] == 0, metrics
     assert metrics["TCP reorder memory bytes"] == 0, metrics
-    assert 16384 < metrics["TCP peak buffer bytes"] <= 65535, metrics
+    assert 16384 < metrics["TCP peak buffer bytes"] <= metrics["TCP receive budget bytes"], metrics
+    if not metrics["TCP receive scale"]:
+        assert metrics["TCP peak buffer bytes"] <= 65535, metrics
     assert 1000 <= metrics["TCP RTO ms"] <= 60000, metrics
     g.command("js \"[1,2,3].map(x=>x*2).join(',')\"", "2,4,6")
     g.command('js "123n ** 3n"', "1860867")
