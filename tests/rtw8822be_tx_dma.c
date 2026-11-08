@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "../drivers/rtw8822be_pcie.c"
-static uint8_t descriptors[8*TX_RING_STRIDE], frames[8192];
+static uint8_t descriptors[8*TX_RING_STRIDE], frames[2*TX_RING_COUNT*2048u];
 static unsigned mgmt_wp,be_wp,mgmt_rp,be_rp;
 int drv_mmio_read(DrvMmio *m,uint32_t reg,unsigned width,uint32_t *v) {
     (void)m;assert(width==4 && (reg==0x3b0 || reg==0x3a8));
@@ -10,7 +10,7 @@ int drv_mmio_read(DrvMmio *m,uint32_t reg,unsigned width,uint32_t *v) {
     return 0;
 }
 int drv_mmio_write(DrvMmio *m,uint32_t reg,unsigned width,uint32_t v) {
-    (void)m;assert(width==2 && (reg==0x3b0 || reg==0x3a8) && v<2);
+    (void)m;assert(width==2 && (reg==0x3b0 || reg==0x3a8) && v<TX_RING_COUNT);
     if(reg==0x3b0)mgmt_wp=v;else be_wp=v;
     return 0;
 }
@@ -24,13 +24,16 @@ int main(void) {
     uint8_t *bd=descriptors+2*TX_RING_STRIDE;
     assert(bd[0]==48 && bd[2]==1 && bd[8]==30);
     assert(frames[48]==0xb0);
+    for(unsigned i=1;i<TX_RING_COUNT-1;i++)
+        assert(!tx_mpdu(NULL,mpdu,sizeof(mpdu),true));
+    assert(mgmt_wp==TX_RING_COUNT-1 && dev.tx_sent==TX_RING_COUNT-1);
     assert(tx_mpdu(NULL,mpdu,sizeof(mpdu),true)==-16);
-    assert(dev.tx_busy==1 && mgmt_wp==1);
+    assert(dev.tx_busy==1 && mgmt_wp==TX_RING_COUNT-1);
     mgmt_rp=1;
     assert(!tx_mpdu(NULL,mpdu,sizeof(mpdu),true));
-    assert(mgmt_wp==0 && dev.tx_sent==2);
+    assert(mgmt_wp==0 && dev.tx_sent==TX_RING_COUNT);
     mpdu[0]=8;assert(!tx_mpdu(NULL,mpdu,sizeof(mpdu),false));
-    assert(be_wp==1 && dev.tx_sent==3);
+    assert(be_wp==1 && dev.tx_sent==TX_RING_COUNT+1);
     assert(descriptors[4*TX_RING_STRIDE+8]==30);
     puts("PASS: distinct MGMT/BE PCIe DMA rings, descriptor layout and TX backpressure");
 }
