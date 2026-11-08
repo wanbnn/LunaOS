@@ -436,12 +436,12 @@ static JSValue element_setter(JSContext *ctx, JSValueConst this_val, JSValueCons
             char error[128];
             if (web_parse(buffer, (size_t)strlen(buffer), &parsed, error, sizeof(error)) &&
                 parsed) {
-                for (WebNode *child = parsed->first_child; child;) {
-                    WebNode *next = child->next;
-                    child->parent = 0;
-                    child->next = child->prev = 0;
+                while (parsed->first_child) {
+                    WebNode *child = parsed->first_child;
+                    /* Detach from the temporary document before ownership
+                     * moves: otherwise freeing parsed frees inserted nodes. */
+                    web_node_detach(child);
                     web_node_append(node, child);
-                    child = next;
                 }
                 web_free_tree(parsed);
             }
