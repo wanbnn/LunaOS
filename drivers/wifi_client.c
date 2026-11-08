@@ -198,6 +198,7 @@ void wifi_client_poll(WifiClient *c) {
             if(u16(f+24) || u16(f+26)!=2) continue;
             unsigned status=u16(f+28);
             if(status) {fail(c,-(int)status);return;}
+            c->attempts=0;
             rc=assoc(c);if(rc) fail(c,rc);
             return;
         }
