@@ -2022,9 +2022,10 @@ bool net_https_stream(const char *url, NetHttpsSink sink, void *context, uint64_
         bool secure = false;
         if (http_open(current, &secure, error, ecap) < 0 || !secure)
             goto done;
-        HttpInput input = {.read = download_read, .context = (void *)(uintptr_t)1};
+        static HttpInput update_https_input;
+        update_https_input = (HttpInput){.read = download_read, .context = (void *)(uintptr_t)1};
         HttpReply reply;
-        if (!http_stream_headers(&input, &reply, error, ecap)) goto done;
+        if (!http_stream_headers(&update_https_input, &reply, error, ecap)) goto done;
         if (reply.status >= 300 && reply.status < 400) {
             stream_close();
             char next[4096];
@@ -2044,7 +2045,7 @@ bool net_https_stream(const char *url, NetHttpsSink sink, void *context, uint64_
             append(error, ".", ecap);
             goto done;
         }
-        if (!http_stream_body(&input, &reply, sink, context, written, error, ecap))
+        if (!http_stream_body(&update_https_input, &reply, sink, context, written, error, ecap))
             goto done;
         if (!reply.chunked && !reply.have_length && tls_error() && tls_error() != 31) {
             append(error, "Incomplete authenticated HTTPS body.", ecap);
