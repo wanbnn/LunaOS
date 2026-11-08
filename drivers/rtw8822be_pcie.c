@@ -31,6 +31,9 @@ static struct {
     unsigned txwp[8], tx_sent, tx_busy, tx_errors;
     uint32_t diag_tx_mgmt_idx, diag_tx_be_idx, diag_txdma_status;
     uint32_t diag_tx_mgmt_base, diag_tx_mgmt_count, diag_tx_pause, diag_tx_offset;
+    uint32_t tx_mgmt_last_rp, tx_mgmt_stall_at, tx_mgmt_rekicks, tx_mgmt_rekick_error;
+    uint32_t tx_mgmt_last_bd0, tx_mgmt_last_bd1, tx_mgmt_last_desc0;
+    bool tx_mgmt_tracking;
     unsigned rp, tag, received, dropped, rx_invalid_tag, rx_invalid_packet, rx_c2h;
     unsigned rx_dma_polls, rx_pending, rx_last_index;
     uint32_t diag_cr, diag_rcr, diag_pcictrl, diag_rxfilter;
@@ -96,6 +99,9 @@ static int rings(void) {
     if(rc) return rc;
     dev.rp=dev.tag=0;
     memset(dev.txwp,0,sizeof(dev.txwp));
+    dev.tx_mgmt_tracking=false;
+    dev.tx_mgmt_stall_at=dev.tx_mgmt_last_rp=0;
+    dev.tx_mgmt_rekicks=dev.tx_mgmt_rekick_error=0;
     memset(dev.txbd.cpu,0,dev.txbd.size);
     for(unsigned i=0;i<RX_COUNT;i++) arm_rx(i);
     static const uint32_t bases[]={0x308,0x1320,0x310,0x330,0x328,0x320,0x318,0x340};
@@ -268,6 +274,20 @@ static int tx_mpdu(void *ctx,const uint8_t *mpdu,unsigned n,bool mgmt) {
     rc=write(idxreg,2,next);
     if(rc) {dev.tx_errors++;return rc;}
     dev.txwp[queue]=next;
+    if(mgmt) {
+        if(!dev.tx_mgmt_tracking) {
+            dev.tx_mgmt_tracking=true;
+            dev.tx_mgmt_last_rp=rp;
+            dev.tx_mgmt_stall_at=drv_now_ms();
+            dev.tx_mgmt_rekicks=0;
+        }
+        dev.tx_mgmt_last_bd0=((uint32_t)bd[3]<<24)|((uint32_t)bd[2]<<16)|
+                             ((uint32_t)bd[1]<<8)|bd[0];
+        dev.tx_mgmt_last_bd1=((uint32_t)bd[7]<<24)|((uint32_t)bd[6]<<16)|
+                             ((uint32_t)bd[5]<<8)|bd[4];
+        dev.tx_mgmt_last_desc0=((uint32_t)pkt[3]<<24)|((uint32_t)pkt[2]<<16)|
+                               ((uint32_t)pkt[1]<<8)|pkt[0];
+    }
     dev.tx_sent++;
     return 0;
 }
@@ -293,6 +313,8 @@ static int station_connect(void *ctx,const WifiAp *ap,const char *pass,
     (void)ctx;
     if(!dev.ready || !ap) return DRV_EIO;
     if(dev.client.stage!=WIFI_CLIENT_IDLE) return -16;
+    dev.tx_mgmt_tracking=false;
+    dev.tx_mgmt_rekicks=0;
     /* Block unsupported channels before any TX is queued. */
     if(ap->channel<1 || (ap->channel>11 && ap->channel!=36 &&
        ap->channel!=40 && ap->channel!=44 && ap->channel!=48)) return -95;
@@ -310,8 +332,37 @@ static WifiLink station_link(void *ctx) {
 static int station_error(void *ctx) {
     (void)ctx;return dev.client.error;
 }
+/* A stalled PCIe MGMT TX ring should normally consume descriptors within
+ * milliseconds. Re-kick the SAME producer index at most twice per connection,
+ * following the bounded queue kick used by upstream rtw88 recovery proposals.
+ * Never clear indices, reuse DMA slots, or mutate queued packets here. */
+static void mgmt_tx_watchdog(void) {
+    if(!dev.ready || !dev.tx_mgmt_tracking || !dev.client.stage) return;
+    uint32_t idx=0;
+    if(read32(0x3b0,&idx)) return;
+    unsigned rp=(idx>>16)&0xfffu;
+    if(rp>=TX_RING_COUNT) return;
+    uint32_t ms=drv_now_ms();
+    if(rp!=dev.tx_mgmt_last_rp) {
+        dev.tx_mgmt_last_rp=rp;
+        dev.tx_mgmt_stall_at=ms;
+        dev.tx_mgmt_rekicks=0;
+    }
+    if(rp==dev.txwp[2]) {
+        dev.tx_mgmt_tracking=false;
+        return;
+    }
+    if((uint32_t)(ms-dev.tx_mgmt_stall_at)<750 || dev.tx_mgmt_rekicks>=2) return;
+    drv_memory_barrier();
+    int rc=write(0x3b0,2,dev.txwp[2]);
+    if(rc) dev.tx_mgmt_rekick_error++;
+    dev.tx_mgmt_rekicks++;
+    dev.tx_mgmt_stall_at=ms;
+}
 static void station_poll(void *ctx) {
-    (void)ctx;wifi_client_poll(&dev.client);
+    (void)ctx;
+    mgmt_tx_watchdog();
+    wifi_client_poll(&dev.client);
 }
 
 static void cleanup(void) {
@@ -501,6 +552,11 @@ void rtw8822be_status(char *out,size_t cap) {
     append(out,"\nTX ring MGMT wp=",cap);number(n,dev.txwp[2]);append(out,n,cap);
     append(out," BE wp=",cap);number(n,dev.txwp[4]);append(out,n,cap);
     append(out," client backpressure=",cap);number(n,dev.client.tx_backpressure);append(out,n,cap);
+    append(out,"\nTX MGMT rekicks=",cap);number(n,dev.tx_mgmt_rekicks);append(out,n,cap);
+    append(out," re-kick errors=",cap);number(n,dev.tx_mgmt_rekick_error);append(out,n,cap);
+    append(out,"\nTX MGMT BD0=",cap);hex(n,dev.tx_mgmt_last_bd0);append(out,n,cap);
+    append(out," BD1=",cap);hex(n,dev.tx_mgmt_last_bd1);append(out,n,cap);
+    append(out," DESC0=",cap);hex(n,dev.tx_mgmt_last_desc0);append(out,n,cap);
     append(out,"\nTX frames=",cap);number(n,dev.tx_sent);append(out,n,cap);
     append(out," busy=",cap);number(n,dev.tx_busy);append(out,n,cap);
     append(out," errors=",cap);number(n,dev.tx_errors);append(out,n,cap);
