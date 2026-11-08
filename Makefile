@@ -21,6 +21,7 @@ LITEHTML_CXX ?= g++
 LITEHTML_CXXFLAGS := -m32 -std=c++17 -Os -fexceptions -frtti -fno-pie -fno-pic -fno-stack-protector -fno-threadsafe-statics -ffunction-sections -fdata-sections -mno-sse -mno-mmx -mfpmath=387 -Iui -Ithird_party/litehtml/include -Ithird_party/litehtml/src
 LITEHTML_LIBSTDCXX := $(shell $(LITEHTML_CXX) -m32 -print-file-name=libstdc++.a)
 LITEHTML_LIBSUPCXX := $(shell $(LITEHTML_CXX) -m32 -print-file-name=libsupc++.a)
+LITEHTML_LIBGCC_EH := $(shell $(LITEHTML_CXX) -m32 -print-file-name=libgcc_eh.a)
 ifeq ($(LUNA_LEXBOR),1)
 CFLAGS += -DLUNA_USE_LEXBOR
 LEXBOR_NATIVE_LIB := build/lexbor-native/liblexbor_static.a
@@ -124,13 +125,16 @@ build/litehtml-native/liblitehtml.a:
 build/ui/litehtml_bridge.o: ui/litehtml_bridge.cpp ui/litehtml_bridge.h
 	@mkdir -p build/ui
 	$(LITEHTML_CXX) $(LITEHTML_CXXFLAGS) -c $< -o $@
+build/lib/cxx_glibc_compat.o: lib/cxx_glibc_compat.c
+	@mkdir -p build/lib
+	$(CC) $(CFLAGS) $(MUSLINC) -c $< -o $@
 build/lib/cxx_runtime.o: lib/cxx_runtime.cpp
 	@mkdir -p build/lib
 	$(LITEHTML_CXX) $(LITEHTML_CXXFLAGS) -c $< -o $@
 ifeq ($(LUNA_LITEHTML),1)
 CFLAGS += -DLUNA_USE_LITEHTML
-OBJECTS += build/ui/litehtml_bridge.o build/lib/cxx_runtime.o
-LITEHTML_LIBS := build/litehtml-native/liblitehtml.a build/litehtml-native/src/gumbo/libgumbo.a $(LITEHTML_LIBSTDCXX) $(LITEHTML_LIBSUPCXX)
+OBJECTS += build/ui/litehtml_bridge.o build/lib/cxx_runtime.o build/lib/cxx_glibc_compat.o
+LITEHTML_LIBS := build/litehtml-native/liblitehtml.a build/litehtml-native/src/gumbo/libgumbo.a $(LITEHTML_LIBSTDCXX) $(LITEHTML_LIBSUPCXX) $(LITEHTML_LIBGCC_EH)
 build/kernel.elf: $(LITEHTML_LIBS)
 endif
 build/kernel.elf: $(OBJECTS) build/libbearssl.a $(LEXBOR_NATIVE_LIB) kernel/link.ld
