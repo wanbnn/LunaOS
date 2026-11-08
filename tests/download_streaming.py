@@ -4,6 +4,7 @@
 import hashlib
 import http.server
 import json
+import os
 import shutil
 import socket
 import threading
@@ -11,7 +12,7 @@ import threading
 from guest import ROOT, TEST, Guest, memory, symbol_address
 from storage_interfaces import device_args
 
-SIZE = 96 * 1024 * 1024 + 1
+SIZE = int(os.environ.get("LUNA_DOWNLOAD_BYTES", 96 * 1024 * 1024 + 1))
 RAM = 64
 BLOCK = b"x" * 65536
 
@@ -50,7 +51,7 @@ threading.Thread(target=server.serve_forever, daemon=True).start()
 image = TEST / "stream.img"
 shutil.copyfile(ROOT / "dist/LunaOS.img", image)
 with image.open("r+b") as disk:
-    disk.truncate(320 * 1024 * 1024)
+    disk.truncate(max(320 * 1024 * 1024, 66 * 1024 * 1024 + SIZE * 2 + 16 * 1024 * 1024))
     disk.seek(440)
     identity = (
         int.from_bytes(

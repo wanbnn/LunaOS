@@ -11,7 +11,8 @@ arquivo pode superar a RAM disponível. O caminho HTTP aceita Content-Length,
 transferência chunked com trailers e respostas delimitadas pelo fechamento da
 conexão. A validação TLS continua ativa nos downloads HTTPS.
 
-A transferência monta um novo snapshot na área inativa do volume. O destino
+A preparação do snapshot ocorre antes de abrir a conexão, incluindo a cópia
+dos arquivos existentes para a área inativa do volume. O destino
 anterior fica disponível durante o download. O novo tamanho, o checksum e o
 cabeçalho são confirmados após receber uma resposta completa e descarregar os
 dados no disco. Uma transferência incompleta, falha de escrita ou cancelamento
@@ -78,3 +79,7 @@ nativo compatível com setores lógicos de 512 bytes.
 - `tests/download_streaming.py` baixa 96 MiB mais um byte em QEMU com 64 MiB de
   RAM e controlador AHCI nativo. Compara o SHA-256 completo e verifica recarga e
   leitura parcial pelo SDK.
+
+Para repetir o teste nativo com um download de 1 GiB mais 123 bytes, execute
+`LUNA_DOWNLOAD_BYTES=1073741947 LUNA_TEST_DIR=build/test-download-gib python3 tests/download_streaming.py`.
+A imagem descartável cresce conforme o tamanho solicitado.

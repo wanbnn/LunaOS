@@ -1442,6 +1442,12 @@ bool net_download_file(const char *url, const char *path, uint64_t *written, cha
         goto done;
     }
     strcpy(current, url);
+    /* Existing disk-backed files may take time to copy into the inactive
+     * snapshot. Finish that preparation before a TCP peer starts sending. */
+    if (!fs_begin_write(path, false, network_owner)) {
+        append(error, "Cannot stage download on the writable data volume.", ecap);
+        goto done;
+    }
     for (unsigned hop = 0; hop < 8; hop++) {
         bool secure;
         if (http_open(current, &secure, error, ecap) < 0)
@@ -1462,10 +1468,6 @@ bool net_download_file(const char *url, const char *path, uint64_t *written, cha
         }
         if (reply.status < 200 || reply.status >= 300) {
             append(error, "HTTP status rejected.", ecap);
-            goto done;
-        }
-        if (!fs_begin_write(path, false, network_owner)) {
-            append(error, "Cannot stage download on the writable data volume.", ecap);
             goto done;
         }
         if (!http_stream_body(&download_input, &reply, download_sink, 0, written, error, ecap))
