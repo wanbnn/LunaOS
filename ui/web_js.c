@@ -616,6 +616,14 @@ static JSValue js_append_child(JSContext *ctx, JSValueConst this_val, int argc,
     mark_dirty();
     return make_element(ctx, child);
 }
+static JSValue js_clone_node(JSContext *ctx, JSValueConst this_val, int argc,
+                             JSValueConst *argv) {
+    WebNode *source = node_from_value(ctx, this_val);
+    if (!source)
+        return JS_NULL;
+    bool deep = argc > 0 && JS_ToBool(ctx, argv[0]);
+    return make_element(ctx, web_node_clone(source, deep));
+}
 static JSValue js_insert_before(JSContext *ctx, JSValueConst this_val, int argc,
                                 JSValueConst *argv) {
     WebNode *parent = node_from_value(ctx, this_val);
@@ -1014,6 +1022,7 @@ static const JSCFunctionListEntry element_functions[] = {
     JS_CFUNC_DEF("querySelectorAll", 1, js_query_selector_all),
     JS_CFUNC_DEF("appendChild", 1, js_append_child),
     JS_CFUNC_DEF("insertBefore", 2, js_insert_before),
+    JS_CFUNC_DEF("cloneNode", 1, js_clone_node),
     JS_CFUNC_DEF("removeChild", 1, js_remove_child),
     JS_CFUNC_DEF("setAttribute", 2, js_set_attribute),
     JS_CFUNC_DEF("getAttribute", 1, js_get_attribute),
