@@ -2,6 +2,7 @@ name: Luna Browser HTML and DOM
 on:
   pull_request:
     paths:
+      - 'Makefile'
       - 'ui/web_dom.c'
       - 'ui/web_lexbor.c'
       - 'tests/lexbor_bridge_test.c'
@@ -15,6 +16,7 @@ on:
     branches:
       - main
     paths:
+      - 'Makefile'
       - 'ui/web_dom.c'
       - 'ui/web_js.c'
       - 'ui/webengine.h'
