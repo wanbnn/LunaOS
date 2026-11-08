@@ -33,12 +33,18 @@ if not (TOOLS / "usr/bin/iasl").exists() and not shutil.which("iasl"):
     dependencies = ["acpica-tools"]
 else:
     dependencies = []
+local_pc = TOOLS / "usr/lib/x86_64-linux-gnu/pkgconfig/glib-2.0.pc"
 if subprocess.run(["pkgconf", "--exists", "glib-2.0"], env=env).returncode:
-    local_pc = TOOLS / "usr/lib/x86_64-linux-gnu/pkgconfig/glib-2.0.pc"
     if not local_pc.exists():
         dependencies += ["libglib2.0-dev", "libpcre2-dev", "libsysprof-capture-4-dev"]
     env["PKG_CONFIG_SYSROOT_DIR"] = str(TOOLS)
     env["PKG_CONFIG_LIBDIR"] = str(local_pc.parent)
+# The installation matrix captures PPM screenshots using QMP screendump.
+local_pixman = None
+if subprocess.run(["pkgconf", "--exists", "pixman-1"], env=env).returncode:
+    local_pixman = local_pc.with_name("pixman-1.pc")
+    if not local_pixman.exists():
+        dependencies += ["libpixman-1-dev", "libpixman-1-0"]
 if dependencies:
     debs = TOOLS / "debs"
     debs.mkdir(parents=True, exist_ok=True)
@@ -52,6 +58,13 @@ if dependencies:
         for pattern in ["libgio-2.0-dev_*.deb", "libglib2.0-0t64_*.deb"]:
             for deb in debs.glob(pattern):
                 run(["dpkg-deb", "-x", str(deb), str(TOOLS)])
+if local_pixman and not env.get("PKG_CONFIG_SYSROOT_DIR"):
+    # Use local Pixman alongside system GLib without relocating GLib's paths.
+    pkgconfig = build / "local-pkgconfig"
+    pkgconfig.mkdir(exist_ok=True)
+    relocated = local_pixman.read_text().replace("prefix=/usr\n", f"prefix={TOOLS / 'usr'}\n", 1)
+    (pkgconfig / local_pixman.name).write_text(relocated)
+    env["PKG_CONFIG_PATH"] = os.pathsep.join(filter(None, (str(pkgconfig), env.get("PKG_CONFIG_PATH"))))
 if not archive.exists():
     urllib.request.urlretrieve(f"https://download.qemu.org/qemu-{VERSION}.tar.xz", archive)
 with archive.open("rb") as stream:
@@ -76,7 +89,9 @@ for wheel in (source / "python/wheels").glob("meson-*.whl"):
 if not (build / "build.ninja").exists():
     run([str(source / "configure"), "--target-list=i386-softmmu,x86_64-softmmu",
          "--without-default-features", "--enable-system", "--enable-tcg", "--enable-kvm",
-         "--disable-tools", "--disable-docs", "--disable-werror", "--disable-pixman"], cwd=build)
+         "--disable-tools", "--disable-docs", "--disable-werror", "--enable-pixman"], cwd=build)
+elif "#define CONFIG_PIXMAN 1" not in (build / "config-host.h").read_text():
+    run([str(build / "pyvenv/bin/meson"), "configure", "-Dpixman=enabled"], cwd=build)
 run(["ninja", "-j4", "qemu-system-i386", "qemu-system-x86_64"], cwd=build)
 metadata = {"qemu": VERSION, "source_sha256": SHA256,
             "patch_sha256": hashlib.sha256(patch.read_bytes()).hexdigest(),
