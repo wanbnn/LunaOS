@@ -66,7 +66,7 @@ build/ui/web_dom.o: CFLAGS += -Wno-unused-function
 # require running Lexbor utilities in the LunaOS target environment.
 $(LEXBOR_NATIVE_LIB): third_party/musl/lib/libc.a
 	@test -f third_party/lexbor/CMakeLists.txt || (echo "Run git submodule update --init --recursive" && exit 1)
-	cmake -S third_party/lexbor -B build/lexbor-native -DLEXBOR_BUILD_SHARED=OFF -DLEXBOR_BUILD_STATIC=ON -DLEXBOR_BUILD_EXAMPLES=OFF -DLEXBOR_BUILD_TESTS=OFF -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY -DCMAKE_C_FLAGS="$(NATIVEFLAGS) -fno-pic -ffunction-sections -fdata-sections"
+	cmake -S third_party/lexbor -B build/lexbor-native -DLEXBOR_BUILD_SHARED=OFF -DLEXBOR_BUILD_STATIC=ON -DLEXBOR_BUILD_EXAMPLES=OFF -DLEXBOR_BUILD_TESTS=OFF -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY -DCMAKE_C_FLAGS="$(subst -Ibuild,-I$(CURDIR)/build,$(subst -Ikernel,-I$(CURDIR)/kernel,$(subst third_party/,$(CURDIR)/third_party/,$(NATIVEFLAGS)))) -fno-pic -ffunction-sections -fdata-sections"
 	cmake --build build/lexbor-native --target lexbor_static --parallel 2
 .PHONY: lexbor-native
 lexbor-native: $(LEXBOR_NATIVE_LIB)
