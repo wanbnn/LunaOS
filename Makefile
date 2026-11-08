@@ -39,7 +39,9 @@ build/ui/windows.o build/ui/desktop.o: ui/window.h
 FORCE:
 build/luna_build_version.h: FORCE
 	@mkdir -p build
-	@$(PYTHON) -c 'from pathlib import Path; import subprocess; p=Path("build/luna_build_version.h"); s=subprocess.run(["git","rev-parse","--short=12","HEAD"],capture_output=True,text=True); v=(s.stdout.strip() if s.returncode==0 else "unknown"); content="#ifndef LUNA_BUILD_VERSION_H\\n#define LUNA_BUILD_VERSION_H\\n#define LUNA_BUILD_COMMIT \\""+v+"\\"\\n#endif\\n"; content=content.replace("\\\\n","\\n").replace("\\\\"","\\""); p.write_text(content) if not p.exists() or p.read_text()!=content else None'
+	@printf '#ifndef LUNA_BUILD_VERSION_H\n#define LUNA_BUILD_VERSION_H\n#define LUNA_BUILD_COMMIT "%s"\n#endif\n' "$$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)" > build/luna_build_version.h.tmp
+	@cmp -s build/luna_build_version.h.tmp $@ || mv build/luna_build_version.h.tmp $@
+	@rm -f build/luna_build_version.h.tmp
 build/ui/desktop.o: build/luna_build_version.h
 
 third_party/musl/config.mak: third_party/musl/configure
