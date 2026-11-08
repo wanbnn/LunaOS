@@ -253,6 +253,14 @@ static void template_shadow_regressions(void) {
     web_node_append(shadow, span);
     check(!web_find_first(document, "span") && span->parent == shadow,
           "shadow descendants remain outside host light-DOM traversal");
+    check(web_node_root(span) == shadow &&
+          web_node_root_composed(span) == document &&
+          web_node_is_connected(span),
+          "shadow nodes use their own root but remain composed-connected to document");
+    web_node_detach(host);
+    check(!web_node_is_connected(span) && web_node_root_composed(span) == host,
+          "detaching shadow host disconnects composed subtree");
+    web_node_append(web_find_first(document, "body"), host);
     WebNode *fragment = web_node_new(WEB_DOCUMENT_FRAGMENT);
     WebNode *one = web_node_new(WEB_ELEMENT);
     one->tag = web_strdup("b");
