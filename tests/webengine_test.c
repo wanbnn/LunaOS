@@ -218,6 +218,56 @@ static void foreign_namespace_regressions(void) {
     web_free_tree(root);
 }
 
+
+static void template_shadow_regressions(void) {
+    const char *html = "<html><body><template id='template'><p id='inert'>"
+                       "inert text</p><span>more</span></template><p id='live'>live</p></body></html>";
+    WebNode *document = 0;
+    char error[128] = {0};
+    check(web_parse(html, strlen(html), &document, error, sizeof(error)),
+          "HTML template fixture parses");
+    if (!document)
+        return;
+    WebNode *tmpl = web_find_by_id(document, "template");
+    check(tmpl && tmpl->template_content &&
+          tmpl->template_content->type == WEB_DOCUMENT_FRAGMENT &&
+          !tmpl->first_child && tmpl->template_content->first_child,
+          "template descendants are stored in an inert DocumentFragment");
+    check(web_find_by_id(document, "inert") == 0 &&
+          web_find_by_id(tmpl->template_content, "inert") != 0,
+          "template content is excluded from document tree searches");
+    WebNode *clone = web_node_clone(tmpl, true);
+    check(clone && clone->template_content && clone->template_content->first_child &&
+          clone->template_content->first_child != tmpl->template_content->first_child,
+          "cloning a template copies its content subtree");
+    web_free_tree(clone);
+    WebNode *host = web_find_by_id(document, "live");
+    WebNode *shadow = web_attach_shadow(host, true);
+    check(shadow && shadow->type == WEB_SHADOW_ROOT && shadow->host == host &&
+          host->shadow_root == shadow && host->shadow_open,
+          "open ShadowRoot is owned by its host");
+    check(web_attach_shadow(host, false) == 0,
+          "host cannot attach a second ShadowRoot");
+    WebNode *span = web_node_new(WEB_ELEMENT);
+    span->tag = web_strdup("span");
+    web_node_append(shadow, span);
+    check(!web_find_first(document, "span") && span->parent == shadow,
+          "shadow descendants remain outside host light-DOM traversal");
+    WebNode *fragment = web_node_new(WEB_DOCUMENT_FRAGMENT);
+    WebNode *one = web_node_new(WEB_ELEMENT);
+    one->tag = web_strdup("b");
+    WebNode *two = web_node_new(WEB_ELEMENT);
+    two->tag = web_strdup("i");
+    web_node_append(fragment, one);
+    web_node_append(fragment, two);
+    check(web_node_insert_before(host, fragment, 0) && !fragment->first_child &&
+          host->first_child == one && one->next == two &&
+          two->parent == host,
+          "inserting DocumentFragment moves children in document order");
+    web_free_tree(fragment);
+    web_free_tree(document);
+}
+
 static void html_dom_regressions(void) {
     const char *html =
         "<!doctype html><html><head><title>A &amp; B</TITLE  ></head><body>"
@@ -379,6 +429,7 @@ int main(void) {
     html_dom_regressions();
     dom_mutation_regressions();
     foreign_namespace_regressions();
+    template_shadow_regressions();
     printf(failures ? "\n%d check(s) failed\n" : "\nall checks passed\n", failures);
     return failures ? 1 : 0;
 }
