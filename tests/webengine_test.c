@@ -268,6 +268,47 @@ static void template_shadow_regressions(void) {
     web_free_tree(document);
 }
 
+
+static void dom_core_phase2_regressions(void) {
+    WebNode *document = web_node_new(WEB_ELEMENT);
+    document->tag = web_strdup("#document");
+    WebNode *parent = web_node_new(WEB_ELEMENT);
+    parent->tag = web_strdup("div");
+    WebNode *first = web_node_new(WEB_ELEMENT);
+    first->tag = web_strdup("first");
+    WebNode *replacement = web_node_new(WEB_ELEMENT);
+    replacement->tag = web_strdup("replacement");
+    web_node_append(document, parent);
+    web_node_append(parent, first);
+    check(web_node_root(first) == document &&
+          web_node_is_connected(first),
+          "getRootNode and isConnected follow attached tree");
+    check(web_node_replace_child(parent, replacement, first) &&
+          first->parent == 0 && parent->first_child == replacement &&
+          parent->last_child == replacement,
+          "replaceChild detaches old child without freeing it");
+    check(!web_node_is_connected(first) && web_node_root(first) == first,
+          "removed subtree remains independently accessible");
+    check(!web_node_replace_child(parent, parent, replacement) &&
+          replacement->parent == parent,
+          "replaceChild blocks ancestor cycles");
+    WebNode *a = web_node_new(WEB_TEXT);
+    a->text = web_strdup("alpha");
+    WebNode *empty = web_node_new(WEB_TEXT);
+    empty->text = web_strdup("");
+    WebNode *b = web_node_new(WEB_TEXT);
+    b->text = web_strdup("beta");
+    web_node_append(parent, a);
+    web_node_append(parent, empty);
+    web_node_append(parent, b);
+    web_node_normalize(parent);
+    check(a->next == 0 && !strcmp(a->text, "alphabeta"),
+          "normalize merges adjacent text nodes and removes empty nodes");
+    check(!web_node_is_connected(first), "removed node stays detached after normalization");
+    web_free_tree(first);
+    web_free_tree(document);
+}
+
 static void html_dom_regressions(void) {
     const char *html =
         "<!doctype html><html><head><title>A &amp; B</TITLE  ></head><body>"
@@ -430,6 +471,7 @@ int main(void) {
     dom_mutation_regressions();
     foreign_namespace_regressions();
     template_shadow_regressions();
+    dom_core_phase2_regressions();
     printf(failures ? "\n%d check(s) failed\n" : "\nall checks passed\n", failures);
     return failures ? 1 : 0;
 }
