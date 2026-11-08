@@ -40,9 +40,10 @@ static void hdr(WifiClient *c,uint8_t *f,uint8_t subtype) {
 static int auth(WifiClient *c) {
     uint8_t f[30];hdr(c,f,0xb0);
     put16(f+24,0);put16(f+26,1);put16(f+28,0);
+    c->stage=WIFI_CLIENT_AUTH;
     int rc=emit(c,f,sizeof(f),true);
     if(!rc) { c->attempts++; c->tx_stalled_since=0; }
-    if(!rc) {c->stage=WIFI_CLIENT_AUTH;c->deadline=c->radio.now(c->radio.context)+3000;}
+    if(!rc) c->deadline=c->radio.now(c->radio.context)+3000;
     return rc;
 }
 static int assoc(WifiClient *c) {
@@ -63,9 +64,10 @@ static int assoc(WifiClient *c) {
                                          1,0,0,15,172,2,0,0};
         copy(f+pos,selected,sizeof(selected));pos+=sizeof(selected);
     }
+    c->stage=WIFI_CLIENT_ASSOC;
     int rc=emit(c,f,pos,true);
     if(!rc) { c->attempts++; c->tx_stalled_since=0; }
-    if(!rc) {c->stage=WIFI_CLIENT_ASSOC;c->deadline=c->radio.now(c->radio.context)+3000;}
+    if(!rc) c->deadline=c->radio.now(c->radio.context)+3000;
     return rc;
 }
 static void fail(WifiClient *c,int error) {
