@@ -235,6 +235,17 @@ try:
     g.command(
         f"wget https://luna.test:{secured.server_port}/truncated /tmp/bad", "incomplete", timeout=35
     )
+    status = g.command("net")
+    metrics = {}
+    for line in status.splitlines():
+        if ": " in line:
+            name, value = line.split(": ", 1)
+            if value.isdigit():
+                metrics[name] = int(value)
+    assert metrics["TCP receive buffer bytes"] == 0, metrics
+    assert metrics["TCP reorder memory bytes"] == 0, metrics
+    assert 16384 < metrics["TCP peak buffer bytes"] <= 65535, metrics
+    assert 1000 <= metrics["TCP RTO ms"] <= 60000, metrics
     g.command("js \"[1,2,3].map(x=>x*2).join(',')\"", "2,4,6")
     g.command('js "123n ** 3n"', "1860867")
     g.command("js \"Object.fromEntries([['ok',42]]).ok\"", "42")
@@ -249,6 +260,8 @@ try:
         "image_sha256": hashlib.sha256((ROOT / "dist/LunaOS.img").read_bytes()).hexdigest(),
         "verified": [
             "native TLS 1.2 certificate chain and DNS-name validation",
+            "adaptive TCP buffer growth and release after close",
+            "RTT-derived retransmission timer within safety bounds",
             "untrusted CA rejected",
             "hostname mismatch rejected",
             "authenticated HTTPS download",

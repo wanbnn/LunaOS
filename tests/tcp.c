@@ -1,10 +1,41 @@
 /* Real native TCP receive/send logic with a deterministic Ethernet transport.
  * This does not emulate a radio or claim physical RF validation. */
+#include "../drivers/net.c"
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
-#include "../drivers/net.c"
 
+void append(char *out, const char *text, size_t capacity) {
+    size_t used = strlen(out), n = strlen(text);
+    if (used >= capacity)
+        return;
+    if (n >= capacity - used)
+        n = capacity - used - 1u;
+    memcpy(out + used, text, n);
+    out[used + n] = 0;
+}
+static bool fail_allocate;
+static size_t live_allocations;
+void *heap_allocate_owned(size_t bytes, uint32_t owner) {
+    assert(owner == 1);
+    if (fail_allocate) {
+        fail_allocate = false;
+        return NULL;
+    }
+    void *p = malloc(bytes);
+    if (p)
+        live_allocations++;
+    return p;
+}
+int heap_release(void *p) {
+    if (p) {
+        assert(live_allocations);
+        live_allocations--;
+        free(p);
+    }
+    return 0;
+}
 volatile uint32_t ticks,frame_clock;
 static uint8_t last_tx[1514];
 static unsigned last_bytes, transmitted;
@@ -15,6 +46,9 @@ static uint32_t data_sequences[8];
 static void segment(uint32_t,unsigned,const char *,unsigned);
 void wifi_poll(void) {}
 void task_yield(void) { ticks++;frame_clock+=10; }
+void fs_abort_write(uint32_t owner) {
+    (void)owner;
+}
 File *fs_find(const char *path) { (void)path;return NULL; }
 int netif_transmit(NetInterface *nic,const uint8_t *p,unsigned n) {
     (void)nic;assert(n<=sizeof(last_tx));
@@ -39,7 +73,12 @@ void netif_poll(NetInterface *nic,uint32_t now,void (*input)(void *,uint8_t *,un
     if(pending_ack) {pending_ack=false;segment(tcp.ack,0x10,NULL,0);}
 }
 static void setup(void) {
-    memset(&tcp,0,sizeof(tcp));
+    tcp_release();
+    http_operation.active = false;
+    fail_allocate = false;
+    assert(tcp_resize(TCP_RECEIVE_MAX));
+    tcp.goal = tcp.capacity;
+    tcp.rto = TCP_RTO_MIN;
     memcpy(local_ip,"\x0a\0\2\x0f",4);memcpy(gateway,"\x0a\0\2\2",4);
     memcpy(netmask,"\xff\xff\xff\0",4);memcpy(tcp.ip,gateway,4);
     memcpy(mac,"\x02\0\0\0\0\1",6);memcpy(gateway_mac,"\x02\0\0\0\0\2",6);
@@ -113,12 +152,13 @@ int main(void) {
     assert(data_sends==4 && data_sizes[0]==64 && data_sizes[1]==64 && data_sizes[2]==64 && data_sizes[3]==2);
     assert(data_sequences[0]==data_sequences[1] && data_sequences[2]==data_sequences[0]+64);
     setup();
-    for (unsigned i = 0; i < TCP_REORDER + 1u; i++)
+    unsigned budget_packets = tcp.capacity / (sizeof(TcpPending) + 1u);
+    for (unsigned i = 0; i < budget_packets + 1u; i++)
         segment(101 + i, 0x18, "x", 1);
     segment(100,0x18,"a",1);
-    assert(tcp.used == TCP_REORDER + 1u && tcp.ack == 101 + TCP_REORDER);
+    assert(tcp.used == budget_packets + 1u && tcp.ack == 101u + budget_packets);
     segment(tcp.ack, 0x18, "x", 1);
-    assert(tcp.used == TCP_REORDER + 2u);
+    assert(tcp.used == budget_packets + 2u);
     setup();
     char payload[1200];
     for (unsigned i = 1; i < 49; i++) {
@@ -138,8 +178,8 @@ int main(void) {
     segment(100, 0x18, "aa", 2);
     segment(104, 0x18, "d", 1);
     unsigned queued = 0;
-    for (unsigned i = 0; i < TCP_REORDER; i++)
-        queued += tcp.pending[i].valid;
+    for (TcpPending *packet = tcp.pending; packet; packet = packet->next)
+        queued++;
     assert(queued == 1);
     /* An entire burst survives a delayed missing leading segment. */
     setup();
@@ -151,8 +191,122 @@ int main(void) {
     setup();
     unsigned before = tcp_timeouts;
     assert(stream_read(out, sizeof(out)) < 0 && tcp_timeouts == before + 1u);
-    setup();tcp.used=sizeof(tcp.data)-2;
-    segment(100,0x18,"ab",2);assert(tcp.ack==100 && tcp.used==sizeof(tcp.data)-2);
+    setup();
+    tcp.used = tcp.capacity - 1;
+    segment(100, 0x18, "ab", 2);
+    assert(tcp.ack == 100 && tcp.used == tcp.capacity - 1);
     assert(be16(last_tx+48)==1); /* advertise actual remaining receive window */
-    puts("PASS: TCP overlap, reordering, duplicate suppression, FIN gaps, sequence wrap, RST validation and MSS");
+    /* Demand grows the buffer before advertising the additional memory. */
+    setup();
+    assert(tcp_resize(TCP_RECEIVE_MIN));
+    tcp.goal = tcp.capacity;
+    uint8_t block[1200];
+    memset(block, 'g', sizeof(block));
+    for (unsigned i = 0; i < 8; i++)
+        segment(tcp.ack, 0x18, (const char *)block, sizeof(block));
+    assert(tcp.capacity > TCP_RECEIVE_MIN && tcp.goal == tcp.capacity);
+    assert(be16(last_tx + 48) <= tcp.capacity - tcp.used);
+    /* Failed growth keeps every byte and the previously granted credit. */
+    setup();
+    assert(tcp_resize(TCP_RECEIVE_MIN));
+    tcp.goal = tcp.capacity;
+    for (unsigned i = 0; i < 6; i++)
+        segment(tcp.ack, 0x18, (const char *)block, sizeof(block));
+    fail_allocate = true;
+    segment(tcp.ack, 0x18, (const char *)block, sizeof(block));
+    assert(tcp.capacity == TCP_RECEIVE_MIN && tcp.used == 7u * sizeof(block));
+    for (unsigned i = 0; i < tcp.used; i++)
+        assert(tcp.data[i] == 'g');
+    setup();
+    fail_allocate = true;
+    segment(tcp.ack + 1u, 0x18, "b", 1);
+    assert(!tcp.pending && !tcp.pending_memory && tcp.ack == 100);
+    segment(101, 0x18, "b", 1);
+    segment(100, 0x18, "a", 1);
+    assert(tcp.used == 2 && !memcmp(tcp.data, "ab", 2));
+    /* Shrinking waits for advertised bytes to be consumed, without retraction. */
+    setup();
+    send_tcp(0x10, NULL, 0);
+    uint32_t edge = tcp.right_edge;
+    ticks += 4000u;
+    tcp_tune_receive();
+    assert(tcp.goal < tcp.capacity && tcp.capacity == TCP_RECEIVE_MAX);
+    send_tcp(0x10, NULL, 0);
+    assert(tcp.right_edge == edge);
+    char read_buffer[1200];
+    for (unsigned i = 0; i < 30; i++) {
+        segment(tcp.ack, 0x18, (const char *)block, sizeof(block));
+        assert(stream_read(read_buffer, sizeof(read_buffer)) == sizeof(read_buffer));
+        assert((int32_t)(tcp.right_edge - edge) >= 0);
+        edge = tcp.right_edge;
+    }
+    assert(tcp.capacity < TCP_RECEIVE_MAX && tcp.used == 0);
+    /* RFC 6298 estimation, Karn exclusion and capped exponential backoff. */
+    setup();
+    tcp.sample_active = true;
+    tcp.sample_at = ticks;
+    tcp.sample_end = tcp.seq;
+    ticks += 200u;
+    tcp_rtt_ack(tcp.seq);
+    assert(tcp.srtt == 200 && tcp.rttvar == 100 && tcp.rto == 1000);
+    tcp.sample_active = true;
+    tcp.sample_at = ticks;
+    tcp.sample_end = tcp.seq;
+    ticks += 4000u;
+    tcp_rtt_ack(tcp.seq);
+    assert(tcp.srtt == 675 && tcp.rttvar == 1025 && tcp.rto == 4775);
+    tcp_backoff();
+    assert(tcp.rto == 9550 && !tcp.sample_active);
+    tcp_rtt_ack(tcp.seq);
+    assert(tcp.srtt == 675 && tcp.rto == 9550);
+    for (unsigned i = 0; i < 20; i++)
+        tcp_backoff();
+    assert(tcp.rto == TCP_RTO_MAX);
+    assert(tcp_read_budget() == 120000u);
+    stream_set_read_policy(200, 500);
+    assert(tcp_read_budget() == 500);
+    tcp.sample_active = true;
+    tcp.sample_at = ticks;
+    tcp.sample_end = tcp.seq;
+    ticks += 1;
+    uint32_t old_rto = tcp.rto;
+    tcp_rtt_ack(tcp.seq);
+    assert(tcp.rto >= TCP_RTO_MIN && tcp.rto < old_rto);
+    /* Sequence and timer arithmetic both survive wraparound. */
+    tcp.measured = false;
+    tcp.sample_active = true;
+    tcp.sample_at = UINT32_MAX - 49u;
+    tcp.sample_end = tcp.seq;
+    ticks = 50;
+    tcp_rtt_ack(tcp.seq);
+    assert(tcp.srtt == 100);
+    /* Total HTTP deadlines expire even with a large TCP RTO and steady data. */
+    setup();
+    tcp.rto = TCP_RTO_MAX;
+    stream_set_read_policy(60000, 60000);
+    http_begin(20);
+    for (unsigned i = 0; i < 19; i++) {
+        ticks++;
+        tcp.data[0] = 'x';
+        tcp.used = 1;
+        assert(stream_read(out, 1) == 1);
+    }
+    ticks++;
+    tcp.data[0] = 'x';
+    tcp.used = 1;
+    assert(stream_read(out, 1) < 0 && tcp.used == 1 && tcp.rto == TCP_RTO_MAX);
+    char failure[128];
+    assert(http_end(-1, out, failure, sizeof(failure)) < 0);
+    assert(strstr(failure, "HTTP operation deadline") && !http_operation.active);
+    setup();
+    segment(tcp.ack + 1, 0x18, "queued", 6);
+    assert(tcp.pending);
+    network_owner = 9;
+    http_begin(300000);
+    net_cancel_owner(9);
+    assert(!network_owner && !http_operation.active);
+    stream_close();
+    assert(!tcp.data && !tcp.pending && !live_allocations);
+    puts("PASS: TCP overlap, reordering, duplicate suppression, FIN gaps, sequence wrap, RST "
+         "validation, MSS, adaptive buffers, memory pressure and RTT timers");
 }

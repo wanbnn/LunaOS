@@ -8,6 +8,7 @@ int stream_connect(const char *, unsigned);
 int stream_read(void *, unsigned);
 int stream_write(const void *, unsigned);
 void stream_close(void);
+void stream_set_read_policy(uint32_t, uint32_t);
 bool tls_connect(const char *, char *, size_t);
 int tls_read(void *, unsigned);
 int tls_write(const void *, unsigned);

@@ -1,12 +1,21 @@
 /* Full shared-path integration with a simulated radio. Uses the actual native
  * IPv4 stack, WPA2, DHCP and station controlled-port implementation. */
-#include <assert.h>
-#include <stdio.h>
-#include <string.h>
 #include "../drivers/wifi_station.h"
 #include "../kernel/net_time.h"
 #include "../kernel/task.h"
 #include "wpa2_vectors.h"
+#include <assert.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+void *heap_allocate_owned(size_t bytes, uint32_t owner) {
+    assert(owner == 1);
+    return malloc(bytes);
+}
+int heap_release(void *p) {
+    free(p);
+    return 0;
+}
 extern bool net_ready;
 void net_poll(void);
 bool net_set_dns(const char *);

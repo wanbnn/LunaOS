@@ -96,3 +96,33 @@ RCR/net_type/response rates, Retry/PN evidence and AP disconnect reason.
 
 Duplicate retransmissions can occur normally. A zero replay count is not an
 acceptance criterion, and replay/MIC checks must not be disabled to hide loss.
+
+## Adaptive receive memory and timing
+
+Receive storage starts at 16 KiB and grows with occupancy, up to the 65,535-byte
+unscaled TCP window. Reordered segments use individually allocated nodes in
+sequence order, with a byte budget tied to the receive buffer. Allocation
+failure preserves existing data and credit, leaving missing bytes unacknowledged
+for retransmission. Connection close and owner cancellation release the storage.
+
+After sustained low occupancy, the target size decreases. Physical shrinking
+waits until outstanding advertised credit fits the target. Window updates retain
+the previous right edge while that credit drains, including sequence wraparound.
+This implementation uses the existing unscaled window and stop-and-wait sender.
+
+The sender measures RTT on unretransmitted SYN/data exchanges. Smoothed RTT and
+RTT variation determine the RTO, bounded between one and 60 seconds. Timeout
+backoff doubles the RTO. Karn's rule excludes ambiguous retransmission samples.
+Receive recovery ACKs use progressively spaced intervals. Raw stream wait budgets
+adapt separately within their caller-supplied bounds. [RFC 6298](https://www.rfc-editor.org/rfc/rfc6298.html)
+
+HTTP uses its own 60-second idle policy and a five-minute total request deadline
+across redirects, TLS and response reads. This total deadline also expires during
+continuous trickle delivery. Streaming file downloads use the idle policy and
+keep their total transfer duration unrestricted. The HTTP policy is independent
+of the sender's retransmission timer.
+
+`net` reports current receive/reorder memory, peak buffer size, latest RTT, RTO,
+allocation failures and HTTP timeout counts. `make test-tcp` exercises growth,
+credit-preserving shrink, allocation failure, reordering, timing wrap, RTT
+estimation, retransmission exclusion, backoff and total HTTP deadline expiry.

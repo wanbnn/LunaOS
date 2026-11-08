@@ -60,8 +60,20 @@ static struct {
 static void time_network_poll(void);
 static void time_network_input(const uint8_t [4],const uint8_t *,unsigned);
 #define TCP_MSS 1200u
-#define TCP_REORDER 64u
-#define TCP_RECEIVE_IDLE_MS 15000u
+#define TCP_RECEIVE_MIN 16384u
+/* The unscaled TCP window field bounds this connection's receive credit. */
+#define TCP_RECEIVE_MAX 65535u
+#define TCP_RTO_MIN 1000u
+#define TCP_RTO_MAX 60000u
+#define HTTP_IDLE_TIMEOUT_MS 60000u
+#define HTTP_OPERATION_TIMEOUT_MS 300000u
+typedef struct TcpPending {
+    struct TcpPending *next;
+    uint32_t seq;
+    unsigned bytes;
+    bool fin;
+    uint8_t data[];
+} TcpPending;
 static const char *transport_error="No transfer attempted.";
 static uint32_t tcp_gaps,tcp_duplicates,tcp_queue_drops,tcp_resets,tcp_timeouts;
 static struct {
@@ -69,16 +81,151 @@ static struct {
     uint8_t ip[4];
     uint16_t port, remote_port;
     uint32_t seq, ack, remote_ack;
-    char data[65536];
-    unsigned used;
-    unsigned peer_mss;
-    struct {
-        bool valid, fin;
-        uint32_t seq;
-        unsigned bytes;
-        uint8_t data[1460];
-    } pending[TCP_REORDER];
+    char *data;
+    unsigned capacity, goal, used, peer_mss;
+    TcpPending *pending;
+    size_t pending_memory;
+    uint32_t right_edge, pressure_at;
+    bool window_valid;
+    uint32_t srtt, rttvar, rto, sample_at, sample_end;
+    bool measured, sample_active;
+    uint32_t idle_min, idle_max;
 } tcp;
+/* HTTP request deadlines are application policy, separate from TCP's RTO.
+ * Streaming downloads use an idle limit without a whole-file deadline. */
+static struct {
+    bool active;
+    uint32_t start, limit;
+} http_operation;
+static uint32_t http_timeouts;
+static uint32_t tcp_last_srtt, tcp_last_rto, tcp_peak_capacity, tcp_allocation_failures;
+static bool http_expired(void) {
+    if (!http_operation.active || !http_operation.limit ||
+        ticks - http_operation.start < http_operation.limit)
+        return false;
+    transport_error = "HTTP operation deadline exceeded.";
+    return true;
+}
+static void http_begin(uint32_t limit) {
+    http_operation.active = true;
+    http_operation.start = ticks;
+    http_operation.limit = limit;
+}
+static int http_end(int result, char *out, char *error, size_t capacity) {
+    if (http_expired()) {
+        http_timeouts++;
+        out[0] = error[0] = 0;
+        append(error, transport_error, capacity);
+        result = -1;
+    }
+    http_operation.active = false;
+    return result;
+}
+static uint32_t tcp_rto(void) {
+    return tcp.rto ? tcp.rto : TCP_RTO_MIN;
+}
+static void tcp_release(void) {
+    while (tcp.pending) {
+        TcpPending *next = tcp.pending->next;
+        heap_release(tcp.pending);
+        tcp.pending = next;
+    }
+    if (tcp.data)
+        heap_release(tcp.data);
+    memset(&tcp, 0, sizeof(tcp));
+}
+static bool tcp_resize(unsigned capacity) {
+    char *data = heap_allocate_owned((size_t)capacity + 1u, 1);
+    if (!data) {
+        tcp_allocation_failures++;
+        return false;
+    }
+    if (capacity > tcp_peak_capacity)
+        tcp_peak_capacity = capacity;
+    if (tcp.used)
+        memcpy(data, tcp.data, tcp.used);
+    data[tcp.used] = 0;
+    if (tcp.data)
+        heap_release(tcp.data);
+    tcp.data = data;
+    tcp.capacity = capacity;
+    return true;
+}
+static void tcp_rtt_ack(uint32_t ack) {
+    if (!tcp.sample_active || (int32_t)(ack - tcp.sample_end) < 0)
+        return;
+    tcp.sample_active = false;
+    uint32_t sample = ticks - tcp.sample_at;
+    if (!sample)
+        sample = 1;
+    if (sample > TCP_RTO_MAX)
+        sample = TCP_RTO_MAX;
+    if (!tcp.measured) {
+        tcp.srtt = sample;
+        tcp.rttvar = sample / 2u;
+        tcp.measured = true;
+    } else {
+        uint32_t difference = tcp.srtt > sample ? tcp.srtt - sample : sample - tcp.srtt;
+        tcp.rttvar = (3u * tcp.rttvar + difference) / 4u;
+        tcp.srtt = (7u * tcp.srtt + sample) / 8u;
+    }
+    uint32_t variation = 4u * tcp.rttvar;
+    tcp.rto = tcp.srtt + (variation ? variation : 1u);
+    if (tcp.rto < TCP_RTO_MIN)
+        tcp.rto = TCP_RTO_MIN;
+    if (tcp.rto > TCP_RTO_MAX)
+        tcp.rto = TCP_RTO_MAX;
+    tcp_last_srtt = tcp.srtt;
+    tcp_last_rto = tcp.rto;
+}
+static void tcp_backoff(void) {
+    tcp.sample_active = false;
+    uint32_t rto = tcp_rto();
+    tcp.rto = rto > TCP_RTO_MAX / 2u ? TCP_RTO_MAX : rto * 2u;
+    tcp_last_rto = tcp.rto;
+}
+static unsigned tcp_granted(void) {
+    if (!tcp.window_valid || (int32_t)(tcp.right_edge - tcp.ack) <= 0)
+        return 0;
+    return tcp.right_edge - tcp.ack;
+}
+static unsigned tcp_window(void) {
+    unsigned desired = tcp.goal > tcp.used ? tcp.goal - tcp.used : 0;
+    unsigned granted = tcp_granted();
+    unsigned window = desired > granted ? desired : granted;
+    unsigned available = tcp.capacity - tcp.used;
+    return window > available ? available : window;
+}
+static void tcp_tune_receive(void) {
+    uint32_t quiet = tcp_rto() * 4u;
+    if (quiet < 2000u)
+        quiet = 2000u;
+    if (tcp.pending)
+        return;
+    if (ticks - tcp.pressure_at >= quiet && tcp.used <= tcp.goal / 4u &&
+        tcp.goal > TCP_RECEIVE_MIN) {
+        tcp.goal /= 2u;
+        if (tcp.goal < TCP_RECEIVE_MIN)
+            tcp.goal = TCP_RECEIVE_MIN;
+        tcp.pressure_at = ticks;
+    }
+    /* Previously granted bytes remain valid until consumed. Defer physical
+     * shrinking until the peer's outstanding credit fits the smaller buffer. */
+    if (tcp.capacity > tcp.goal && tcp.used + tcp_granted() <= tcp.goal)
+        tcp_resize(tcp.goal);
+}
+void stream_set_read_policy(uint32_t minimum, uint32_t maximum) {
+    tcp.idle_min = minimum;
+    tcp.idle_max = maximum < minimum ? minimum : maximum;
+}
+static uint32_t tcp_read_budget(void) {
+    uint32_t minimum = tcp.idle_min ? tcp.idle_min : 15000u;
+    uint32_t maximum = tcp.idle_max ? tcp.idle_max : 120000u;
+    uint32_t budget = tcp_rto() * 8u;
+    if (budget < minimum)
+        budget = minimum;
+    return budget > maximum ? maximum : budget;
+}
 static uint16_t be16(const void *p) {
     const uint8_t *b = p;
     return ((uint16_t)b[0] << 8) | b[1];
@@ -216,7 +363,12 @@ static void send_tcp(int flags, const char *data, unsigned n) {
     put32(p + 8, tcp.ack);
     p[12] = (header/4)<<4;
     p[13] = flags;
-    put16(p + 14, sizeof(tcp.data) - tcp.used - 1);
+    unsigned window = tcp_window();
+    put16(p + 14, window);
+    if (!(flags & 2) && tcp.state >= 2) {
+        tcp.right_edge = tcp.ack + window;
+        tcp.window_valid = true;
+    }
     if(flags&2) { p[20]=2;p[21]=4;put16(p+22,TCP_MSS); }
     if (n)
         memcpy(p + header, data, n);
@@ -232,7 +384,19 @@ static bool tcp_contiguous(uint32_t seq,const uint8_t *data,unsigned bytes,bool 
     uint32_t end=seq+bytes;
     unsigned skip=tcp.ack-seq;
     unsigned fresh=skip<bytes ? bytes-skip : 0;
-    if(fresh>sizeof(tcp.data)-tcp.used-1) return false;
+    if (fresh > tcp.capacity - tcp.used)
+        return false;
+    if (fresh && tcp.used + fresh > tcp.goal / 2u) {
+        tcp.pressure_at = ticks;
+        tcp.goal = tcp.capacity;
+        if (tcp.used + fresh > tcp.capacity / 2u && tcp.capacity < TCP_RECEIVE_MAX) {
+            unsigned capacity = tcp.capacity * 2u;
+            if (capacity > TCP_RECEIVE_MAX)
+                capacity = TCP_RECEIVE_MAX;
+            if (tcp_resize(capacity))
+                tcp.goal = capacity;
+        }
+    }
     if(fresh) {
         memcpy(tcp.data+tcp.used,data+skip,fresh);
         tcp.used+=fresh;tcp.ack+=fresh;tcp.data[tcp.used]=0;
@@ -243,51 +407,51 @@ static bool tcp_contiguous(uint32_t seq,const uint8_t *data,unsigned bytes,bool 
     return true;
 }
 static void tcp_drain_pending(void) {
-    for(unsigned pass=0;pass<TCP_REORDER;pass++) {
-        bool progress=false;
-        for(unsigned i=0;i<TCP_REORDER;i++) {
-            if(!tcp.pending[i].valid) continue;
-            if(tcp_contiguous(tcp.pending[i].seq,tcp.pending[i].data,
-                              tcp.pending[i].bytes,tcp.pending[i].fin)) {
-                tcp.pending[i].valid=false;progress=true;
-            }
-        }
-        if(!progress) break;
+    while (tcp.pending && (int32_t)(tcp.pending->seq - tcp.ack) <= 0) {
+        TcpPending *packet = tcp.pending;
+        if (!tcp_contiguous(packet->seq, packet->data, packet->bytes, packet->fin))
+            break;
+        tcp.pending = packet->next;
+        tcp.pending_memory -= sizeof(*packet) + packet->bytes;
+        heap_release(packet);
     }
 }
 static void tcp_payload(uint32_t seq,const uint8_t *data,unsigned bytes,bool fin) {
-    if(tcp_contiguous(seq,data,bytes,fin)) {
+    if (tcp_contiguous(seq, data, bytes, fin))
         tcp_drain_pending();
-    } else if((int32_t)(seq-tcp.ack)>0) {
+    else if ((int32_t)(seq - tcp.ack) > 0) {
         tcp_gaps++;
-        unsigned gap=seq-tcp.ack,window=sizeof(tcp.data)-tcp.used-1;
+        unsigned gap = seq - tcp.ack;
+        unsigned window = tcp.window_valid ? tcp_granted() : tcp.capacity - tcp.used;
         if(bytes<=1460 && gap<window && bytes<=window-gap) {
-            int available = -1;
-            for(unsigned i=0;i<TCP_REORDER;i++) {
-                if (!tcp.pending[i].valid) {
-                    if (available < 0)
-                        available = (int)i;
-                    continue;
-                }
-                if (tcp.pending[i].seq == seq && tcp.pending[i].bytes == bytes &&
-                    tcp.pending[i].fin == fin) {
+            TcpPending **link = &tcp.pending;
+            while (*link && (int32_t)((*link)->seq - seq) <= 0) {
+                if ((*link)->seq == seq && (*link)->bytes == bytes && (*link)->fin == fin) {
                     tcp_duplicates++;
                     send_tcp(0x10, NULL, 0);
                     return;
                 }
+                link = &(*link)->next;
             }
-            if (available >= 0) {
-                unsigned i = (unsigned)available;
-                tcp.pending[i].seq=seq;tcp.pending[i].bytes=bytes;tcp.pending[i].fin=fin;
-                if (bytes)
-                    memcpy(tcp.pending[i].data, data, bytes);
-                tcp.pending[i].valid=true;send_tcp(0x10,NULL,0);return;
+            size_t allocation = sizeof(TcpPending) + bytes;
+            if (allocation <= tcp.capacity - tcp.pending_memory) {
+                TcpPending *packet = heap_allocate_owned(allocation, 1);
+                if (packet) {
+                    *packet = (TcpPending){.next = *link, .seq = seq, .bytes = bytes, .fin = fin};
+                    if (bytes)
+                        memcpy(packet->data, data, bytes);
+                    *link = packet;
+                    tcp.pending_memory += allocation;
+                    send_tcp(0x10, NULL, 0);
+                    return;
+                }
+                tcp_allocation_failures++;
             }
         }
         tcp_queue_drops++;
     }
-    /* Cumulative ACK also advertises the gap when the bounded queue fills. */
-    if(bytes || fin) send_tcp(0x10,NULL,0);
+    if (bytes || fin)
+        send_tcp(0x10, NULL, 0);
 }
 static int skip_name(const uint8_t *p, int n, int pos) {
     for (int k = 0; k < 128 && pos < n; k++) {
@@ -435,6 +599,7 @@ static void receive(uint8_t *p, unsigned n) {
         }
         tcp.seq++;
         tcp.remote_ack=ack;
+        tcp_rtt_ack(ack);
         tcp.ack = seq + 1;
         tcp.state = 2;
         send_tcp(0x10, 0, 0);
@@ -443,7 +608,10 @@ static void receive(uint8_t *p, unsigned n) {
     if (tcp.state < 2)
         return;
     if(!(flags&0x10) || (int32_t)(ack-tcp.seq)>0) {send_tcp(0x10,NULL,0);return;}
-    if((int32_t)(ack-tcp.remote_ack)>0) tcp.remote_ack=ack;
+    if ((int32_t)(ack - tcp.remote_ack) > 0) {
+        tcp.remote_ack = ack;
+        tcp_rtt_ack(ack);
+    }
     unsigned bytes = len - th;
     tcp_payload(seq,d+th,bytes,(flags&1)!=0);
 }
@@ -612,6 +780,23 @@ void net_status(char *out, size_t cap) {
         for(unsigned i=0;i<5;i++) {
             char value[16];number(value,counts[i]);append(out,fields[i],cap);
             append(out,value,cap);append(out,"\n",cap);
+        }
+        const uint32_t adaptive[] = {
+            tcp.capacity, (uint32_t)tcp.pending_memory, tcp_peak_capacity, tcp_last_srtt,
+            tcp_last_rto, tcp_allocation_failures,      http_timeouts};
+        const char *adaptive_fields[] = {"TCP receive buffer bytes: ",
+                                         "TCP reorder memory bytes: ",
+                                         "TCP peak buffer bytes: ",
+                                         "TCP last RTT ms: ",
+                                         "TCP RTO ms: ",
+                                         "TCP allocation failures: ",
+                                         "HTTP timeouts: "};
+        for (unsigned i = 0; i < 7; i++) {
+            char value[16];
+            number(value, adaptive[i]);
+            append(out, adaptive_fields[i], cap);
+            append(out, value, cap);
+            append(out, "\n", cap);
         }
         if(failed_http_url[0]) {
             append(out,"Last HTTP failure: ",cap);append(out,failed_http_url,cap);append(out,"\n",cap);
@@ -900,6 +1085,7 @@ static bool ping_impl(const char *host, char *out, size_t cap) {
 }
 int stream_connect(const char *host, unsigned port) {
     static uint32_t connections;
+    stream_close();
     net_poll();
     connect_error="Network interface has no IPv4 configuration.";
     if (!net_ready)
@@ -911,7 +1097,17 @@ int stream_connect(const char *host, unsigned port) {
     connect_error="DNS resolution failed. Check the configured DNS server.";
     if (!resolve(host, ip))
         return -1;
-    memset(&tcp, 0, sizeof(tcp));
+    if (http_expired()) {
+        connect_error = transport_error;
+        return -1;
+    }
+    if (!tcp_resize(TCP_RECEIVE_MIN)) {
+        connect_error = "Insufficient memory for TCP receive buffer.";
+        return -1;
+    }
+    tcp.goal = tcp.capacity;
+    tcp.rto = TCP_RTO_MIN;
+    tcp.pressure_at = ticks;
     memcpy(tcp.ip, ip, 4);
     tcp.port = 40000 + (++connections % 20000);
     tcp.remote_port = port;
@@ -921,18 +1117,33 @@ int stream_connect(const char *host, unsigned port) {
     tcp.state = 1;
     for (int attempt = 0; attempt < 3 && tcp.state == 1; attempt++) {
         tcp_syns++;
+        tcp.sample_active = attempt == 0;
+        tcp.sample_at = ticks;
+        tcp.sample_end = tcp.seq + 1u;
         send_tcp(2, 0, 0);
         uint32_t start = ticks;
-        while (tcp.state == 1 && ticks - start < 100) {
+        while (tcp.state == 1 && ticks - start < tcp_rto()) {
             net_poll();
+            if (http_expired()) {
+                connect_error = transport_error;
+                stream_close();
+                return -1;
+            }
+            if (tcp.state != 1)
+                break;
             task_yield();
         }
+        if (tcp.state == 1)
+            tcp_backoff();
+        else if (attempt && tcp.rto < 3000u)
+            tcp.rto = 3000u;
     }
     if (tcp.state != 2) {
         connect_error=tcp.state<0 ? "TCP connection reset by peer." : "TCP connection timed out after DNS resolution.";
-        tcp.state = 0;
+        stream_close();
         return -1;
     }
+    tcp_last_rto = tcp_rto();
     connect_error="TCP connected.";
     transport_error="TCP connected.";
     return 0;
@@ -941,6 +1152,8 @@ int stream_write(const void *data, unsigned n) {
     const char *p = data;
     unsigned total = 0;
     while (total < n) {
+        if (http_expired())
+            return -1;
         unsigned chunk = n - total;
         if (chunk > TCP_MSS) chunk=TCP_MSS;
         if (chunk > tcp.peer_mss) chunk=tcp.peer_mss;
@@ -950,11 +1163,16 @@ int stream_write(const void *data, unsigned n) {
             if (tcp.state != 2)
                 return -1;
             tcp.seq = seq;
+            tcp.sample_active = attempt == 0;
+            tcp.sample_at = ticks;
+            tcp.sample_end = next;
             send_tcp(0x18, p + total, chunk);
             tcp.seq = next;
             uint32_t start = ticks;
-            while (ticks - start < 80) {
+            while (ticks - start < tcp_rto()) {
                 net_poll();
+                if (http_expired())
+                    return -1;
                 if ((int32_t)(tcp.remote_ack - next) >= 0) {
                     acked = true;
                     break;
@@ -963,6 +1181,8 @@ int stream_write(const void *data, unsigned n) {
                     return -1;
                 task_yield();
             }
+            if (!acked)
+                tcp_backoff();
         }
         if (!acked) {
             tcp_timeouts++;transport_error="TCP request ACK timed out.";
@@ -973,9 +1193,15 @@ int stream_write(const void *data, unsigned n) {
     return total;
 }
 int stream_read(void *out, unsigned n) {
-    uint32_t start = ticks, last_ack = ticks;
+    if (!n)
+        return 0;
+    uint32_t start = ticks, last_ack = ticks, probe_wait = tcp_rto();
+    if (http_expired())
+        return -1;
     while (!tcp.used) {
         net_poll();
+        if (http_expired())
+            return -1;
         /* The peer may close the connection in the same packet that carries
          * the last data: deliver what is buffered before honouring the close. */
         if (tcp.used)
@@ -988,13 +1214,21 @@ int stream_read(void *out, unsigned n) {
             if(tcp.state!=-1) transport_error="Network link or IPv4 configuration lost.";
             return -1;
         }
-        if (ticks - start > TCP_RECEIVE_IDLE_MS) {
-            tcp_timeouts++;transport_error="TCP receive timed out waiting for missing data.";
+        if (ticks - start > tcp_read_budget()) {
+            if (http_operation.active) {
+                http_timeouts++;
+                transport_error = "HTTP response idle timeout.";
+            } else {
+                tcp_timeouts++;
+                transport_error = "TCP receive wait budget exceeded.";
+            }
             return -1;
         }
-        if (ticks - last_ack >= 1000u) {
+        if (ticks - last_ack >= probe_wait) {
             send_tcp(0x10, NULL, 0);
             last_ack = ticks;
+            if (probe_wait < TCP_RTO_MAX)
+                probe_wait = probe_wait > TCP_RTO_MAX / 2u ? TCP_RTO_MAX : probe_wait * 2u;
         }
         task_yield();
     }
@@ -1004,14 +1238,14 @@ int stream_read(void *out, unsigned n) {
     tcp.used -= n;
     memmove(tcp.data, tcp.data + n, tcp.used);
     tcp_drain_pending();
+    tcp_tune_receive();
     send_tcp(0x10, 0, 0);
     return n;
 }
 void stream_close(void) {
     if (tcp.state == 2)
         send_tcp(0x11, 0, 0);
-    tcp.state = 0;
-    tcp.used = 0;
+    tcp_release();
 }
 static bool equals_ci(const char *a, const char *b, size_t n) {
     while (n--) {
@@ -1269,6 +1503,7 @@ static int http_open(const char *url, bool *secured, char *error, size_t ecap) {
         append(error, connect_error, ecap);
         return -1;
     }
+    stream_set_read_policy(HTTP_IDLE_TIMEOUT_MS, HTTP_IDLE_TIMEOUT_MS);
     if (secure && !tls_connect(host, error, ecap)) {
         stream_close();
         return -1;
@@ -1390,7 +1625,8 @@ void net_cancel_owner(uint32_t pid) {
     fs_abort_write(pid);
     if (network_owner == pid) {
         network_owner = 0;
-        tcp.state = 0;
+        tcp_release();
+        http_operation.active = false;
     }
 }
 bool net_ping(const char *host, char *out, size_t cap) {
@@ -1411,7 +1647,8 @@ int net_http(const char *url, char *out, size_t cap, char *error, size_t ecap) {
         return -1;
     }
     network_owner = task_current()->pid;
-    int result = http_impl(url, out, cap, error, ecap, false);
+    http_begin(HTTP_OPERATION_TIMEOUT_MS);
+    int result = http_end(http_impl(url, out, cap, error, ecap, false), out, error, ecap);
     if(result<0) {
         failed_http_url[0]=failed_http_error[0]=0;
         append(failed_http_url,url,sizeof(failed_http_url));
@@ -1427,7 +1664,8 @@ int net_https(const char *url, char *out, size_t cap, char *error, size_t ecap) 
     out[0] = error[0] = 0;
     if (network_owner) { append(error, "Network service busy.", ecap); return -1; }
     network_owner = task_current()->pid;
-    int result = http_impl(url, out, cap, error, ecap, true);
+    http_begin(HTTP_OPERATION_TIMEOUT_MS);
+    int result = http_end(http_impl(url, out, cap, error, ecap, true), out, error, ecap);
     network_owner = 0;
     return result;
 }
@@ -1464,6 +1702,7 @@ bool net_download_file(const char *url, const char *path, uint64_t *written, cha
         append(error, "Cannot stage download on the writable data volume.", ecap);
         goto done;
     }
+    http_begin(0);
     for (unsigned hop = 0; hop < 8; hop++) {
         bool secure;
         if (http_open(current, &secure, error, ecap) < 0)
@@ -1508,6 +1747,7 @@ bool net_download_file(const char *url, const char *path, uint64_t *written, cha
     }
     append(error, "Too many HTTP redirects.", ecap);
 done:
+    http_operation.active = false;
     stream_close();
     fs_abort_write(network_owner);
     network_owner = 0;
