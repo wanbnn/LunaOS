@@ -131,6 +131,200 @@ static void layout_regressions(void) {
     web_free_tree(root);
 }
 
+
+
+static void dom_mutation_regressions(void) {
+    WebNode *document = web_node_new(WEB_ELEMENT);
+    document->tag = web_strdup("#document");
+    WebNode *parent = web_node_new(WEB_ELEMENT);
+    parent->tag = web_strdup("main");
+    WebNode *first = web_node_new(WEB_ELEMENT);
+    first->tag = web_strdup("a");
+    WebNode *second = web_node_new(WEB_ELEMENT);
+    second->tag = web_strdup("b");
+    WebNode *third = web_node_new(WEB_ELEMENT);
+    third->tag = web_strdup("c");
+    web_node_append(document, parent);
+    web_node_append(parent, first);
+    web_node_append(parent, second);
+    web_node_append(parent, third);
+    check(web_node_contains(document, third) && !web_node_contains(third, parent),
+          "DOM ancestry follows parent pointers");
+    check(!web_node_insert_before(first, parent, 0) &&
+          !web_node_insert_before(parent, parent, 0),
+          "DOM cannot move an ancestor under its descendant or itself");
+    check(web_node_insert_before(parent, third, first) &&
+          parent->first_child == third && third->next == first &&
+          first->prev == third && parent->last_child == second,
+          "insertBefore moves nodes and repairs sibling links");
+    check(web_node_insert_before(parent, first, first) &&
+          third->next == first && first->next == second,
+          "insertBefore of a node before itself is a no-op");
+    check(!web_node_insert_before(parent, second, document) &&
+          second->parent == parent,
+          "insertBefore rejects a reference outside the parent");
+    web_node_detach(first);
+    check(!first->parent && !first->next && !first->prev &&
+          third->next == second && second->prev == third,
+          "detach preserves remaining links and leaves node reusable");
+    check(web_node_insert_before(parent, first, 0) &&
+          parent->last_child == first && first->prev == second,
+          "detached node can be reattached at the end");
+    web_set_attr(parent, "data-state", "source");
+    WebNode *shallow = web_node_clone(parent, false);
+    WebNode *deep = web_node_clone(parent, true);
+    check(shallow && !shallow->first_child &&
+          !strcmp(web_attr(shallow, "data-state"), "source"),
+          "shallow clone copies attributes but not children");
+    check(deep && deep->first_child && deep->first_child != parent->first_child &&
+          deep->first_child->parent == deep,
+          "deep clone owns independent descendant nodes");
+    web_set_attr(deep, "data-state", "copy");
+    check(!strcmp(web_attr(parent, "data-state"), "source"),
+          "cloned attributes do not alias the original strings");
+    web_free_tree(shallow);
+    web_free_tree(deep);
+    web_free_tree(document);
+}
+
+static void foreign_namespace_regressions(void) {
+    const char *html = "<html><body><svg id='svg'><g id='group'>"
+                       "<foreignObject><div id='foreign-html'>text</div></foreignObject>"
+                       "</g></svg><math id='math'><mi id='math-child'>x</mi></math></body></html>";
+    WebNode *root = 0;
+    char error[128] = {0};
+    check(web_parse(html, strlen(html), &root, error, sizeof(error)),
+          "foreign namespace fixture parses");
+    if (!root)
+        return;
+    WebNode *svg = web_find_by_id(root, "svg");
+    WebNode *group = web_find_by_id(root, "group");
+    WebNode *html_child = web_find_by_id(root, "foreign-html");
+    WebNode *math = web_find_by_id(root, "math");
+    WebNode *math_child = web_find_by_id(root, "math-child");
+    check(svg && group && svg->namespace_id == WEB_NS_SVG &&
+          group->namespace_id == WEB_NS_SVG,
+          "SVG child nodes inherit SVG namespace");
+    check(html_child && html_child->namespace_id == WEB_NS_HTML,
+          "foreignObject integration point returns to HTML namespace");
+    check(math && math_child && math->namespace_id == WEB_NS_MATHML &&
+          math_child->namespace_id == WEB_NS_MATHML,
+          "MathML children inherit MathML namespace");
+    WebNode *clone = web_node_clone(svg, true);
+    check(clone && clone->namespace_id == WEB_NS_SVG &&
+          clone->first_child && clone->first_child->namespace_id == WEB_NS_SVG,
+          "DOM cloning preserves namespace identities");
+    web_free_tree(clone);
+    web_free_tree(root);
+}
+
+
+static void template_shadow_regressions(void) {
+    const char *html = "<html><body><template id='template'><p id='inert'>"
+                       "inert text</p><span>more</span></template><p id='live'>live</p></body></html>";
+    WebNode *document = 0;
+    char error[128] = {0};
+    check(web_parse(html, strlen(html), &document, error, sizeof(error)),
+          "HTML template fixture parses");
+    if (!document)
+        return;
+    WebNode *tmpl = web_find_by_id(document, "template");
+    check(tmpl && tmpl->template_content &&
+          tmpl->template_content->type == WEB_DOCUMENT_FRAGMENT &&
+          !tmpl->first_child && tmpl->template_content->first_child,
+          "template descendants are stored in an inert DocumentFragment");
+    check(web_find_by_id(document, "inert") == 0 &&
+          web_find_by_id(tmpl->template_content, "inert") != 0,
+          "template content is excluded from document tree searches");
+    WebNode *clone = web_node_clone(tmpl, true);
+    check(clone && clone->template_content && clone->template_content->first_child &&
+          clone->template_content->first_child != tmpl->template_content->first_child,
+          "cloning a template copies its content subtree");
+    web_free_tree(clone);
+    WebNode *host = web_find_by_id(document, "live");
+    WebNode *shadow = web_attach_shadow(host, true);
+    check(shadow && shadow->type == WEB_SHADOW_ROOT && shadow->host == host &&
+          host->shadow_root == shadow && host->shadow_open,
+          "open ShadowRoot is owned by its host");
+    check(web_attach_shadow(host, false) == 0,
+          "host cannot attach a second ShadowRoot");
+    WebNode *span = web_node_new(WEB_ELEMENT);
+    span->tag = web_strdup("span");
+    web_node_append(shadow, span);
+    check(!web_find_first(document, "span") && span->parent == shadow,
+          "shadow descendants remain outside host light-DOM traversal");
+    WebNode *fragment = web_node_new(WEB_DOCUMENT_FRAGMENT);
+    WebNode *one = web_node_new(WEB_ELEMENT);
+    one->tag = web_strdup("b");
+    WebNode *two = web_node_new(WEB_ELEMENT);
+    two->tag = web_strdup("i");
+    web_node_append(fragment, one);
+    web_node_append(fragment, two);
+    check(web_node_insert_before(host, fragment, 0) && !fragment->first_child &&
+          host->last_child == two && one->next == two && two->prev == one &&
+          one->parent == host && two->parent == host,
+          "inserting DocumentFragment moves children in document order");
+    web_free_tree(fragment);
+    web_free_tree(document);
+}
+
+static void html_dom_regressions(void) {
+    const char *html =
+        "<!doctype html><html><head><title>A &amp; B</TITLE  ></head><body>"
+        "<section id='tree'>first <b>second</b> third <i>fourth</i></section>"
+        "<!-- a real DOM comment -->"
+        "<input disabled checked='' id='control' id='ignored'>"
+        "<div id='outer'/><span id='nested'>inside</span></div>"
+        "<textarea id='area'>A &lt; B &amp; C</TEXTAREA >"
+        "<script id='script'>if (a < b) { x = '&amp;'; }</SCRIPT >"
+        "<p id='unicode'>&#x1F600; &#128512; &#x110000; &#0; &#xZZ; tail</p>"
+        "<p id='end'>before</p><p id='next'>after</p>"
+        "</body></html>";
+    WebNode *root = 0;
+    char error[128] = {0};
+    check(web_parse(html, strlen(html), &root, error, sizeof(error)),
+          "HTML/DOM regression fixture parses");
+    if (!root)
+        return;
+    char value[256];
+    WebNode *tree = web_find_by_id(root, "tree");
+    web_node_text(tree, value, sizeof(value));
+    check(!strcmp(value, "first second third fourth"),
+          "textContent collects all text children in document order");
+    WebNode *comment = tree ? tree->next : 0;
+    check(comment && comment->type == WEB_COMMENT &&
+          !strcmp(comment->text, " a real DOM comment "),
+          "HTML comments become DOM comment nodes with preserved data");
+    WebNode *control = web_find_by_id(root, "control");
+    check(control && !strcmp(web_attr(control, "disabled"), "") &&
+          !strcmp(web_attr(control, "checked"), "") &&
+          !strcmp(web_attr(control, "id"), "control"),
+          "boolean HTML attributes are empty and duplicate attributes keep first value");
+    WebNode *nested = web_find_by_id(root, "nested");
+    check(nested && nested->parent == web_find_by_id(root, "outer"),
+          "self-closing slash does not close a non-void HTML element");
+    WebNode *area = web_find_by_id(root, "area");
+    web_node_text(area, value, sizeof(value));
+    check(!strcmp(value, "A < B & C"),
+          "textarea RCDATA decodes entities and recognizes case-insensitive close");
+    WebNode *script = web_find_by_id(root, "script");
+    web_node_text(script, value, sizeof(value));
+    check(!strcmp(value, "if (a < b) { x = '&amp;'; }"),
+          "script raw text remains undecoded until case-insensitive end tag");
+    WebNode *title = web_find_first(root, "title");
+    web_node_text(title, value, sizeof(value));
+    check(!strcmp(value, "A & B"), "title RCDATA decodes entities");
+    WebNode *unicode = web_find_by_id(root, "unicode");
+    web_node_text(unicode, value, sizeof(value));
+    check(strstr(value, "\xF0\x9F\x98\x80") != 0 &&
+          strstr(value, "\xEF\xBF\xBD") != 0 &&
+          strstr(value, "&#xZZ; tail") != 0,
+          "numeric entities support supplementary planes and preserve malformed references");
+    check(web_find_by_id(root, "next")->parent == web_find_by_id(root, "end")->parent,
+          "explicit paragraph close preserves sibling structure");
+    web_free_tree(root);
+}
+
 int main(void) {
     WebNode *root = 0;
     char error[128];
@@ -232,6 +426,10 @@ int main(void) {
     css_free_sheet(rules, count);
     web_free_tree(root);
     layout_regressions();
+    html_dom_regressions();
+    dom_mutation_regressions();
+    foreign_namespace_regressions();
+    template_shadow_regressions();
     printf(failures ? "\n%d check(s) failed\n" : "\nall checks passed\n", failures);
     return failures ? 1 : 0;
 }

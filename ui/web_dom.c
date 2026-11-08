@@ -44,17 +44,76 @@ WebNode *web_node_new(unsigned char type) {
     WebNode *n = web_malloc(sizeof(WebNode));
     memset(n, 0, sizeof(WebNode));
     n->type = type;
+    if (type == WEB_DOCUMENT_FRAGMENT || type == WEB_SHADOW_ROOT)
+        n->tag = web_strdup("#document-fragment");
     return n;
 }
-void web_node_append(WebNode *parent, WebNode *child) {
-    child->parent = parent;
-    child->prev = parent->last_child;
-    child->next = 0;
-    if (parent->last_child)
-        parent->last_child->next = child;
+/* DOM tree invariants: a node has one parent, never its descendant.
+ * Detached nodes remain owned by the caller until explicitly destroyed. */
+bool web_node_contains(const WebNode *ancestor, const WebNode *node) {
+    for (const WebNode *p = node; p; p = p->parent)
+        if (p == ancestor)
+            return true;
+    return false;
+}
+void web_node_detach(WebNode *node) {
+    if (!node || !node->parent)
+        return;
+    WebNode *parent = node->parent;
+    if (node->prev)
+        node->prev->next = node->next;
     else
-        parent->first_child = child;
-    parent->last_child = child;
+        parent->first_child = node->next;
+    if (node->next)
+        node->next->prev = node->prev;
+    else
+        parent->last_child = node->prev;
+    node->parent = node->next = node->prev = 0;
+}
+bool web_node_insert_before(WebNode *parent, WebNode *child, WebNode *reference) {
+    if (!parent || !child || web_node_contains(child, parent) ||
+        child->type == WEB_SHADOW_ROOT)
+        return false;
+    if (reference && reference->parent != parent)
+        return false;
+    if (reference == child)
+        return true;
+    if (child->type == WEB_DOCUMENT_FRAGMENT) {
+        /* DOM fragment insertion moves its children, not the fragment. */
+        for (WebNode *n = child->first_child; n; n = n->next)
+            if (web_node_contains(n, parent))
+                return false;
+        while (child->first_child) {
+            WebNode *n = child->first_child;
+            web_node_detach(n);
+            if (!web_node_insert_before(parent, n, reference))
+                return false;
+        }
+        return true;
+    }
+    web_node_detach(child);
+    child->parent = parent;
+    if (!reference) {
+        child->prev = parent->last_child;
+        if (parent->last_child)
+            parent->last_child->next = child;
+        else
+            parent->first_child = child;
+        parent->last_child = child;
+        child->next = 0;
+    } else {
+        child->next = reference;
+        child->prev = reference->prev;
+        if (reference->prev)
+            reference->prev->next = child;
+        else
+            parent->first_child = child;
+        reference->prev = child;
+    }
+    return true;
+}
+void web_node_append(WebNode *parent, WebNode *child) {
+    (void)web_node_insert_before(parent, child, 0);
 }
 const char *web_attr(const WebNode *node, const char *name) {
     for (WebAttr *a = node->attrs; a; a = a->next)
@@ -79,6 +138,38 @@ void web_set_attr(WebNode *node, const char *name, const char *value) {
     a->next = node->attrs;
     node->attrs = a;
 }
+/* Clone a node and, optionally, its descendants without sharing owned data.
+ * Layout, decoded image buffers and JavaScript state are intentionally not copied. */
+WebNode *web_node_clone(const WebNode *source, bool deep) {
+    if (!source)
+        return 0;
+    WebNode *copy = web_node_new(source->type);
+    web_free(copy->tag); /* fragment constructor installs a default tag */
+    copy->tag = web_strdup(source->tag);
+    copy->namespace_id = source->namespace_id;
+    copy->text = web_strdup(source->text);
+    for (const WebAttr *a = source->attrs; a; a = a->next)
+        web_set_attr(copy, a->name, a->value);
+    if (deep) {
+        for (const WebNode *child = source->first_child; child; child = child->next)
+            web_node_append(copy, web_node_clone(child, true));
+    }
+    if (source->template_content) {
+        copy->template_content = web_node_clone(source->template_content, deep);
+    }
+    /* Shadow trees are intentionally not implicitly cloned. */
+    return copy;
+}
+WebNode *web_attach_shadow(WebNode *host, bool open_mode) {
+    if (!host || host->type != WEB_ELEMENT || host->shadow_root ||
+        host->namespace_id != WEB_NS_HTML)
+        return 0;
+    WebNode *root = web_node_new(WEB_SHADOW_ROOT);
+    root->host = host;
+    host->shadow_root = root;
+    host->shadow_open = open_mode;
+    return root;
+}
 void web_free_tree(WebNode *node) {
     if (!node)
         return;
@@ -88,6 +179,8 @@ void web_free_tree(WebNode *node) {
         web_free_tree(child);
         child = next;
     }
+    web_free_tree(node->template_content);
+    web_free_tree(node->shadow_root);
     WebAttr *a = node->attrs;
     while (a) {
         WebAttr *next = a->next;
@@ -101,18 +194,22 @@ void web_free_tree(WebNode *node) {
     web_free(node->text);
     web_free(node);
 }
+static void collect_text(WebNode *node, char *out, size_t cap) {
+    if (!node)
+        return;
+    if (node->type == WEB_TEXT) {
+        if (node->text)
+            append(out, node->text, cap);
+        return;
+    }
+    for (WebNode *c = node->first_child; c; c = c->next)
+        collect_text(c, out, cap);
+}
 void web_node_text(WebNode *node, char *out, size_t cap) {
     if (!cap)
         return;
     out[0] = 0;
-    if (!node)
-        return;
-    if (node->type == WEB_TEXT) {
-        append(out, node->text, cap);
-        return;
-    }
-    for (WebNode *c = node->first_child; c; c = c->next)
-        web_node_text(c, out, cap);
+    collect_text(node, out, cap);
 }
 WebNode *web_find_by_id(WebNode *root, const char *id) {
     if (!root || !id || !*id)
@@ -233,31 +330,38 @@ static char *decode_entities(const char *src, size_t len, size_t *out_len) {
         size_t j = i + 1;
         if (j < len && src[j] == '#') {
             j++;
-            unsigned code = 0;
+            bool hex = false, digits = false, overflow = false;
+            uint32_t code = 0;
             if (j < len && (src[j] == 'x' || src[j] == 'X')) {
+                hex = true;
                 j++;
-                while (j < len && is_hex(src[j])) {
-                    code = code * 16 + (unsigned)(src[j] <= '9' ? src[j] - '0' :
-                                                             (src[j] | 32) - 'a' + 10);
-                    j++;
-                }
-            } else {
-                while (j < len && src[j] >= '0' && src[j] <= '9') {
-                    code = code * 10 + (unsigned)(src[j] - '0');
-                    j++;
-                }
+            }
+            while (j < len && (hex ? is_hex(src[j]) : (src[j] >= '0' && src[j] <= '9'))) {
+                unsigned digit = (unsigned)(src[j] <= '9' ? src[j] - '0' :
+                                                  (src[j] | 32) - 'a' + 10);
+                unsigned base = hex ? 16u : 10u;
+                if (code > (0x10ffffu - digit) / base)
+                    overflow = true;
+                else if (!overflow)
+                    code = code * base + digit;
+                digits = true;
+                j++;
+            }
+            if (!digits) {
+                out[o++] = '&';
+                i++;
+                continue;
             }
             if (j < len && src[j] == ';')
                 j++;
-            if (code && code < 0x10000) {
-                char tmp[5];
-                utf8_encode(tmp, code);
-                size_t n = strlen(tmp);
-                memcpy(out + o, tmp, n);
-                o += n;
-            } else {
-                out[o++] = '&';
-            }
+            if (overflow || !code || code > 0x10ffffu ||
+                (code >= 0xd800u && code <= 0xdfffu))
+                code = 0xfffdu;
+            char tmp[5];
+            utf8_encode(tmp, code);
+            size_t n = strlen(tmp);
+            memcpy(out + o, tmp, n);
+            o += n;
             i = j;
             continue;
         }
@@ -301,7 +405,12 @@ static bool is_alpha(char c) {
 static bool name_char(char c) {
     return is_alpha(c) || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == ':';
 }
-static WebNode *current(WebParser *ps) { return ps->depth ? ps->open[ps->depth - 1] : 0; }
+static WebNode *current(WebParser *ps) {
+    if (!ps->depth)
+        return 0;
+    WebNode *top = ps->open[ps->depth - 1];
+    return top->template_content ? top->template_content : top;
+}
 
 static void add_text(WebParser *ps, const char *text, size_t len) {
     if (!len)
@@ -346,6 +455,10 @@ static bool implied_close(const char *open, const char *incoming) {
         return is_block_tag(incoming);
     if (!strcmp(open, "li"))
         return !strcmp(incoming, "li");
+    if (!strcmp(open, "rt") || !strcmp(open, "rp"))
+        return !strcmp(incoming, "rt") || !strcmp(incoming, "rp");
+    if (!strcmp(open, "optgroup"))
+        return !strcmp(incoming, "optgroup");
     if (!strcmp(open, "dt") || !strcmp(open, "dd"))
         return !strcmp(incoming, "dt") || !strcmp(incoming, "dd");
     if (!strcmp(open, "option"))
@@ -354,8 +467,16 @@ static bool implied_close(const char *open, const char *incoming) {
         return !strcmp(incoming, "td") || !strcmp(incoming, "th") || !strcmp(incoming, "tr");
     if (!strcmp(open, "tr"))
         return !strcmp(incoming, "tr") || !strcmp(incoming, "thead") || !strcmp(incoming, "tbody");
-    if (!strcmp(open, "thead") || !strcmp(open, "tbody"))
-        return !strcmp(incoming, "tbody") || !strcmp(incoming, "tfoot");
+    if (!strcmp(open, "thead") || !strcmp(open, "tbody") || !strcmp(open, "tfoot"))
+        return !strcmp(incoming, "thead") || !strcmp(incoming, "tbody") ||
+               !strcmp(incoming, "tfoot");
+    if (!strcmp(open, "colgroup"))
+        return !strcmp(incoming, "colgroup");
+    if (!strcmp(open, "h1") || !strcmp(open, "h2") || !strcmp(open, "h3") ||
+        !strcmp(open, "h4") || !strcmp(open, "h5") || !strcmp(open, "h6"))
+        return !strcmp(incoming, "h1") || !strcmp(incoming, "h2") ||
+               !strcmp(incoming, "h3") || !strcmp(incoming, "h4") ||
+               !strcmp(incoming, "h5") || !strcmp(incoming, "h6");
     return false;
 }
 static void close_implied(WebParser *ps, const char *incoming) {
@@ -386,7 +507,8 @@ static void parse_attributes(WebParser *ps, WebNode *node) {
         if (ps->p >= ps->end || *ps->p == '>' || (*ps->p == '/' && ps->p + 1 < ps->end && ps->p[1] == '>'))
             break;
         const char *name_start = ps->p;
-        while (ps->p < ps->end && !is_space(*ps->p) && *ps->p != '=' && *ps->p != '>')
+        while (ps->p < ps->end && !is_space(*ps->p) && *ps->p != '=' &&
+               *ps->p != '>' && !(*ps->p == '/' && ps->p + 1 < ps->end && ps->p[1] == '>'))
             ps->p++;
         size_t name_len = (size_t)(ps->p - name_start);
         if (!name_len) {
@@ -423,9 +545,11 @@ static void parse_attributes(WebParser *ps, WebNode *node) {
                 value = decode_entities(value_start, raw_len, &decoded_len);
             }
         } else {
-            value = web_strdup(name);
+            value = web_strdup("");
         }
-        web_set_attr(node, name, value);
+        /* HTML uses the first occurrence of a duplicate attribute. */
+        if (!web_attr_has(node, name))
+            web_set_attr(node, name, value);
         web_free(name);
         web_free(value);
     }
@@ -449,6 +573,18 @@ static void parse_start_tag(WebParser *ps) {
     WebNode *node = web_node_new(WEB_ELEMENT);
     node->tag = tag;
     WebNode *parent = current(ps);
+    if (parent) {
+        node->namespace_id = parent->namespace_id;
+        if (parent->namespace_id == WEB_NS_SVG &&
+            (!strcmp(parent->tag, "foreignobject") ||
+             !strcmp(parent->tag, "desc") ||
+             !strcmp(parent->tag, "title")))
+            node->namespace_id = WEB_NS_HTML;
+        if (!strcmp(tag, "svg") && node->namespace_id == WEB_NS_HTML)
+            node->namespace_id = WEB_NS_SVG;
+        else if (!strcmp(tag, "math") && node->namespace_id == WEB_NS_HTML)
+            node->namespace_id = WEB_NS_MATHML;
+    }
     if (!parent) {
         web_free_tree(node);
         return;
@@ -462,42 +598,55 @@ static void parse_start_tag(WebParser *ps) {
     }
     if (ps->p < ps->end && *ps->p == '>')
         ps->p++;
-    if (web_is_void_tag(node->tag) || self_closing)
+    /* A trailing slash is ignored on non-void HTML elements. */
+    (void)self_closing;
+    if (web_is_void_tag(node->tag))
         return;
+    if (node->namespace_id == WEB_NS_HTML && !strcmp(node->tag, "template"))
+        node->template_content = web_node_new(WEB_DOCUMENT_FRAGMENT);
     if (is_raw_tag(node->tag)) {
-        /* Raw text elements keep their content verbatim until the end tag. */
-        char close_tag[16];
-        close_tag[0] = '<';
-        close_tag[1] = '/';
+        /* Raw script/style and RCDATA textarea/title end at a matching,
+         * ASCII-case-insensitive end tag; whitespace before '>' is allowed. */
+        const char *hit = 0, *after = 0;
         size_t n = strlen(node->tag);
-        memcpy(close_tag + 2, node->tag, n);
-        close_tag[2 + n] = '>';
-        close_tag[3 + n] = 0;
-        const char *start = ps->p;
-        const char *hit = 0;
-        while (start < ps->end) {
-            const char *found = start;
-            while (found < ps->end && *found != '<')
-                found++;
-            if (found >= ps->end)
-                break;
-            size_t remain = (size_t)(ps->end - found);
-            if (remain >= strlen(close_tag) && !strncmp(found, close_tag, strlen(close_tag))) {
-                hit = found;
+        for (const char *q = ps->p; q + n + 2 <= ps->end; q++) {
+            if (q[0] != '<' || q[1] != '/')
+                continue;
+            size_t k = 0;
+            while (k < n && q + 2 + k < ps->end) {
+                char ch = q[2 + k];
+                if (ch >= 'A' && ch <= 'Z')
+                    ch = (char)(ch + 32);
+                if (ch != node->tag[k])
+                    break;
+                k++;
+            }
+            if (k != n)
+                continue;
+            const char *tail = q + 2 + n;
+            if (tail < ps->end && *tail != '>' && !is_space(*tail))
+                continue;
+            while (tail < ps->end && is_space(*tail))
+                tail++;
+            if (tail < ps->end && *tail == '>') {
+                hit = q;
+                after = tail + 1;
                 break;
             }
-            start = found + 1;
         }
         const char *content_end = hit ? hit : ps->end;
         if (content_end > ps->p) {
             WebNode *text = web_node_new(WEB_TEXT);
-            text->text = web_strndup(ps->p, (size_t)(content_end - ps->p));
+            size_t length = (size_t)(content_end - ps->p);
+            if (!strcmp(node->tag, "textarea") || !strcmp(node->tag, "title")) {
+                size_t decoded_len;
+                text->text = decode_entities(ps->p, length, &decoded_len);
+            } else {
+                text->text = web_strndup(ps->p, length);
+            }
             web_node_append(node, text);
         }
-        ps->p = content_end;
-        if (hit) {
-            ps->p += strlen(close_tag);
-        }
+        ps->p = hit ? after : ps->end;
         return;
     }
     push(ps, node);
@@ -513,7 +662,9 @@ static void parse_end_tag(WebParser *ps) {
     for (char *q = tag; *q; q++)
         if (*q >= 'A' && *q <= 'Z')
             *q = (char)(*q + 32);
-    if (ps->p < ps->end && *ps->p == '>')
+    while (ps->p < ps->end && *ps->p != '>')
+        ps->p++;
+    if (ps->p < ps->end)
         ps->p++;
     close_to(ps, tag);
     web_free(tag);
@@ -532,10 +683,16 @@ bool web_parse(const char *html, size_t len, WebNode **root, char *error, size_t
     while (ps.p < ps.end && !ps.failed) {
         if (*ps.p == '<') {
             if (ps.p + 3 < ps.end && !strncmp(ps.p, "<!--", 4)) {
-                const char *end = ps.p + 4;
+                const char *begin = ps.p + 4;
+                const char *end = begin;
                 while (end + 2 < ps.end && strncmp(end, "-->", 3))
                     end++;
-                ps.p = end + 3 <= ps.end ? end + 3 : ps.end;
+                bool closed = end + 2 < ps.end;
+                const char *content_end = closed ? end : ps.end;
+                WebNode *comment = web_node_new(WEB_COMMENT);
+                comment->text = web_strndup(begin, (size_t)(content_end - begin));
+                web_node_append(current(&ps), comment);
+                ps.p = closed ? end + 3 : ps.end;
                 continue;
             }
             if (ps.p + 1 < ps.end && ps.p[1] == '!') {
