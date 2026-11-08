@@ -914,7 +914,8 @@ static void ua_defaults(WebNode *el, WebStyle *s) {
     /* Metadata elements never take part in the rendered page. */
     if (!strcmp(tag, "style") || !strcmp(tag, "script") || !strcmp(tag, "head") ||
         !strcmp(tag, "title") || !strcmp(tag, "meta") || !strcmp(tag, "link") ||
-        !strcmp(tag, "base") || !strcmp(tag, "noscript")) {
+        !strcmp(tag, "base") || !strcmp(tag, "noscript") ||
+        !strcmp(tag, "template") || !strcmp(tag, "source")) {
         s->display = WEB_DISPLAY_NONE;
         return;
     }
@@ -1288,6 +1289,25 @@ static void style_element(WebNode *el, WebRule *rules, int count, const WebStyle
                 el->style.font_size = parent_style ? parent_style->font_size : 16;
             apply_declaration(&el->style, d->name, d->value);
         }
+    /* HTML hidden controls are not CSS boxes. In particular, Google embeds
+     * internal form values (ei, hl, encoding, etc.) as hidden inputs; the
+     * old renderer painted their values visibly and corrupted line layout.
+     * A hidden input never generates a box, even if display is overridden. */
+    if (el->type == WEB_ELEMENT && el->tag) {
+        if (!strcmp(el->tag, "input")) {
+            const char *type = web_attr(el, "type");
+            if (type && !web_strcasecmp(type, "hidden"))
+                el->style.display = WEB_DISPLAY_NONE;
+        }
+        /* The hidden HTML attribute applies unless author CSS explicitly
+         * overrides it, unlike input[type=hidden]. */
+        if (web_attr_has(el, "hidden") &&
+            el->style.display != WEB_DISPLAY_NONE) {
+            const char *inline_style = web_attr(el, "style");
+            if (!inline_style || !strstr(inline_style, "display"))
+                el->style.display = WEB_DISPLAY_NONE;
+        }
+    }
     web_free(candidates);
     decl_free_list(inline_decls);
     el->styled = true;
