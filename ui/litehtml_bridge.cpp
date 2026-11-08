@@ -161,6 +161,11 @@ extern "C" void luna_lite_draw(LunaLiteDocument *d, int x, int y) {
     position clip(0, 0, (pixel_t)d->container.width, (pixel_t)d->container.height);
     d->doc->draw(0, (pixel_t)x, (pixel_t)y, &clip);
 }
+extern "C" void luna_lite_add_css(LunaLiteDocument *d, const char *css) {
+    if (!d || !d->doc || !css || !*css) return;
+    d->doc->add_stylesheet(css, "", "screen");
+    d->doc->render((pixel_t)d->container.width);
+}
 extern "C" int luna_lite_document_height(const LunaLiteDocument *d) {
     return d && d->doc ? (int)d->doc->height() : 0;
 }
