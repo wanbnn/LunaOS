@@ -1,99 +1,89 @@
 # Laboratório de dispositivos Wi-Fi
 
-O laboratório usa modelos explícitos de componentes dentro do QEMU 10.2.0.
-Não substitui as interfaces de chipset por uma placa Ethernet. Os modelos são
-ferramentas de desenvolvimento e não são incluídos na ISO.
+O laboratório usa o QEMU 10.2.0 fixado pelo projeto. O driver nativo do
+RTL8822BE acessa BAR2, registradores PCIe e descritores TXBD/RXBD. O ponto de
+acesso separado troca quadros 802.11 por UDP local. Os modelos ficam no
+ambiente de desenvolvimento.
 
-## Estado verificável
+## Cobertura atual
 
-| Alvo | Modelo QEMU | Driver LunaOS | Conexão |
-|---|---|---|---|
-| Realtek RTL8822BE | Parcial: energia, efuse de teste, RF, transferência de firmware e RX DMA | Driver nativo existente exercitado no QEMU, scanner passivo | Não implementada |
-| Intel 8265 | Pendente | Transporte 8000, firmware ALIVE, NVM e filas pendentes | Não implementada |
-| Qualcomm QCA9377 | Pendente | BMI, CE, HTC, WMI/HTT, firmware e board data pendentes | Não implementada |
+| Alvo | Modelo | Integração |
+|---|---|---|
+| RTL8822BE | Energia, efuse de teste, sintonia, transferência de firmware, TX DMA MGMT/BE e RX DMA | Driver nativo, autenticação, associação, WPA2/CCMP, DHCP, DNS, ICMP, HTTP e CSS |
+| Intel 8265 | Pendente | Transporte e firmware pendentes |
+| Qualcomm QCA9377 | Pendente | BMI, CE, HTC, WMI/HTT e board data pendentes |
 
-Esta etapa não completa o pedido de suporte funcional dos três fabricantes.
-Intel AX211/CNVio não é equivalente a Intel 8265/PCIe. O modelo do 8265 não
-validará o AX211. Também não se deve extrapolar entre variantes Qualcomm que
-compartilham IDs PCI.
+Intel AX211/CNVio, Intel 8265/PCIe e variantes Qualcomm requerem modelos e
+validação específicos para seus contratos de hardware.
 
-## Construir e executar
+## Executar
+
+Instale as dependências de desenvolvimento no ambiente Python utilizado pelo
+projeto e execute o alvo de integração.
 
 ```sh
-make -j4
-python3 tools/wifi/build-qemu.py
+python3 -m pip install -r requirements-dev.txt
+make test-wifi-qemu
+```
+
+Esse alvo constrói a imagem e o QEMU de laboratório, depois executa os três
+scripts de teste. A primeira construção pode baixar dependências para `.tools`.
+
+```sh
 python3 tests/wifi_qtest.py
 python3 tests/wifi_qemu.py
+python3 tests/wifi_join_qemu.py
 ```
 
-O builder reutiliza a árvore QEMU fixada por `tools/storage/build-qemu.py`.
-Na primeira execução pode baixar o QEMU e dependências de compilação para
-`.tools`. Adiciona `lab-rtw8822be`, sem alterar os dispositivos Ethernet.
+`wifi_qtest.py` verifica PCI/MMIO/DMA independentemente do driver LunaOS,
+incluindo PCI BME, checksum do descritor, BCN_VALID W1C e rejeição de firmware
+corrompido. `wifi_qemu.py` verifica beacons em duas bandas, ausência de AP e
+timeout de firmware com o driver dentro do QEMU.
 
-O teste de integração usa cópias da imagem em `build/wifi-qemu/`, desabilita
-placas Ethernet e cria um PCAP com dois APs explicitamente sintéticos. O driver
-lê os beacons através de descritores RX reais da família rtw88, faz a sintonia
-e publica os resultados na API Wi-Fi normal. SSIDs não estão embutidos no
-driver nem na imagem do sistema.
+`wifi_join_qemu.py` opera a página Network por mouse e teclado. A placa
+Ethernet permanece desabilitada durante todo o teste. O cenário cobre recusa
+de autenticação, senha incorreta, nova tentativa, handshake WPA2, CCMP, DHCP,
+ARP, DNS, ping, HTTP, stylesheet completo de 350 KB e continuidade de ping.
+Também injeta uma retransmissão criptografada e uma desconexão pelo AP, seguida
+de reconexão.
 
-No terminal do LunaOS:
+A criptografia do AP usa implementações independentes de hashlib/hmac e
+cryptography. SSID, senha e serviços determinísticos ficam no fixture Python.
+Os arquivos de produção usam suas APIs e o driver PCIe normais.
 
-```text
-wifidiag
-wifi status
-wifi scan
-wifi results
-```
+## Arquivos e configuração
 
-A varredura é assíncrona. Aguarde `wifi status` sair de `link=1` antes de ler
-os resultados. O backend passivo informa `connect=0`.
+- `tests/fixtures/wifi/rtw8822be.c` implementa o dispositivo PCIe de laboratório.
+- `tests/fixtures/wifi/access_point.py` implementa o AP independente.
+- `tools/wifi/build-qemu.py` incorpora o dispositivo à árvore QEMU fixada.
+- `build/wifi-qtest/` contém os resultados dos testes de registradores.
+- `build/wifi-qemu/` contém relatórios e logs dos cenários de scan e firmware.
+- `build/wifi-join-qemu/` contém `report.json`, `serial.log` e `peer.json` da conexão.
 
-## Modelo RTL8822BE
+O dispositivo expõe as propriedades a seguir.
 
-Fonte: `tests/fixtures/wifi/rtw8822be.c`, GPL-2.0-or-later, compilada apenas no
-QEMU de laboratório. Contratos consultados: fontes upstream Linux v6.12:
+- `firmware=CAMINHO` seleciona os bytes de referência comparados durante a
+  transferência por TXBD/reserved page e IDDMA.
+- `capture=CAMINHO` reproduz PCAP clássico little endian, DLT_IEEE802_11 105,
+  contendo beacons sem radiotap e sem FCS.
+- `stall-firmware=on` injeta timeout de boot.
+- `air-port=PORTA` seleciona o AP em UDP no endereço loopback. Os datagramas
+  contêm um byte de canal e um quadro 802.11. Um datagrama com apenas o canal
+  solicita um beacon.
 
-- https://github.com/torvalds/linux/blob/v6.12/drivers/net/wireless/realtek/rtw88/pci.c
-- https://github.com/torvalds/linux/blob/v6.12/drivers/net/wireless/realtek/rtw88/rx.h
-- https://github.com/torvalds/linux/blob/v6.12/drivers/net/wireless/realtek/rtw88/fw.c
-- https://github.com/torvalds/linux/blob/v6.12/drivers/net/wireless/realtek/rtw88/rtw8822b.c
+O modelo usa vendor/device `10ec:b822` e subsystem de laboratório `1b36:8822`.
+A efuse contém RFE e MAC de teste. Os contratos de registradores e descritores
+partem das fontes Linux rtw88 usadas pelo projeto.
 
-Propriedades QEMU:
+## Validação física pendente
 
-- `firmware=CAMINHO`: referência obrigatória do firmware RTL8822B. Cada bloco
-  recebido por TXBD/reserved page e IDDMA precisa coincidir com a referência.
-  O estado de boot só é publicado após receber todos os segmentos.
-- `capture=CAMINHO`: opcional, PCAP clássico little endian, versão 2.4,
-  DLT_IEEE802_11 (105), quadros sem radiotap e sem FCS. Reproduz beacons do
-  canal sintonizado, com FCS reservado no pacote RX e PHY RSSI de teste.
-- `stall-firmware=on`: impede a conclusão do boot para verificar timeout e
-  limpeza de recursos no driver.
+A comparação dos bytes transferidos do firmware valida o transporte e o
+protocolo de boot modelado. Execução da CPU do firmware, RF analógico,
+calibração, interferência e temporização física dos ACKs permanecem pendentes.
+Os testes virtuais verificam o percurso de software e DMA modelado. A
+estabilidade do RTL8822BE físico com o MitraStar GPT-2741GNAC-N2 precisa de
+validação no notebook.
 
-O modelo identifica-se com vendor/device `10ec:b822` e subsystem de laboratório
-`1b36:8822`. Efuse/RFE e RSSI são valores do laboratório, não um dump de placa.
-Os bytes de firmware são comparados, **não executados** em uma CPU emulada.
-Não há TX de dados, MLME, criptografia CCMP, MCU ISA, interrupções, economia de
-energia, migração ou reprodução analógica de RF. Registradores não modelados
-usam armazenamento simples; portanto o resultado não demonstra conformidade
-com todo o hardware. Não foi validado com um driver Linux independente.
-
-`wifi_qtest.py` programa PCI, MMIO e descritores sem linkar o driver LunaOS:
-verifica identidade, leitura efuse, sintonia RF, bloqueio por PCI BME, checksum
-do TX descriptor, BCN_VALID W1C e rejeição de firmware incorreto/incompleto.
-`wifi_qemu.py` executa o driver nativo em três cenários: beacons em 2 bandas,
-ar silencioso e timeout de boot. Relatório e logs ficam em `build/wifi-qemu/`.
-
-## Próximos contratos necessários
-
-O RTL precisa de TXBD de dados e completion, autenticação/associação 802.11,
-programação CAM/CCMP, calibração e limites regulatórios antes de ser considerado
-um driver de conexão. O núcleo WPA2/IP existente só deve receber a interface
-após uma associação verificada; Ethernet funcional não prova associação Wi-Fi.
-
-Intel 8265 precisa do transporte PCIe da família 8000, CSR/FH/PRPH, carga de
-microcódigo, ALIVE, NVM e comandos de scan/MLME. QCA9377 precisa dos registradores
-CE corretos da revisão, BMI, HTC e protocolos WMI/HTT e board data. Esses modelos
-não devem ser implementados como dispositivos genéricos com IDs de fabricantes.
-
-Testes virtuais não certificam operação em placas físicas. Passar os testes
-acima não habilita Wi-Fi de conexão na ISO.
+Registradores além dos contratos implementados usam armazenamento simples.
+A falha física que motivou a restauração da configuração de associação
+também aguarda confirmação no notebook.

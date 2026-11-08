@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later
  * Test-only partial RTL8822BE model. Register/descriptor contracts: Linux
  * v6.12 drivers/net/wireless/realtek/rtw88/{pci,fw,rx}. No MCU execution.
- * Only firmware transfer, power, efuse, RF tuning and passive RX are modeled.
+ * Firmware transfer, power, efuse, RF tuning and MGMT/BE TX/RX DMA are modeled.
+ * Optional laboratory air peer exchanges raw 802.11 on localhost UDP.
  * Input is raw 802.11 in classic little-endian PCAP, linktype 105.
  */
 #include "qemu/osdep.h"
@@ -12,6 +13,8 @@
 #include "qemu/timer.h"
 #include "qapi/error.h"
 #include "qom/object.h"
+#include "qemu/main-loop.h"
+#include "qemu/sockets.h"
 #define TYPE_LAB_RTW "lab-rtw8822be"
 OBJECT_DECLARE_SIMPLE_TYPE(LabRtw, LAB_RTW)
 struct LabRtw {
@@ -25,6 +28,9 @@ struct LabRtw {
     unsigned nseg, reserved_len, wp, tag;
     size_t cursor;
     bool bad, running, stall_firmware;
+    uint16_t air_port;
+    int air_fd;
+    uint32_t coex[256];
     QEMUTimer *timer;
 };
 static uint32_t regget(LabRtw *s, unsigned a, unsigned n)
@@ -46,6 +52,60 @@ static bool dma_write(LabRtw *s, uint32_t a, const void *p, unsigned n)
 {
     return (pci_get_word(s->parent_obj.config + PCI_COMMAND) & PCI_COMMAND_MASTER)
         && pci_dma_write(&s->parent_obj, a, p, n) == MEMTX_OK;
+}
+static void inject_frame(LabRtw *s, const uint8_t *frame, unsigned len)
+{
+    if (!s->running || !(s->regs[0x100] & 0x80) || len < 24 || len > 2304) { return; }
+    unsigned count = regget(s, 0x382, 2) & 0xfff;
+    unsigned rp = regget(s, 0x3b4, 2) & 0xfff;
+    if (count < 2 || count > 4096 || rp >= count || (s->wp+1)%count == rp) { return; }
+    uint8_t bd[8], packet[24+32+2304+4] = {0};
+    uint32_t ring = regget(s, 0x338, 4);
+    if (!ring || !dma_read(s, ring+s->wp*8, bd, sizeof(bd)) ||
+        lduw_le_p(bd) < 56+len+4) { return; }
+    stl_le_p(packet, (len+4) | (4u<<16) | (1u<<26));
+    packet[25] = 65;
+    memcpy(packet+56, frame, len);
+    if (!dma_write(s, ldl_le_p(bd+4), packet, 56+len+4)) { return; }
+    stw_le_p(bd+2, s->tag);
+    if (!dma_write(s, ring+s->wp*8, bd, sizeof(bd))) { return; }
+    s->tag = (s->tag+1)%8192;
+    s->wp = (s->wp+1)%count;
+    regput(s, 0x3b4, 4, rp | (s->wp<<16));
+}
+static void air_receive(void *opaque)
+{
+    LabRtw *s = opaque;
+    uint8_t packet[2305];
+    ssize_t bytes;
+    while ((bytes = recv(s->air_fd, packet, sizeof(packet), 0)) > 0) {
+        if (bytes > 24 && packet[0] == (regget(s, 0x2860, 4) & 255)) {
+            inject_frame(s, packet+1, bytes-1);
+        }
+    }
+}
+static void transmit_queue(LabRtw *s, unsigned index, unsigned base, unsigned count_reg)
+{
+    if (!s->running || !(s->regs[0x100] & 0x40)) { return; }
+    unsigned count = regget(s, count_reg, 2) & 0xfff;
+    unsigned wp = regget(s, index, 2) & 0xfff;
+    unsigned rp = (regget(s, index, 4) >> 16) & 0xfff;
+    if (count < 2 || count > 4096 || wp >= count || rp >= count || s->air_fd < 0) { return; }
+    for (unsigned budget = 0; rp != wp && budget < count; budget++) {
+        uint8_t bd[16], desc[48], packet[1601];
+        if (!dma_read(s, regget(s, base, 4)+rp*16, bd, sizeof(bd)) ||
+            lduw_le_p(bd) != 48 || !dma_read(s, ldl_le_p(bd+4), desc, sizeof(desc))) { return; }
+        unsigned len = lduw_le_p(bd+8), checksum = 0;
+        for (unsigned i = 0; i < 32; i += 2) { checksum ^= lduw_le_p(desc+i); }
+        if (len < 24 || len > 1600 || checksum || (ldl_le_p(desc)&0xffff) != len ||
+            !dma_read(s, ldl_le_p(bd+12), packet+1, len)) { return; }
+        unsigned sequence = lduw_le_p(packet+1+22) >> 4;
+        if (((ldl_le_p(desc+36) >> 12) & 0xfff) != sequence) { return; }
+        packet[0] = regget(s, 0x2860, 4) & 255;
+        if (send(s->air_fd, packet, len+1, 0) != len+1) { return; }
+        rp = (rp+1)%count;
+        regput(s, index, 4, wp | (rp<<16));
+    }
 }
 static void reserved_page(LabRtw *s)
 {
@@ -104,7 +164,12 @@ static void mmio_write(void *opaque, hwaddr addr, uint64_t value, unsigned size)
         unsigned index = (value >> 8) & 1023;
         regput(s, addr, 4, (value & ~255u) | s->efuse[index] | (1u<<31));
     }
-    if (addr == 0x1700) { regput(s, addr, 4, value | (1u<<29)); }
+    if (addr == 0x1700) {
+        unsigned offset = value & 255;
+        if ((value & 0xffff0000) == 0x800f0000) { regput(s, 0x1708, 4, s->coex[offset]); }
+        if ((value & 0xffff0000) == 0xc00f0000) { s->coex[offset] = regget(s, 0x1704, 4); }
+        regput(s, addr, 4, value | (1u<<29));
+    }
     if ((addr == 0xc90 || addr == 0xe90) && size == 4) {
         unsigned base = addr == 0xc90 ? 0x2800 : 0x2c00;
         regput(s, base+((value>>20)&255)*4, 4, value & 0xfffff);
@@ -112,6 +177,8 @@ static void mmio_write(void *opaque, hwaddr addr, uint64_t value, unsigned size)
     if (addr == 0x208) { s->regs[addr] &= ~1; }
     if (addr == 0x338) { s->wp = s->tag = 0; regput(s, 0x3b4, 4, 0); }
     if (addr == 0x383 && (value & 16)) { reserved_page(s); s->regs[addr] &= ~16; }
+    if (addr == 0x3b0 && size == 2) { transmit_queue(s, 0x3b0, 0x310, 0x380); }
+    if (addr == 0x3a8 && size == 2) { transmit_queue(s, 0x3a8, 0x328, 0x388); }
     if (addr == 0x1208 && (value & (1u<<31))) { iddma(s, value); }
     if (addr == 3 && (value & 4) && (regget(s, 0x80, 2) & 0x4000)) {
         bool complete = !s->bad && !s->stall_firmware;
@@ -130,7 +197,12 @@ static void receive_tick(void *opaque)
 {
     LabRtw *s = opaque;
     timer_mod(s->timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL)+20);
-    if (!s->running || !s->pcap || !(s->regs[0x100] & 0x80) || s->regs[0x303]) { return; }
+    if (!s->running || !(s->regs[0x100] & 0x80)) { return; }
+    if (s->air_fd >= 0) {
+        uint8_t channel = regget(s, 0x2860, 4) & 255;
+        send(s->air_fd, &channel, 1, 0);
+    }
+    if (!s->pcap) { return; }
     unsigned count = regget(s, 0x382, 2) & 0xfff;
     unsigned rp = regget(s, 0x3b4, 2) & 0xfff;
     if (count < 2 || count > 4096 || rp >= count || (s->wp+1)%count == rp) { return; }
@@ -149,22 +221,12 @@ static void receive_tick(void *opaque)
         i += 2+bytes;
     }
     if (!channel || channel != (regget(s, 0x2860, 4) & 255)) { return; }
-    uint8_t bd[8], packet[24+32+2304+4] = {0};
-    uint32_t ring = regget(s, 0x338, 4);
-    if (!ring || !dma_read(s, ring+s->wp*8, bd, sizeof(bd)) ||
-        lduw_le_p(bd) < 24+32+len+4) { return; }
-    stl_le_p(packet, (len+4) | (4u<<16) | (1u<<26));
-    packet[24] = 0; packet[25] = 65; /* PHY page 0, -45dBm */
-    memcpy(packet+56, p, len);
-    if (!dma_write(s, ldl_le_p(bd+4), packet, 56+len+4)) { return; }
-    stw_le_p(bd+2, s->tag);
-    if (!dma_write(s, ring+s->wp*8, bd, sizeof(bd))) { return; }
-    s->tag = (s->tag+1)%8192; s->wp = (s->wp+1)%count;
-    regput(s, 0x3b4, 4, rp | (s->wp<<16));
+    inject_frame(s, p, len);
 }
 static void realize(PCIDevice *pdev, Error **errp)
 {
     LabRtw *s = LAB_RTW(pdev);
+    s->air_fd = -1;
     GError *err = NULL;
     if (!s->firmware || !g_file_get_contents(s->firmware, &s->fw, &s->fwlen, &err)) {
         error_setg(errp, "firmware reference required: %s", err ? err->message : "missing firmware property");
@@ -209,12 +271,30 @@ static void realize(PCIDevice *pdev, Error **errp)
     /* Extended block 25, word 1: logical 0xca=RFE2, 0xcb=ff. */
     s->efuse[0] = 0x2f; s->efuse[1] = 0x3d;
     s->efuse[2] = 2; s->efuse[3] = 255;
+    /* Logical block 26, words 0..2 carry the laboratory station MAC. */
+    s->efuse[4] = 0x4f; s->efuse[5] = 0x38;
+    const uint8_t mac[] = {2, 0, 0, 0, 0, 2};
+    memcpy(s->efuse+6, mac, sizeof(mac));
     regput(s, 0xf0, 4, (1u<<27) | (1u<<12));
     s->regs[0x100] = 0xea; s->regs[6] = 2;
     regput(s, 0x1700, 4, 1u<<29);
     pci_config_set_interrupt_pin(pdev->config, 1);
     memory_region_init_io(&s->bar, OBJECT(s), &mmio_ops, s, "rtl8822be-lab-bar2", 0x4000);
     pci_register_bar(pdev, 2, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->bar);
+    if (s->air_port) {
+        struct sockaddr_in address = { .sin_family = AF_INET,
+            .sin_addr.s_addr = htonl(INADDR_LOOPBACK), .sin_port = htons(s->air_port) };
+        s->air_fd = socket(AF_INET, SOCK_DGRAM, 0);
+        if (s->air_fd < 0 || connect(s->air_fd, (struct sockaddr *)&address, sizeof(address))) {
+            error_setg(errp, "cannot connect laboratory air socket");
+            if (s->air_fd >= 0) { close(s->air_fd); s->air_fd = -1; }
+            return;
+        }
+        if (!qemu_set_blocking(s->air_fd, false, errp)) {
+            close(s->air_fd); s->air_fd = -1; return;
+        }
+        qemu_set_fd_handler(s->air_fd, air_receive, NULL, s);
+    }
     s->timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, receive_tick, s);
     timer_mod(s->timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL)+20);
 }
@@ -222,12 +302,17 @@ static void unrealize(PCIDevice *pdev)
 {
     LabRtw *s = LAB_RTW(pdev);
     if (s->timer) { timer_free(s->timer); }
+    if (s->air_fd >= 0) {
+        qemu_set_fd_handler(s->air_fd, NULL, NULL, NULL);
+        close(s->air_fd);
+    }
     g_free(s->fw); g_free(s->pcap);
 }
 static const Property properties[] = {
     DEFINE_PROP_STRING("firmware", LabRtw, firmware),
     DEFINE_PROP_STRING("capture", LabRtw, capture),
     DEFINE_PROP_BOOL("stall-firmware", LabRtw, stall_firmware, false),
+    DEFINE_PROP_UINT16("air-port", LabRtw, air_port, 0),
 };
 static const VMStateDescription lab_vmstate = {
     .name = TYPE_LAB_RTW, .unmigratable = true,
@@ -240,7 +325,7 @@ static void class_init(ObjectClass *klass, const void *data)
     pc->vendor_id = 0x10ec; pc->device_id = 0xb822;
     pc->revision = 0; pc->class_id = PCI_CLASS_NETWORK_OTHER;
     pc->subsystem_vendor_id = 0x1b36; pc->subsystem_id = 0x8822;
-    dc->desc = "Partial RTL8822BE laboratory model (passive RX; no RF/MCU execution)";
+    dc->desc = "Partial RTL8822BE laboratory PCIe/DMA model (no RF/MCU execution)";
     dc->vmsd = &lab_vmstate;
     device_class_set_props(dc, properties);
     set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);

@@ -322,6 +322,13 @@ test-storage-matrix: all test-storage test-storage-sdhci
 	$(PYTHON) tests/storage_matrix.py
 
 .PHONY: test-wifi-client test-rtw8822be-tx-dma
+.PHONY: test-wifi-qemu
+test-wifi-qemu: all
+	$(PYTHON) tools/wifi/build-qemu.py
+	$(PYTHON) tests/wifi_qtest.py
+	$(PYTHON) tests/wifi_qemu.py
+	$(PYTHON) tests/wifi_join_qemu.py
+
 test-wifi-client: $(addprefix build/host-bearssl/,$(addsuffix .o,$(HOST_WPA_CRYPTO)))
 	@mkdir -p build
 	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -Ikernel -Ithird_party/bearssl/inc drivers/wifi_client.c net/wifi_ccmp.c net/wireless/frames.c tests/wifi_client.c $^ -o build/wifi-client-test

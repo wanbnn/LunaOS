@@ -2,8 +2,8 @@
 
 ## Plan and scope
 
-1. Restore connected RTL8822BE receive and response configuration; verify the
-   programmed MAC address, preserve scan behavior and test transport bounds.
+1. Preserve the RTL8822BE join configuration that connected on the notebook
+   and test transport bounds and retries.
 2. Reproduce and repair native TCP recovery under overlap, reordering and ACK
    loss; retain bounded memory and reject incomplete HTTP/TLS responses.
 3. Exercise browser resource URLs and full-size stylesheets in QEMU, including
@@ -25,14 +25,13 @@ receiving a usable link-layer ACK; it does not prove which radio component is
 responsible. With another router the user observed continuing ICMP connectivity
 after an incomplete HTTP transfer. These are separate observations.
 
-The RTL8822BE driver now clears the scanner's accept-all flag for connections,
-enables BSSID filtering, and restores scanning filters and unassociated mode
-when a new scan starts. It programs band-specific response rates (`0x15f` in
-2.4 GHz, `0x150` in 5 GHz) and checks MAC-address readback before authentication.
-These follow the reference driver's [filter configuration](https://github.com/torvalds/linux/blob/master/drivers/net/wireless/realtek/rtw88/mac80211.c)
-and [response-rate definitions](https://github.com/torvalds/linux/blob/master/drivers/net/wireless/realtek/rtw88/main.h).
-Their effect on physical ACK delivery is still unverified. The transmit bound
-also accepts a full 1500-byte Ethernet payload after SNAP/CCMP encapsulation
+The RTL8822BE join path preserves its original receive filter (`0xe400220f`)
+and PHY-table response rates. The stricter filters, scan mode changes,
+response-rate writes and mandatory MAC readback added in `aa09afe` were
+withdrawn after the user reported persistent connection failures. The precise
+hardware failure stage remains unknown because a diagnostic from the failing
+version was unavailable. Physical validation of the restored join path remains
+pending. The transmit bound accepts a full 1500-byte Ethernet payload after SNAP/CCMP encapsulation
 (1548-byte MPDU), which was previously rejected by a 1540-byte limit.
 
 The native TCP receiver previously discarded the new suffix of an overlapping
@@ -62,8 +61,10 @@ incorrect; the buffer size was not the stylesheet failure's cause.
   full receive-buffer bounds.
 - `make test-url`: root and relative URLs, ports, protocol-relative CDN URLs,
   query/fragment references, supported schemes and insufficient output space.
-- RTL8822BE register/DMA tests: connected/scanning filters, MAC/BSSID and mode,
-  response rates in both bands, descriptor sequence and full encrypted MTU.
+- RTL8822BE register/DMA tests verify MAC/BSSID and mode, preserve receive
+  filters and PHY-table rates across repeated attempts, and check descriptor
+  sequence and full encrypted MTU. Client tests cover successful association
+  after a failed attempt on the same instance.
 - Wi-Fi station/client/CCMP regression tests; web-engine tests.
 - `make check`: host regressions, firmware/archive checks, freestanding link,
   IMG/ISO integrity and image size limits.
@@ -74,6 +75,11 @@ incorrect; the buffer size was not the stylesheet failure's cause.
 - TCP and URL host tests also run with address/undefined-behavior sanitizers.
 - `tests/smoke.py`: boot/desktop, persistent filesystem, native
   Ethernet/ARP/ICMP/TCP/HTTP and a 64 MiB offline boot.
+- `make test-wifi-qemu` runs the native RTL8822BE driver through PCIe/MMIO/DMA
+  with Ethernet disabled. An independent raw 802.11 peer verifies WPA2/CCMP,
+  DHCP, DNS, ICMP, HTTP and a complete 350 KB stylesheet. It exercises a
+  rejected authentication, wrong-password timeout, successful retry and
+  reconnection after an AP disconnect. See [Wi-Fi emulation](wifi-emulation.md).
 
 The TLS fixture installs its temporary CA only in a disposable guest image.
 Certificates and generated fixture data are not added to release trust roots.

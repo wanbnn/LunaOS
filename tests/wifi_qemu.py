@@ -32,7 +32,7 @@ pcap=WORK/'beacons.pcap'
 capture(pcap)
 fw=ROOT/'assets/firmware/rtw88/rtw8822b_fw.bin'
 base=f'lab-rtw8822be,firmware={fw}'
-report={'result':'RUNNING','scope':'partial RTL8822BE passive RX; no physical hardware or TX certification','cases':{}}
+report={'result':'RUNNING','scope':'partial RTL8822BE PCIe/firmware/scan model; physical RF pending','cases':{}}
 (WORK/'report.json').write_text(json.dumps(report,indent=2)+'\n')
 for case,options in [('scan',f',capture={pcap}'),('no-air',''),('firmware-timeout',',stall-firmware=on')]:
     disk=WORK/(case+'.img')
@@ -41,13 +41,13 @@ for case,options in [('scan',f',capture={pcap}'),('no-air',''),('firmware-timeou
     try:
         g=Guest(disk,network=False,extra_args=['-device',base+options])
         status=g.command('wifidiag')
-        assert 'QEMU laboratory model; passive RX only' in status,status
+        assert 'QEMU laboratory model' in status,status
         if case=='firmware-timeout':
             assert 'firmware upload/MCU boot' in status and 'error=110' in status,status
             g.command('wifi status','driver unavailable')
         else:
-            assert 'passive RX ready' in status,status
-            g.command('wifi status','connect=0')
+            assert 'experimental STA TX/RX ready' in status,status
+            g.command('wifi status','connect=1')
             g.command('wifi scan','scan started')
             deadline=time.monotonic()+20
             while True:

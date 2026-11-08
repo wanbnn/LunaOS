@@ -28,5 +28,5 @@ env['PKG_CONFIG_LIBDIR'] = str(ROOT / '.tools/usr/lib/x86_64-linux-gnu/pkgconfig
 subprocess.run(['ninja', '-j4', 'qemu-system-i386', 'qemu-system-x86_64'], cwd=build, env=env, check=True)
 (build / 'wifi-fixture.json').write_text(json.dumps({
     'qemu': '10.2.0', 'model_sha256': hashlib.sha256(model.read_bytes()).hexdigest(),
-    'scope': 'partial RTL8822BE firmware transfer and passive RX; no firmware CPU or TX'
+    'scope': 'partial RTL8822BE firmware transfer and MGMT/BE PCIe TX/RX DMA with optional raw 802.11 peer; RF/MCU pending'
 }, indent=2)+'\n')

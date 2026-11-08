@@ -204,16 +204,6 @@ static int wlan_only_init(void) {
 }
 static bool radio_ready(void *ctx) { (void)ctx; return dev.ready && !dev.error; }
 static uint32_t now(void *ctx) { (void)ctx; return drv_now_ms(); }
-static int receive_mode(bool station) {
-    /* Passive scanning accepts other BSS traffic. Connected STA operation
-     * must restore address/BSSID filtering, as rtw88 configure_filter does. */
-    return bits(0x608,4,station ? 1u : 0xc0u,station ? 0xc0u : 1u);
-}
-static int response_rates(uint8_t channel) {
-    /* rtw88 RRSR_INIT_2G/5G: basic CCK+OFDM in 2.4 GHz, OFDM only in
-     * 5 GHz. The PHY table's 0x15d reset value is not a band configuration. */
-    return write(0x440,4,channel>14 ? 0x150u : 0x15fu);
-}
 static int stop(void *ctx) {
     (void)ctx;
     /* RF remains on the last channel; polling drains queued frames. */
@@ -225,7 +215,6 @@ static int tune(void *ctx,uint8_t channel) {
     if(!rc) rc=rtw8822be_phy_channel(&dev.phy,channel);
     /* Channel tables touch RFE registers; restore the WLAN band selection. */
     if(!rc) rc=wlan_antenna(channel);
-    if(!rc) rc=response_rates(channel);
     /* Discard frames queued on the previous channel before accepting beacons. */
     uint32_t index=0;
     if(!rc) rc=read32(0x3b4,&index);
@@ -241,11 +230,6 @@ static int tune(void *ctx,uint8_t channel) {
     if(!rc) rc=bits(0x100,2,0,0xc0);
     if(rc) { dev.error=rc; dev.ready=false; dev.stage="channel/RF"; }
     return rc;
-}
-static int scan_tune(void *ctx,uint8_t channel) {
-    int rc=receive_mode(false);
-    if(!rc) rc=bits(0x100,4,3u<<16,0); /* Unassociated while scanning. */
-    return rc ? rc : tune(ctx,channel);
 }
 static int receive(void *ctx,uint8_t *out,unsigned capacity,unsigned *bytes,int16_t *rssi) {
     (void)ctx; *bytes=0;
@@ -378,13 +362,8 @@ static int set_mac_bssid(const uint8_t mac[6],const uint8_t ap[6]) {
            ((uint32_t)ap[2]<<16)|((uint32_t)ap[3]<<24));
     if(!rc) rc=write(0x61c,2,ap[4]|((uint32_t)ap[5]<<8));
     if(!rc) rc=bits(0x100,4,3u<<16,2u<<16); /* VIF0 infrastructure STA. */
-    if(!rc) rc=receive_mode(true);
-    /* Verify the identity used by hardware response matching before auth. */
-    uint32_t lo=0,hi=0;
-    if(!rc) rc=read32(0x610,&lo);
-    if(!rc) rc=rd(NULL,0x614,2,&hi);
-    if(!rc && (lo!=(uint32_t)(mac[0]|((uint32_t)mac[1]<<8)|((uint32_t)mac[2]<<16)|((uint32_t)mac[3]<<24)) ||
-               hi!=(uint32_t)(mac[4]|((uint32_t)mac[5]<<8)))) rc=DRV_EIO;
+    /* Keep the receive/rate configuration used by the previously working
+     * join path. Changes to radio policy need physical association testing. */
     return rc;
 }
 static int station_connect(void *ctx,const WifiAp *ap,const char *pass,
@@ -594,7 +573,7 @@ void rtw8822be_init(void) {
     dev.ready=true;
     /* Receive-only channels; no active probes or transmit-power assumptions. */
     static const uint8_t channels[]={1,2,3,4,5,6,7,8,9,10,11,36,40,44,48};
-    WifiScanRadio radio={.ready=radio_ready,.now_ms=now,.set_channel=scan_tune,
+    WifiScanRadio radio={.ready=radio_ready,.now_ms=now,.set_channel=tune,
         .receive=receive,.stop=stop,.connect=station_connect,.link=station_link,
         .connection_error=station_error,.poll_client=station_poll};
     STEP("scanner attach",wifi_scan_attach(&dev.scanner,&radio,channels,sizeof(channels)));
@@ -612,7 +591,7 @@ bool rtw8822be_present(void) { return dev.present; }
 void rtw8822be_status(char *out,size_t cap) {
     out[0]=0;
     append(out,"RTL8822BE: ",cap); append(out,dev.stage ? dev.stage : "not initialized",cap);
-    if(dev.emulated) append(out," [QEMU laboratory model; passive RX only]",cap);
+    if(dev.emulated) append(out," [QEMU laboratory model]",cap);
     if(dev.error) {
         char n[20]; append(out," error=",cap); number(n,(uint32_t)-dev.error); append(out,n,cap);
     }

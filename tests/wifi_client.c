@@ -81,5 +81,14 @@ int main(void) {
     assert(client.error==-16 && client.failed_stage==WIFI_CLIENT_AUTH);
     assert(client.tx_backpressure>=12);
     force_busy=false;
+    /* A manual retry must clear the previous error and complete association
+     * on the same client instance after a failed join. */
+    assert(!wifi_client_start(&client,&r,sta,&ap,"",NULL,0));
+    assert(!client.error && client.failed_stage==WIFI_CLIENT_IDLE);
+    reply(0xb0,0,2);wifi_client_poll(&client);
+    reply(0x10,0,43);wifi_client_poll(&client);
+    assert(associations==2 && client.aid==43 && !client.error);
+    assert(wifi_client_link(&client)==WIFI_ASSOCIATED);
+    wifi_client_disconnect(&client);
     puts("PASS: native STA auth/association frames, BSSID/AID validation and timeout");
 }
