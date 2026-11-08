@@ -187,6 +187,37 @@ static void dom_mutation_regressions(void) {
     web_free_tree(document);
 }
 
+static void foreign_namespace_regressions(void) {
+    const char *html = "<html><body><svg id='svg'><g id='group'>"
+                       "<foreignObject><div id='foreign-html'>text</div></foreignObject>"
+                       "</g></svg><math id='math'><mi id='math-child'>x</mi></math></body></html>";
+    WebNode *root = 0;
+    char error[128] = {0};
+    check(web_parse(html, strlen(html), &root, error, sizeof(error)),
+          "foreign namespace fixture parses");
+    if (!root)
+        return;
+    WebNode *svg = web_find_by_id(root, "svg");
+    WebNode *group = web_find_by_id(root, "group");
+    WebNode *html_child = web_find_by_id(root, "foreign-html");
+    WebNode *math = web_find_by_id(root, "math");
+    WebNode *math_child = web_find_by_id(root, "math-child");
+    check(svg && group && svg->namespace_id == WEB_NS_SVG &&
+          group->namespace_id == WEB_NS_SVG,
+          "SVG child nodes inherit SVG namespace");
+    check(html_child && html_child->namespace_id == WEB_NS_HTML,
+          "foreignObject integration point returns to HTML namespace");
+    check(math && math_child && math->namespace_id == WEB_NS_MATHML &&
+          math_child->namespace_id == WEB_NS_MATHML,
+          "MathML children inherit MathML namespace");
+    WebNode *clone = web_node_clone(svg, true);
+    check(clone && clone->namespace_id == WEB_NS_SVG &&
+          clone->first_child && clone->first_child->namespace_id == WEB_NS_SVG,
+          "DOM cloning preserves namespace identities");
+    web_free_tree(clone);
+    web_free_tree(root);
+}
+
 static void html_dom_regressions(void) {
     const char *html =
         "<!doctype html><html><head><title>A &amp; B</TITLE  ></head><body>"
@@ -347,6 +378,7 @@ int main(void) {
     layout_regressions();
     html_dom_regressions();
     dom_mutation_regressions();
+    foreign_namespace_regressions();
     printf(failures ? "\n%d check(s) failed\n" : "\nall checks passed\n", failures);
     return failures ? 1 : 0;
 }
