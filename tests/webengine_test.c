@@ -177,6 +177,7 @@ static void html_dom_regressions(void) {
     const char *html =
         "<!doctype html><html><head><title>A &amp; B</TITLE  ></head><body>"
         "<section id='tree'>first <b>second</b> third <i>fourth</i></section>"
+        "<!-- a real DOM comment -->"
         "<input disabled checked='' id='control' id='ignored'>"
         "<div id='outer'/><span id='nested'>inside</span></div>"
         "<textarea id='area'>A &lt; B &amp; C</TEXTAREA >"
@@ -195,6 +196,10 @@ static void html_dom_regressions(void) {
     web_node_text(tree, value, sizeof(value));
     check(!strcmp(value, "first second third fourth"),
           "textContent collects all text children in document order");
+    WebNode *comment = tree ? tree->next : 0;
+    check(comment && comment->type == WEB_COMMENT &&
+          !strcmp(comment->text, " a real DOM comment "),
+          "HTML comments become DOM comment nodes with preserved data");
     WebNode *control = web_find_by_id(root, "control");
     check(control && !strcmp(web_attr(control, "disabled"), "") &&
           !strcmp(web_attr(control, "checked"), "") &&
