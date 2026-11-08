@@ -83,6 +83,7 @@ WebNode *web_node_clone(const WebNode *source, bool deep);
 WebNode *web_attach_shadow(WebNode *host, bool open_mode);
 bool web_node_insert_before(WebNode *parent, WebNode *child, WebNode *reference);
 WebNode *web_node_root(WebNode *node);
+WebNode *web_node_root_composed(WebNode *node);
 bool web_node_is_connected(const WebNode *node);
 bool web_node_replace_child(WebNode *parent, WebNode *replacement, WebNode *old_child);
 void web_node_normalize(WebNode *parent);
