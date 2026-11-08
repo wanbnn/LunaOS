@@ -31,6 +31,7 @@ static struct {
     unsigned txwp[8], tx_sent, tx_busy, tx_errors;
     uint32_t diag_tx_mgmt_idx, diag_tx_be_idx, diag_txdma_status;
     uint32_t diag_tx_mgmt_base, diag_tx_mgmt_count, diag_tx_pause, diag_tx_offset;
+    uint32_t diag_mgmt_avail_pages, diag_txdma_mapping, diag_tx_pkt_empty, diag_be_edca, diag_tcr;
     uint32_t tx_mgmt_last_rp, tx_mgmt_stall_at, tx_mgmt_rekicks, tx_mgmt_rekick_error;
     uint32_t tx_mgmt_last_bd0, tx_mgmt_last_bd1, tx_mgmt_last_desc0;
     bool tx_mgmt_tracking;
@@ -454,6 +455,28 @@ void rtw8822be_init(void) {
     STEP("RX boundary",write(0x116,2,24576-128-1));
     STEP("RX descriptor length",bits(0x115,1,15,15));
     STEP("RX PHY status",write(0x60f,1,4));
+    /* Complete RTL8822B TX MAC protocol configuration omitted from the
+     * earlier passive-only scanner. These constants mirror the upstream
+     * rtw8822b_mac_init (not invented PCIe or RF settings). */
+    STEP("TX hang watchdog",bits(0x45e,1,0,1u<<2));
+    STEP("TX AMPDU time",write(0x455,1,0x70));
+    STEP("TX protection mode",write(0x4c8,4,0x202008ff));
+    STEP("TX BAR retries",write(0x4ce,2,0x0801));
+    STEP("TX fast EDCA VO",write(0x1448,1,6));
+    STEP("TX fast EDCA VI",write(0x144a,1,6));
+    STEP("TX fast EDCA BE",write(0x144c,1,6));
+    STEP("TX fast EDCA BK",write(0x144e,1,6));
+    STEP("TX slot time",write(0x51b,1,9));
+    STEP("TX PIFS",write(0x512,1,0x19));
+    STEP("TX SIFS",write(0x514,4,0x10100e0a));
+    STEP("TX VO TXOP limit",write(0x502,2,0x186));
+    STEP("TX VI TXOP limit",write(0x506,2,0x3bc));
+    STEP("TX NAV",write(0x544,4,0x001b0005));
+    STEP("TX TSF RX offset",write(0x55e,2,0x3030));
+    STEP("TX unpause",write(0x522,2,0));
+    /* Realtek enables TX rate-control descriptor features in TCR+1/+2. */
+    STEP("TX TCR1",write(0x605,1,0x30));
+    STEP("TX TCR2",write(0x606,1,0x30));
     STEP("RX management filter",write(0x6a0,2,0xffff));
     STEP("RX control filter",write(0x6a2,2,0x0fff));
     STEP("RX data filter",write(0x6a4,2,0xffff));
@@ -541,6 +564,11 @@ void rtw8822be_status(char *out,size_t cap) {
     (void)rd(NULL,0x380,2,&dev.diag_tx_mgmt_count);
     (void)rd(NULL,0x522,1,&dev.diag_tx_pause);
     (void)read32(0x20c,&dev.diag_tx_offset);
+    (void)rd(NULL,0x232,2,&dev.diag_mgmt_avail_pages);
+    (void)rd(NULL,0x10c,2,&dev.diag_txdma_mapping);
+    (void)rd(NULL,0x41a,2,&dev.diag_tx_pkt_empty);
+    (void)read32(0x508,&dev.diag_be_edca);
+    (void)read32(0x604,&dev.diag_tcr);
     append(out,"\nTX MGMT index=",cap);hex(n,dev.diag_tx_mgmt_idx);append(out,n,cap);
     append(out," BE index=",cap);hex(n,dev.diag_tx_be_idx);append(out,n,cap);
     append(out," TXDMA status=",cap);hex(n,dev.diag_txdma_status);append(out,n,cap);
@@ -549,6 +577,11 @@ void rtw8822be_status(char *out,size_t cap) {
     append(out," expected=",cap);hex(n,dev.txbd.bus+2*TX_RING_STRIDE);append(out,n,cap);
     append(out,"\nTX pause=",cap);hex(n,dev.diag_tx_pause);append(out,n,cap);
     append(out," offset_check=",cap);hex(n,dev.diag_tx_offset);append(out,n,cap);
+    append(out,"\nTX pages HQ avail=",cap);number(n,dev.diag_mgmt_avail_pages);append(out,n,cap);
+    append(out," mapping=",cap);hex(n,dev.diag_txdma_mapping);append(out,n,cap);
+    append(out," txpkt_empty=",cap);hex(n,dev.diag_tx_pkt_empty);append(out,n,cap);
+    append(out,"\nTX BE EDCA=",cap);hex(n,dev.diag_be_edca);append(out,n,cap);
+    append(out," TCR=",cap);hex(n,dev.diag_tcr);append(out,n,cap);
     append(out,"\nTX ring MGMT wp=",cap);number(n,dev.txwp[2]);append(out,n,cap);
     append(out," BE wp=",cap);number(n,dev.txwp[4]);append(out,n,cap);
     append(out," client backpressure=",cap);number(n,dev.client.tx_backpressure);append(out,n,cap);
