@@ -11,12 +11,11 @@ toolchains completos no guest permanece um trabalho separado.
 | Linguagem | Escrever no Notes | Executar no LunaOS | Compilar no LunaOS | Hardware |
 | --- | --- | --- | --- | --- |
 | **JavaScript `.ljs`** | Sim | QuickJS com `dev run` | Não aplicável | PCI real read-only, áudio e endpoints de drivers C nativos |
-| **Python `.py`** | Sim | MicroPython com `python` e `dev run` | Não aplicável | Contagem/consulta PCI, áudio e endpoints de drivers C |
+| **Python `.py`** | Sim | CPython com `python`, MicroPython com `micropython` e `dev run` | Não aplicável | Contagem/consulta PCI, áudio e endpoints de drivers C |
 | **C `.c`** | Sim | **Não**, sem loader geral | **Não** (CMake só no host por enquanto) | API privilegiada PCI/DMA/MMIO/IRQ em C compilado no kernel |
 
-O LunaOS embarca MicroPython e QuickJS. O porte de CPython e a execução de
-binários ELF externos dependem de uma ABI de processos e de um carregador
-de executáveis. A toolchain de C e o CMake rodam no host.
+O LunaOS embarca CPython para WASI, MicroPython e QuickJS. A toolchain de
+C e o CMake rodam no host.
 
 ## Ferramentas no lunaSH
 
@@ -133,21 +132,26 @@ virtuais e nativos; estados em RAM não persistem após reinício.
 
 ## Python no LunaOS
 
-O MicroPython 1.29.0 (MIT) executa scripts diretamente no guest. O comando
-`python` aceita `--version`, `-c CODE` ou um arquivo seguido de argumentos.
+O comando `python` executa **CPython 3.13.9** no guest. `python3` e
+`python3.13` são aliases. O interpretador roda sobre wasm3 e vem na imagem
+com módulos Python da biblioteca padrão. Use uma VM com pelo menos
+128 MiB de RAM para esse runtime.
 
 ```sh
 python --version
-python -c 'print(sum(x*x for x in range(5)))'
-dev new scanner py
-python /home/luna/scanner.py
+python -c 'import json; print(json.dumps({"resultado": 42}))'
+python app.py
 ```
 
-Os scripts podem importar módulos `.py` e pacotes com `__init__.py` no
-LunaFS. O diretório do script é o primeiro caminho de importação. Cada
-execução tem seu próprio estado, heap de 2 MiB e um limite de 3 segundos
-verificado nos desvios do bytecode. O port inclui módulos internos como
-`sys`, `gc` e `micropython`.
+O port WASI lê arquivos do LunaFS, importa módulos e captura a saída no
+lunaSH. A raiz WASI é `/`. Use caminhos absolutos para ler arquivos dentro
+de scripts. O limite de execução é 15 segundos. A entrada interativa,
+escrita de arquivos pelo CPython, subprocessos, sockets e extensões
+nativas ficam fora do port atual.
+
+Use `micropython` ou `dev run` para os scripts do LunaSDK que usam
+`luna`. O MicroPython 1.29.0 permanece disponível com heap de 2 MiB e
+limite de execução de 3 segundos.
 
 ```python
 import luna
@@ -174,9 +178,9 @@ sync
 ```
 
 O `venv` do LunaOS cria um diretório de bibliotecas `lib` dentro do
-ambiente. Enquanto ele está ativo, o MicroPython usa esse diretório no
-lugar do `lib` do usuário. Todos os ambientes usam o mesmo interpretador
-embarcado. A ativação dura até `deactivate` ou até reiniciar o sistema.
+ambiente. Enquanto ele está ativo, os comandos Python usam esse diretório no
+lugar do `lib` do usuário. Os ambientes compartilham os interpretadores
+embarcados. A ativação dura até `deactivate` ou até reiniciar o sistema.
 `sync` grava os diretórios do LunaFS no disco.
 
 ### Pacotes com pip
@@ -217,7 +221,7 @@ A instalação é limitada a 4 MiB por wheel, 4 MiB descompactados, 512
 entradas e 64 KiB por arquivo. A versão deve ser exata ou a mais recente
 publicada no índice. Para wheels que declaram dependências, inclua as
 dependências no arquivo de requisitos e use `--no-deps`. A compatibilidade
-do código depende das APIs disponíveis no MicroPython. Distribuições de
+do código depende das APIs disponíveis no runtime escolhido. Distribuições de
 código-fonte, extensões binárias e a geração de scripts de entrada do
 wheel ficam fora do port atual.
 
@@ -263,10 +267,11 @@ Apenas disponibilizar um arquivo `CMakeLists.txt` não resolve isso.
 
 ```sh
 make test-lunasdk-hardware test-devkit
-make test-python test-pip
+make test-cpython test-python test-pip
 make check
 ```
 
-Os testes de ABI usam mocks no host. `make test-python` executa o
-interpretador, os imports do LunaFS e o LunaSDK no guest QEMU.
+Os testes de ABI usam mocks no host. `make test-cpython` verifica CPython,
+sintaxe de Python 3.12, imports e ambientes no QEMU. `make test-python`
+verifica MicroPython e o LunaSDK no guest.
 `make test-pip` usa wheels de teste e um índice HTTP local.

@@ -25,14 +25,14 @@ jobs:
       - name: Install build and test tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-multilib g++-multilib libc6-dev-i386 clang lld zlib1g-dev libcairo2
+          sudo apt-get install -y gcc-multilib g++-multilib libc6-dev-i386 clang lld zlib1g-dev libcairo2 qemu-system-x86
           mkdir -p .tools/python build dist
           python3 -m pip install --target .tools/python -r requirements-dev.txt
       - name: Build BIOS and UEFI images
         run: make -j2 LUNA_LEXBOR=1 all
-      - name: Verify Lexbor-backed browser and updater before publication
+      - name: Verify browser, Python and updater before publication
         run: |
-          make test-webengine test-update test-wifi-runtime test-wifi-scan test-wifi-station
+          make test-webengine test-update test-wifi-runtime test-wifi-scan test-wifi-station test-cpython
           test -s build/lexbor-native/liblexbor_static.a
           test -s dist/LunaOS.iso
           test -s dist/LunaOS.img

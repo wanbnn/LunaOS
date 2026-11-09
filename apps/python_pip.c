@@ -315,7 +315,7 @@ static int cache_command(Pip *pip, int argc, char **argv) {
 
 int python_pip_command(int argc, char **argv, char *out, size_t cap) {
     if (argc == 2 && (!strcmp(argv[1], "--version") || !strcmp(argv[1], "-V"))) {
-        append(out, "LunaOS pip 1 (MicroPython wheels)\n", cap);
+        append(out, "LunaOS pip 1 (pure Python wheels)\n", cap);
         return 0;
     }
     char lib[PATH_CAP];

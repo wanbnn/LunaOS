@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import hashlib
 import json
+import re
+import sys
 import subprocess
 import struct
 from pathlib import Path
@@ -95,6 +97,12 @@ source_manifest = json.loads(Path("assets/driver-sources/manifest.json").read_te
 source_archive = source_path.read_bytes()
 assert hashlib.sha256(source_archive).hexdigest() == source_manifest["sha256"]
 image_bytes = IMAGE_BYTES
+cpython = Path(sys.argv[1]).read_bytes()
+layout = Path("kernel/image_layout.h").read_text()
+cpython_offset = int(re.search(r"^#define LUNA_CPYTHON_SECTOR (\d+)u$", layout, re.M)[1]) * 512
+assert cpython.startswith(b"LUNAPY3\0")
+assert 32769 * 512 + len(source_archive) <= cpython_offset
+assert cpython_offset + len(cpython) <= CORE_BYTES
 assert 32769 * 512 + len(source_archive) <= image_bytes
 source_header = struct.pack("<8sI32s40s", b"LUNASRC1", len(source_archive),
     hashlib.sha256(source_archive).digest(), source_manifest["commit"].encode()).ljust(512, b"\0")
@@ -110,6 +118,8 @@ with image.open("wb") as f:
     f.write(source_archive)
     f.seek(SECTOR * 512)
     f.write(firmware_archive)
+    f.seek(cpython_offset)
+    f.write(cpython)
 
 # MBR holds the native data partition plus a standard FAT32 EFI system partition.
 with image.open("r+b") as f:
@@ -148,6 +158,8 @@ manifest = {
     "firmware_archive_bytes": len(firmware_archive),
     "setup_first_boot": True,
     "wireless_sources": source_manifest,
+    "cpython_bundle_bytes": len(cpython),
+    "cpython_bundle_sector": cpython_offset // 512,
 }
 (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 (out / "SHA256SUMS").write_text(manifest["sha256"] + "  LunaOS.img\n")

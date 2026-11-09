@@ -13,6 +13,8 @@ extra = {
     "Intel-WiFi-Firmware.txt": "assets/licenses/Intel-WiFi-Firmware.txt",
     "Realtek-Firmware.txt": "assets/licenses/Realtek-Firmware.txt",
     "MicroPython.txt": "third_party/micropython/LICENSE",
+    "CPython.txt": "assets/licenses/CPython.txt",
+    "wasm3.txt": "third_party/wasm3/LICENSE",
     "QuickJS.txt": "third_party/quickjs/LICENSE",
     "BearSSL.txt": "third_party/bearssl/LICENSE.txt",
     "Musl.txt": "third_party/musl/COPYRIGHT",

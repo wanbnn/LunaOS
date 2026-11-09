@@ -1,3 +1,4 @@
 # Preserve upstream whitespace and the required context markers in patches.
 third_party/uacpi/** -whitespace
 tests/fixtures/storage/*.patch -whitespace
+third_party/wasm3/** -whitespace

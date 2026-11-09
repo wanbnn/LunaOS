@@ -182,7 +182,7 @@ int python_run_file(const char *path, int argc, char **argv, char *out, size_t c
     return execute(NULL, full, argc, argv, out, cap);
 }
 
-int python_command(int argc, char **argv, char *out, size_t cap) {
+int micropython_command(int argc, char **argv, char *out, size_t cap) {
     if (argc == 2 && (!strcmp(argv[1], "--version") || !strcmp(argv[1], "-V"))) {
         append(out, "MicroPython " MICROPY_VERSION_STRING " on LunaOS\n", cap);
         return 0;
@@ -195,6 +195,6 @@ int python_command(int argc, char **argv, char *out, size_t cap) {
         return execute(argv[2], NULL, argc - 3, argv + 3, out, cap);
     if (argc >= 2 && argv[1][0] != '-')
         return python_run_file(argv[1], argc - 2, argv + 2, out, cap);
-    append(out, "usage: python --version | -c CODE [ARGS...] | FILE.py [ARGS...] | -m venv PATH | -m pip ...\n", cap);
+    append(out, "usage: micropython --version | -c CODE [ARGS...] | FILE.py [ARGS...] | -m venv PATH | -m pip ...\n", cap);
     return argc == 2 && !strcmp(argv[1], "--help") ? 0 : 2;
 }

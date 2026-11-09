@@ -41,3 +41,12 @@ assert commit.decode() == m["wireless_sources"]["commit"]
 assert data[16383 * 512:16383 * 512 + 8] == b"LUNAIMG1"
 assert struct.unpack_from("<I", data, 16383 * 512 + 12)[0] == len(data)
 print("PASS: installer metadata / complete wireless source archive hash")
+
+
+cpython_offset = m["cpython_bundle_sector"] * 512
+cpython = Path("assets/cpython/python313.bundle").read_bytes()
+assert cpython_offset >= source_offset + 512 + length
+assert len(cpython) == m["cpython_bundle_bytes"]
+assert data[cpython_offset:cpython_offset + len(cpython)] == cpython
+assert cpython_offset + len(cpython) <= m["esp_sector"] * 512
+print("PASS: CPython bundle and reserved disk region")

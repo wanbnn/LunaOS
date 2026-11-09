@@ -79,7 +79,7 @@ def main():
         }
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
-        guest = Guest(disk)
+        guest = Guest(disk, ram=128)
         try:
             guest.command("pip --version", "LunaOS pip 1")
             guest.command("python -m venv .venv", "Created Python environment")
@@ -100,13 +100,13 @@ def main():
             guest.command("pip cache info", "Cached wheels: 1")
             guest.command("pip cache list", demo)
             guest.command(f"pip install {base}/{bad}", "invalid or unsupported ZIP member")
-            guest.command("python -c 'import staged'", "ImportError")
+            guest.command("python -c 'import staged'", "ModuleNotFoundError")
             guest.command("ls .venv", "pyvenv.cfg")
             guest.command(f"pip install {base}/{deps}", "wheel declares dependencies")
             guest.command(f"pip install --no-deps {base}/{deps}", f"Installed {deps}")
             guest.command("pip uninstall -y withdeps", "Uninstalled withdeps")
             guest.command("pip uninstall -y LunaDemo", "Uninstalled lunademo")
-            guest.command("python -c 'import lunademo'", "ImportError")
+            guest.command("python -c 'import lunademo'", "ModuleNotFoundError")
             guest.command(f"pip install lunademo==1.0 --index-url {base}/api", "Using cached wheel")
             guest.command("pip cache remove lunademo", "Files removed: 1")
             guest.command("pip uninstall lunademo", "Uninstalled lunademo")
@@ -115,14 +115,14 @@ def main():
             guest.command("pip cache info", "Cached wheels: 0")
             guest.command("deactivate", "deactivated")
             guest.command("pip list", "(no packages installed)")
-            guest.command("python -c 'import lunademo'", "ImportError")
+            guest.command("python -c 'import lunademo'", "ModuleNotFoundError")
             guest.command("sync", "snapshot committed to disk")
         finally:
             guest.close()
             server.shutdown()
             thread.join()
 
-    guest = Guest(disk, network=False)
+    guest = Guest(disk, network=False, ram=128)
     try:
         guest.command("venv activate .venv", "Activated")
         guest.command("python -c 'import lunademo; print(lunademo.answer)'", "42\n")

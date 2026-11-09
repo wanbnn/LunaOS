@@ -37,6 +37,20 @@ BEAR_SOURCES := $(shell find third_party/bearssl/src -name "*.c" | sort)
 BEAR_OBJECTS := $(patsubst third_party/bearssl/%.c,build/bearssl/%.o,$(BEAR_SOURCES))
 JS_OBJECTS := $(addprefix build/quickjs/,$(addsuffix .o,quickjs libregexp libunicode cutils dtoa))
 OBJECTS := $(patsubst %.c,build/%.o,$(SOURCES)) build/kernel/entry.o build/apps/user.o $(JS_OBJECTS) $(UACPI_OBJECTS)
+WASM3_SRC := $(wildcard third_party/wasm3/*.c)
+WASM3_OBJ := $(patsubst third_party/wasm3/%.c,build/wasm3/%.o,$(WASM3_SRC))
+CPYTHON_OBJ := build/apps/cpython/port.o build/apps/cpython/wasi.o
+OBJECTS += $(WASM3_OBJ) $(CPYTHON_OBJ)
+WASM3_FLAGS := $(NATIVEFLAGS) -Ithird_party/wasm3 -O2 -DNDEBUG -Dd_m3MaxLinearMemoryPages=384
+$(WASM3_OBJ): $(wildcard third_party/wasm3/*.h) third_party/musl/lib/libc.a
+build/wasm3/%.o: third_party/wasm3/%.c
+	@mkdir -p $(dir $@)
+	$(EFI_CC) $(filter-out -mfpmath=387 -fexcess-precision=standard,$(WASM3_FLAGS)) -mno-mmx -mno-sse2 -c $< -o $@
+$(CPYTHON_OBJ): apps/cpython/port.h kernel/python.h kernel/image_layout.h third_party/wasm3/wasm3.h third_party/musl/lib/libc.a
+build/apps/cpython/%.o: apps/cpython/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(WASM3_FLAGS) -Wall -Wextra -Wno-unused-parameter -c $< -o $@
+
 $(OBJECTS) $(BEAR_OBJECTS): Makefile
 $(patsubst %.c,build/%.o,$(SOURCES)): $(wildcard kernel/*.h ui/*.h drivers/*.h include/net/*.h)
 .PHONY: test-rtw8822be-rx-dma test-wifi-scan all clean run run-iso iso test test-iso-install check test-wifi-port test-wireless-frames test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
@@ -46,7 +60,7 @@ build/font.h: tools/fontgen.py assets/fonts/InterTight.ttf assets/fonts/NotoSans
 	$(PYTHON) tools/fontgen.py
 build/notices.h: tools/notices.py assets/fonts/OFL.txt assets/fonts/NotoSans-OFL.txt \
              assets/fonts/Montserrat-OFL.txt assets/fonts/NotoSansSymbols2-OFL.txt \
-             assets/icons/lucide/LICENSE $(wildcard assets/licenses/*) third_party/quickjs/LICENSE third_party/micropython/LICENSE third_party/musl/COPYRIGHT third_party/bearssl/LICENSE.txt third_party/stb/LICENSE third_party/uacpi/LICENSE $(wildcard third_party/lexbor/LICENSE third_party/litehtml/LICENSE third_party/litehtml/src/gumbo/LICENSE)
+             assets/icons/lucide/LICENSE $(wildcard assets/licenses/*) third_party/quickjs/LICENSE third_party/micropython/LICENSE third_party/wasm3/LICENSE third_party/musl/COPYRIGHT third_party/bearssl/LICENSE.txt third_party/stb/LICENSE third_party/uacpi/LICENSE $(wildcard third_party/lexbor/LICENSE third_party/litehtml/LICENSE third_party/litehtml/src/gumbo/LICENSE)
 	$(PYTHON) tools/notices.py
 build/uacpi/%.o: third_party/uacpi/source/%.c $(shell find third_party/uacpi/include -name '*.h')
 	@mkdir -p $(dir $@)
@@ -204,8 +218,9 @@ build/BOOTX64.EFI: boot/uefi.c boot/uefi.h kernel/image_layout.h build/uefi_tram
 
 build/stage2.bin: dist/LunaOS.img
 	@test -f $@
-dist/LunaOS.img: build/kernel.bin build/BOOTX64.EFI tools/efifat.py boot/stage2.S tools/mkimage.py tools/firmwarepack.py assets/driver-sources/linux-wireless.tar.gz assets/driver-sources/manifest.json $(shell find assets/firmware -type f) boot/boot.S
-	$(PYTHON) tools/mkimage.py
+CPYTHON_BUNDLE := assets/cpython/python313.bundle
+dist/LunaOS.img: $(CPYTHON_BUNDLE) kernel/image_layout.h build/kernel.bin build/BOOTX64.EFI tools/efifat.py boot/stage2.S tools/mkimage.py tools/firmwarepack.py assets/driver-sources/linux-wireless.tar.gz assets/driver-sources/manifest.json $(shell find assets/firmware -type f) boot/boot.S
+	$(PYTHON) tools/mkimage.py $(CPYTHON_BUNDLE)
 dist/LunaOS.iso: dist/LunaOS.img tools/mkiso.py
 	$(PYTHON) tools/mkiso.py
 iso: dist/LunaOS.iso
@@ -222,6 +237,7 @@ test: all test-rtw8822be-coex test-rtw8822be-fifo test-storage test-storage-sdhc
 	$(PYTHON) tests/https.py
 	$(PYTHON) tests/driver_services.py
 	$(PYTHON) tests/python_guest.py
+	$(PYTHON) tests/cpython_guest.py
 	$(PYTHON) tests/python_pip_guest.py
 	$(PYTHON) tests/setup.py
 	$(PYTHON) tests/iso.py
@@ -286,7 +302,7 @@ build/ui/web_image.o: ui/web_image.c ui/webengine.h third_party/stb/stb_image.h 
 	@mkdir -p build/ui
 	$(CC) $(NATIVEFLAGS) -c $< -o $@
 
-.PHONY: test-lunasdk-hardware test-lunapy test-python test-pip
+.PHONY: test-lunasdk-hardware test-lunapy test-python test-cpython test-pip
 test-lunasdk-hardware:
 	@mkdir -p build
 	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=address,undefined -Ikernel kernel/lunasdk_hardware.c tests/lunasdk_hardware.c -o build/lunasdk-hardware-test
@@ -294,6 +310,8 @@ test-lunasdk-hardware:
 test-lunapy: test-python
 test-python: dist/LunaOS.img
 	LUNA_TEST_DIR=build/test-python $(PYTHON) tests/python_guest.py
+test-cpython: dist/LunaOS.img
+	LUNA_TEST_DIR=build/test-cpython $(PYTHON) tests/cpython_guest.py
 test-pip: dist/LunaOS.img
 	LUNA_TEST_DIR=build/test-pip $(PYTHON) tests/python_pip_guest.py
 
