@@ -2,6 +2,8 @@
 """Package the pinned wasm32-wasi CPython distribution for a LunaOS image."""
 import hashlib
 import io
+import importlib.util
+import marshal
 import struct
 import sys
 import urllib.request
@@ -13,6 +15,15 @@ VERSION = "3.13.9"
 URL = ("https://github.com/brettcannon/cpython-wasi-build/releases/download/"
        f"v{VERSION}/python-{VERSION}-wasi_sdk-24.zip")
 SHA256 = "f974d681668b8a51bf548474c9999630fe83a316155a4e937eaff57ea3ea4f39"
+# Imports needed at startup and by common shell scripts. Precompile these
+# modules to avoid parsing the standard library under a software-emulated CPU.
+PRECOMPILE = {
+    "_collections_abc", "_sitebuiltins", "abc", "codecs", "collections",
+    "contextlib", "copyreg", "encodings", "enum", "fnmatch", "functools",
+    "genericpath", "io", "json", "keyword", "ntpath", "operator", "os",
+    "pathlib", "posixpath", "re", "reprlib", "site", "stat", "types", "urllib",
+    "warnings",
+}
 
 
 def strip_custom_sections(wasm):
@@ -38,6 +49,8 @@ def strip_custom_sections(wasm):
 
 
 def main():
+    if sys.implementation.name != "cpython" or sys.version_info[:3] != (3, 13, 9):
+        raise SystemExit(f"Regenerate the bundle with CPython {VERSION} for matching bytecode")
     output, archive = map(Path, sys.argv[1:])
     archive.parent.mkdir(parents=True, exist_ok=True)
     if archive.exists():
@@ -57,8 +70,14 @@ def main():
             prefix = "lib/python3.13/"
             for name in sorted(source.namelist()):
                 if name.startswith(prefix) and name.endswith(".py"):
-                    entry = zipfile.ZipInfo(name[len(prefix):])
-                    dest.writestr(entry, source.read(name))
+                    relative = name[len(prefix):]
+                    data = source.read(name)
+                    if relative.split("/")[0].removesuffix(".py") in PRECOMPILE:
+                        code = compile(data, f"/lib/python3.13/{relative}", "exec", dont_inherit=True)
+                        bytecode = importlib.util.MAGIC_NUMBER + bytes(12) + marshal.dumps(code)
+                        dest.writestr(zipfile.ZipInfo(relative + "c"), bytecode)
+                    else:
+                        dest.writestr(zipfile.ZipInfo(relative), data)
 
     packed = zlib.compress(wasm, 9)
     # The WASI build lacks zlib. Use a stored ZIP for zipimport and

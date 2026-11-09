@@ -10,8 +10,8 @@ def main():
     guest = Guest(disk, network=False, ram=128)
     try:
         guest.command("python --version", "Python 3.13.9")
-        guest.command("python3 -c 'import json, sys; print(sys.implementation.name, json.dumps(42))'",
-                      "cpython 42\n", timeout=90)
+        guest.command("python3 -c 'import json, sys; print(sys.implementation.name, json.dumps(42), float(2.25) * 2)'",
+                      "cpython 42 4.5\n", timeout=90)
         guest.command("python3.13 -c 'import sys; sys.exit(7)'", timeout=90)
         guest.command("echo $?", "7\n")
         guest.command("mkdir project")

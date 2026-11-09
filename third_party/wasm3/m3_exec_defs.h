@@ -28,7 +28,17 @@ d_m3BeginExternC
 # define d_m3ExpOpDefaultArgs(...)      d_m3BaseOpDefaultArgs, __VA_ARGS__
 # define d_m3ExpClearRegisters(...)     d_m3BaseClearRegisters; __VA_ARGS__
 
-# if d_m3HasFloat
+# if d_m3HasFloat && defined(__i386__)
+// Pass the floating register as bits on i386 so integer instructions do
+// not perform an x87 load and store on each interpreter dispatch.
+typedef f64 M3AliasedFloat __attribute__((__may_alias__));
+#   define _fp0                     (*(M3AliasedFloat *)&_fp0_bits)
+#   define d_m3OpSig                d_m3ExpOpSig            (u64 _fp0_bits)
+#   define d_m3OpArgs               d_m3ExpOpArgs           (_fp0_bits)
+#   define d_m3OpAllArgs            d_m3ExpOpAllArgs        (_fp0_bits)
+#   define d_m3OpDefaultArgs        d_m3ExpOpDefaultArgs    (UINT64_C(0))
+#   define d_m3ClearRegisters       d_m3ExpClearRegisters   (_fp0 = 0.;)
+# elif d_m3HasFloat
 #   define d_m3OpSig                d_m3ExpOpSig            (f64 _fp0)
 #   define d_m3OpArgs               d_m3ExpOpArgs           (_fp0)
 #   define d_m3OpAllArgs            d_m3ExpOpAllArgs        (_fp0)

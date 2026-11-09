@@ -8,4 +8,6 @@ Archive SHA-256: b778dd72ee2251f4fe9e2666ee3fe1c26f06f517c3ffce572416db067546536
 
 
 LunaOS adds a deadline hook at loop back edges and uses Clang's mandatory
-tail calls for i386 interpreter dispatch to bound host stack growth.
+tail calls for i386 interpreter dispatch to bound host stack growth. It
+also passes the floating-point dispatch register as bits to avoid x87 work
+on integer operations.
