@@ -187,12 +187,14 @@ int python_command(int argc, char **argv, char *out, size_t cap) {
         append(out, "MicroPython " MICROPY_VERSION_STRING " on LunaOS\n", cap);
         return 0;
     }
+    if (argc >= 3 && !strcmp(argv[1], "-m") && !strcmp(argv[2], "pip"))
+        return python_pip_command(argc - 2, argv + 2, out, cap);
     if (argc == 4 && !strcmp(argv[1], "-m") && !strcmp(argv[2], "venv"))
         return python_venv_create(argv[3], out, cap);
     if (argc >= 3 && !strcmp(argv[1], "-c"))
         return execute(argv[2], NULL, argc - 3, argv + 3, out, cap);
     if (argc >= 2 && argv[1][0] != '-')
         return python_run_file(argv[1], argc - 2, argv + 2, out, cap);
-    append(out, "usage: python --version | -c CODE [ARGS...] | FILE.py [ARGS...] | -m venv PATH\n", cap);
+    append(out, "usage: python --version | -c CODE [ARGS...] | FILE.py [ARGS...] | -m venv PATH | -m pip ...\n", cap);
     return argc == 2 && !strcmp(argv[1], "--help") ? 0 : 2;
 }

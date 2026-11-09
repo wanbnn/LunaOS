@@ -27,7 +27,7 @@ O LunaOS tem **bootloader próprio**, **kernel próprio em C**, **interface grá
 - Desktop com dock, pesquisa, janelas, compositor 32 bits, **transições suaves nativas**, fontes **Inter Tight**, **Noto Sans** e **Montserrat** (com reserva de símbolos) e ícones **Lucide**.
 - Assistente de primeiro boot, modo live, instalação em IDE e backends **SATA/AHCI, NVMe, USB EHCI/BOT, SDHCI/eMMC e MegaRAID MFI experimentais** (512B LBA; validação em hardware físico pendente), login.
 - Terminal **lunaSH**, Files, Notes, Settings, navegador e Gerenciador de Tarefas.
-- **LunaSDK v2**: aplicativos JavaScript `.ljs`, MicroPython para scripts `.py`, API de descoberta **PCI real** e endpoints de hardware implementados por drivers C nativos; projetos C/CMake ainda são compilados no host.
+- **LunaSDK v2**: aplicativos JavaScript `.ljs`, MicroPython para scripts `.py`, `venv` por projeto e `pip` para wheels Python puro, API de descoberta **PCI real** e endpoints de hardware implementados por drivers C nativos; projetos C/CMake ainda são compilados no host.
 - Pilha de rede IPv4 via **RTL8139**, HTTP e HTTPS/TLS 1.2.
 - Navegador com HTML, CSS, DOM/JavaScript **parciais** e decodificação de PNG externo.
 - Scanner passivo e conexão de estação WPA2 experimentais para **RTL8822BE**, ainda sem validação em hardware físico.

@@ -179,6 +179,48 @@ lugar do `lib` do usuário. Todos os ambientes usam o mesmo interpretador
 embarcado. A ativação dura até `deactivate` ou até reiniciar o sistema.
 `sync` grava os diretórios do LunaFS no disco.
 
+### Pacotes com pip
+
+```sh
+python -m venv .venv
+venv activate .venv
+python -m pip install -r requirements.txt
+pip list
+pip show pacote
+pip freeze
+pip uninstall -y pacote
+pip cache info
+pip cache purge
+sync
+```
+
+O `pip` do LunaOS instala wheels Python puro marcados
+`py3-none-any` ou `py2.py3-none-any`. `pip install` aceita um caminho
+LunaFS, uma URL HTTP(S) do wheel, `pacote` ou `pacote==versão` no PyPI.
+Na consulta ao PyPI, o download passa por HTTPS e é verificado pelo
+SHA-256 publicado no índice. Para um espelho com a mesma API JSON, passe
+`--index-url URL` apontando para a base que precede
+`/<pacote>[/<versão>]/json`.
+
+Em `requirements.txt`, use um pacote ou wheel por linha. Linhas em branco
+e comentários iniciados por `#` são aceitos. Caminhos relativos de wheels
+partem da pasta do arquivo de requisitos. Se uma linha falhar, os pacotes
+concluídos nas linhas anteriores continuam instalados. Sem um ambiente
+ativo, os pacotes ficam em `~/lib`. O `uninstall` usa o registro que o
+instalador grava dentro do ambiente.
+
+O cache dos wheels obtidos pelo índice é compartilhado entre ambientes do
+mesmo usuário. Use `pip cache dir`, `list`, `info`, `remove NOME` ou `purge`.
+`pip install --no-cache-dir ...` desabilita o cache naquela execução.
+
+A instalação é limitada a 4 MiB por wheel, 4 MiB descompactados, 512
+entradas e 64 KiB por arquivo. A versão deve ser exata ou a mais recente
+publicada no índice. Para wheels que declaram dependências, inclua as
+dependências no arquivo de requisitos e use `--no-deps`. A compatibilidade
+do código depende das APIs disponíveis no MicroPython. Distribuições de
+código-fonte, extensões binárias e a geração de scripts de entrada do
+wheel ficam fora do port atual.
+
 ## CMake e SDK C: compilação no host, integração no kernel
 
 O projeto CMake em [`sdk/native/CMakeLists.txt`](../sdk/native/CMakeLists.txt)
@@ -221,9 +263,10 @@ Apenas disponibilizar um arquivo `CMakeLists.txt` não resolve isso.
 
 ```sh
 make test-lunasdk-hardware test-devkit
-make test-python
+make test-python test-pip
 make check
 ```
 
 Os testes de ABI usam mocks no host. `make test-python` executa o
 interpretador, os imports do LunaFS e o LunaSDK no guest QEMU.
+`make test-pip` usa wheels de teste e um índice HTTP local.

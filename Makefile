@@ -110,6 +110,12 @@ build/bearssl/%.o: third_party/bearssl/%.c
 	$(CC) $(NATIVEFLAGS) -DBR_USE_URANDOM=0 -DBR_USE_UNIX_TIME=0 -DBR_USE_WIN32_RAND=0 -DBR_USE_WIN32_TIME=0 -DBR_AES_X86NI=0 -DBR_GHASH_PCLMUL=0 -DBR_SSE2=0 -DBR_RDRAND=0 -Ithird_party/bearssl/inc -Ithird_party/bearssl/src -c $< -o $@
 build/libbearssl.a: $(BEAR_OBJECTS)
 	ar rcs $@ $^
+build/apps/python_index.o: apps/python_index.c apps/python_wheel.h third_party/musl/lib/libc.a
+	@mkdir -p build/apps
+	$(CC) $(NATIVEFLAGS) -c $< -o $@
+build/apps/python_pip.o build/apps/python_packages.o build/apps/python_wheel.o: apps/python_wheel.h
+build/apps/python_pip.o build/apps/python_packages.o: third_party/musl/lib/libc.a
+build/apps/python_pip.o build/apps/python_packages.o: CFLAGS += $(MUSLINC)
 build/apps/javascript.o: apps/javascript.c
 	@mkdir -p build/apps
 	$(CC) $(NATIVEFLAGS) -c $< -o $@
@@ -216,6 +222,7 @@ test: all test-rtw8822be-coex test-rtw8822be-fifo test-storage test-storage-sdhc
 	$(PYTHON) tests/https.py
 	$(PYTHON) tests/driver_services.py
 	$(PYTHON) tests/python_guest.py
+	$(PYTHON) tests/python_pip_guest.py
 	$(PYTHON) tests/setup.py
 	$(PYTHON) tests/iso.py
 test-iso-install: all
@@ -279,7 +286,7 @@ build/ui/web_image.o: ui/web_image.c ui/webengine.h third_party/stb/stb_image.h 
 	@mkdir -p build/ui
 	$(CC) $(NATIVEFLAGS) -c $< -o $@
 
-.PHONY: test-lunasdk-hardware test-lunapy test-python
+.PHONY: test-lunasdk-hardware test-lunapy test-python test-pip
 test-lunasdk-hardware:
 	@mkdir -p build
 	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=address,undefined -Ikernel kernel/lunasdk_hardware.c tests/lunasdk_hardware.c -o build/lunasdk-hardware-test
@@ -287,6 +294,8 @@ test-lunasdk-hardware:
 test-lunapy: test-python
 test-python: dist/LunaOS.img
 	LUNA_TEST_DIR=build/test-python $(PYTHON) tests/python_guest.py
+test-pip: dist/LunaOS.img
+	LUNA_TEST_DIR=build/test-pip $(PYTHON) tests/python_pip_guest.py
 
 .PHONY: test-devkit
 test-devkit:

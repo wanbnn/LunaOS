@@ -286,7 +286,7 @@ static size_t state_bytes(const File *state, int capacity, size_t limit, uint32_
     return total;
 }
 int fs_clone(FileState *dest, const File *source) {
-    if (fs_locked)
+    if (fs_locked || disk_readers)
         return -1;
     if (!dest || source != files || dest->files == files)
         return -1;
