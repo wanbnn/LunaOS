@@ -26,8 +26,8 @@ typedef struct {
     WifiAp ap;
     uint8_t mac[6], rsn[WPA2_RSN_MAX];
     unsigned rsn_len, sequence, aid;
-    char password[WIFI_MAX_PASSWORD+1];
-    uint32_t deadline;
+    char password[WIFI_PSK_HEX_LEN+1];
+    uint32_t deadline, last_ap_rx;
     uint32_t attempts, mgmt_rx, foreign_rx, auth_rx, assoc_rx;
     uint32_t data_rx, decrypt_errors, decap_errors, ethernet_rx;
     uint32_t decrypt_format, decrypt_key, decrypt_replay, decrypt_mic;

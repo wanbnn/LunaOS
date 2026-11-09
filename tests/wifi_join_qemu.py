@@ -19,7 +19,7 @@ os.environ["LUNA_QEMU"] = str(ROOT / ".tools/qemu-storage-build/qemu-system-i386
 sys.path.insert(0, str(ROOT / "tests"))
 sys.path.insert(0, str(ROOT / "tests/fixtures/wifi"))
 # The guest harness reads these environment settings at import time.
-from access_point import AccessPoint  # noqa: E402
+from access_point import AP, SSID, AccessPoint  # noqa: E402
 from guest import Guest, memory, symbol_address, wait_until  # noqa: E402
 
 
@@ -63,7 +63,13 @@ def wait_state(needle):
         time.sleep(0.2)
 
 
+def assert_ssid(ssid):
+    assert memory(guest, symbol_address("connection_ssid"), 33).split(b"\0")[0] == ssid
+
+
 ap = AccessPoint()
+first_network = AP, SSID, b"password"
+second_network = bytes.fromhex("020000000003"), b"Luna-Lab-Second", b"newpassword"
 guest = None
 report = {"result": "RUNNING", "transport": "RTL8822BE PCIe/DMA and independent 802.11 peer"}
 (WORK / "report.json").write_text(json.dumps(report, indent=2) + "\n")
@@ -87,6 +93,7 @@ try:
     wait_state("error=110")
     assert "bad-password" in ap.events
     connect()
+    guest.wait("Wi-Fi: profiles saved", 30)
     wait_state("link=5")
     assert "WPA2-authorized" in ap.events and "DHCP-ack" in ap.events, ap.events
     status = guest.command("net", "Wi-Fi/generic interface: IPv4 ready")
@@ -112,8 +119,47 @@ try:
     ap.send(ap.header(0xC0) + struct.pack("<H", 3))
     wait_state("link=2")
     guest.command("wifidiag", "AP disconnect reason=3")
-    connect()
     wait_state("link=5")
+    guest.command("ping 1.1.1.1", "Reply")
+
+    ap.online = False
+    wait_state("link=2")
+    wait_state("link=1")
+    wait_state("link=2")
+    ap.online = True
+    wait_state("link=5")
+    guest.command("ping 1.1.1.1", "Reply")
+
+    ap.online = False
+    ap.send(ap.header(0xC0) + struct.pack("<H", 3))
+    wait_state("link=2")
+    ap.bssid, ap.ssid, ap.password = second_network
+    ap.online = True
+    x, y = settings_position()
+    click(x + 65, y + 62 + 5 * 47 + 18)
+    wait_state("link=2")
+    guest.command("wifi results", "Luna-Lab-Second channel=1 security=WPA2-PSK")
+    connect("newpassword")
+    guest.wait("Wi-Fi: profiles saved", 30)
+    wait_state("link=5")
+    assert_ssid(second_network[1])
+
+    ap.online = False
+    ap.bssid, ap.ssid, ap.password = first_network
+    ap.online = True
+    wait_state("link=2")
+    guest.wait("Wi-Fi: profiles saved", 30)
+    wait_state("link=5")
+    assert_ssid(first_network[1])
+    guest.command("ping 1.1.1.1", "Reply")
+
+    (WORK / "before-reboot.log").write_text(guest.transcript)
+    guest.close()
+    guest = None
+    ap.bssid, ap.ssid, ap.password = second_network
+    guest = Guest(disk, network=False, extra_args=["-device", device])
+    wait_state("link=5")
+    assert_ssid(second_network[1])
     guest.command("ping 1.1.1.1", "Reply")
     assert not ap.errors, ap.errors
     report = {
@@ -136,7 +182,10 @@ try:
             "350 KB stylesheet",
             "continued ICMP after transfer",
             "CCMP retry replay rejected",
-            "AP disconnect and successful reconnection",
+            "automatic reconnection after AP deauthentication",
+            "automatic reconnection after silent AP outage and an unsuccessful scan",
+            "automatic failover to another saved WPA2 network after silent AP loss",
+            "automatic WPA2 connection to an older saved profile after a fresh boot",
         ],
         "pending": [
             "firmware CPU execution",

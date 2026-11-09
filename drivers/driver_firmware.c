@@ -1,5 +1,5 @@
 #include "driver.h"
-#define FW_SECTOR 16384u
+#include "image_layout.h"
 #define FW_LIMIT (2u * 1024 * 1024)
 #define FW_MAX_FILE (2u * 1024 * 1024)
 #define FW_ENTRIES 16
@@ -38,7 +38,7 @@ int drv_firmware_request(const char *name, DrvFirmware *out) {
     if (drv_in_irq() || !drv_irqs_enabled())
         return DRV_EDEADLK;
     uint8_t sector[512], directory[FW_ENTRIES * 128];
-    if (!disk_read(FW_SECTOR, sector))
+    if (!disk_read(LUNA_FIRMWARE_SECTOR, sector))
         return DRV_EIO;
     if (memcmp(sector, "LUNAFW1\0", 8))
         return DRV_ENOENT;
@@ -53,7 +53,7 @@ int drv_firmware_request(const char *name, DrvFirmware *out) {
     if (total < (1 + sectors) * 512)
         return DRV_EIO;
     for (unsigned i = 0; i < sectors; i++)
-        if (!disk_read(FW_SECTOR + 1 + i, directory + i * 512))
+        if (!disk_read(LUNA_FIRMWARE_SECTOR + 1 + i, directory + i * 512))
             return DRV_EIO;
     if (hash_bytes(directory, dir_bytes, 2166136261u) != dir_hash)
         return DRV_EIO;
@@ -99,7 +99,7 @@ int drv_firmware_request(const char *name, DrvFirmware *out) {
     uint8_t *data = out->allocation.cpu;
     uint32_t hash = 2166136261u;
     for (unsigned done = 0; done < size;) {
-        if (!disk_read(FW_SECTOR + (offset + done) / 512, sector)) {
+        if (!disk_read(LUNA_FIRMWARE_SECTOR + (offset + done) / 512, sector)) {
             r = DRV_EIO;
             break;
         }

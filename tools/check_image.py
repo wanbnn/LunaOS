@@ -3,6 +3,7 @@ import hashlib
 import json
 import subprocess
 from pathlib import Path
+from firmwarepack import SECTOR
 
 p = Path("dist/LunaOS.img")
 data = p.read_bytes()
@@ -24,7 +25,7 @@ print("PASS: boot signature, image layout, size budget, SHA-256 and freestanding
 # Firmware is an independent binary region, beyond both LunaFS snapshots.
 firmware_offset = m["firmware_sector"] * 512
 assert data[firmware_offset:firmware_offset + 8] == b"LUNAFW1\0"
-assert firmware_offset >= 14336 * 512
+assert firmware_offset == SECTOR * 512
 assert firmware_offset + m["firmware_archive_bytes"] <= len(data)
 print("PASS: binary firmware region layout")
 

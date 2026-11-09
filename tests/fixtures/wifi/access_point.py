@@ -43,6 +43,10 @@ class AccessPoint:
         self.socket.settimeout(0.1)
         self.port = self.socket.getsockname()[1]
         self.address = None
+        self.online = True
+        self.bssid = AP
+        self.ssid = SSID
+        self.password = b"password"
         self.sequence = self.pn = self.rx_pn = 0
         self.authorized = False
         self.ptk = None
@@ -65,7 +69,7 @@ class AccessPoint:
     def header(self, subtype, data=False, protected=False):
         self.sequence = (self.sequence + 1) & 4095
         flags = (2 if data else 0) | (0x40 if protected else 0)
-        return bytes([subtype, flags, 0, 0]) + STA + AP + AP + struct.pack("<H", self.sequence << 4)
+        return bytes([subtype, flags, 0, 0]) + STA + self.bssid * 2 + struct.pack("<H", self.sequence << 4)
 
     def send(self, frame):
         self.socket.sendto(b"\1" + frame, self.address)
@@ -77,7 +81,7 @@ class AccessPoint:
             self.pn += 1
             pn = self.pn.to_bytes(6, "little")
             iv = pn[:2] + b"\0\x20" + pn[2:]
-            nonce = b"\0" + AP + self.pn.to_bytes(6, "big")
+            nonce = b"\0" + self.bssid + self.pn.to_bytes(6, "big")
             frame += iv + AESCCM(self.ptk[32:48], tag_length=8).encrypt(nonce, body, aad(frame))
         else:
             frame += body
@@ -103,10 +107,11 @@ class AccessPoint:
     def handshake(self, packet):
         info = struct.unpack_from("!H", packet, 5)[0]
         if info == 0x010A:
-            pmk = hashlib.pbkdf2_hmac("sha1", b"password", SSID, 4096, 32)
+            pmk = hashlib.pbkdf2_hmac("sha1", self.password, self.ssid, 4096, 32)
             snonce = packet[17:49]
             ordered = (
-                min(AP, STA) + max(AP, STA) + min(self.anonce, snonce) + max(self.anonce, snonce)
+                min(self.bssid, STA) + max(self.bssid, STA)
+                + min(self.anonce, snonce) + max(self.anonce, snonce)
             )
             prefix = b"Pairwise key expansion\0" + ordered
             self.ptk = b"".join(hmac.digest(pmk, prefix + bytes([i]), "sha1") for i in range(3))[
@@ -250,7 +255,7 @@ class AccessPoint:
     def ethernet(self, protocol, packet):
         if protocol == 0x806:
             if packet[6:8] == b"\0\1":
-                reply = packet[:6] + b"\0\2" + AP + ROUTER + STA + CLIENT
+                reply = packet[:6] + b"\0\2" + self.bssid + ROUTER + STA + CLIENT
                 self.data(0x806, reply)
             return
         if protocol != 0x800:
@@ -279,6 +284,8 @@ class AccessPoint:
                 self.udp(53, src, reply, packet[16:20])
 
     def handle(self, frame):
+        if frame[4:10] != self.bssid:
+            return
         if frame[0] == 0xB0:
             self.authorized = False
             self.pn = self.rx_pn = 0
@@ -315,11 +322,11 @@ class AccessPoint:
                     packet, self.address = self.socket.recvfrom(2400)
                 except socket.timeout:
                     continue
-                if packet[0] != 1:
+                if not self.online or packet[0] != 1:
                     continue
                 if len(packet) == 1:
-                    beacon = b"\x80\0\0\0" + b"\xff" * 6 + AP + AP + b"\0\0" + b"\0" * 8
-                    beacon += struct.pack("<HH", 100, 0x11) + bytes([0, len(SSID)]) + SSID
+                    beacon = b"\x80\0\0\0" + b"\xff" * 6 + self.bssid * 2 + b"\0" * 10
+                    beacon += struct.pack("<HH", 100, 0x11) + bytes([0, len(self.ssid)]) + self.ssid
                     self.send(beacon + b"\1\4\x82\x84\x8b\x96\3\1\1" + RSN)
                 else:
                     self.handle(packet[1:])

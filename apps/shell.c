@@ -1,6 +1,6 @@
 #include "python.h"
 #include "clock.h"
-#include "wifi.h"
+#include "wifi_profiles.h"
 #include "../drivers/rtw8822be_diag.h"
 #include "../drivers/iwl_pcie.h"
 #include "memory.h"
@@ -811,7 +811,7 @@ static int execute(int argc, char **a, const char *input, char *out) {
         return 0;
     } else if (!strcmp(c, "wifi")) {
         if (argc == 2 && !strcmp(a[1], "scan")) {
-            int rc=wifi_scan_start();
+            int rc=wifi_user_scan();
             if(rc) { emit(out,"Wi-Fi scan failed error="); num(out,(unsigned)-rc); emit(out,"\n"); return 1; }
             emit(out,"Wi-Fi scan started; use wifi results after completion\n"); return 0;
         }

@@ -1,6 +1,6 @@
 #include "update.h"
 #include "calendar.h"
-#include "wifi.h"
+#include "wifi_profiles.h"
 #include "acpi.h"
 #include "settings.h"
 #include "window.h"
@@ -99,9 +99,9 @@ static const char *network_message = "";
 static const char *network_state(void) {
     WifiState state;
     if (wifi_state(&state)) return system_text("Wi-Fi unavailable", "Wi-Fi indisponível");
-    if (state.error) return system_text("Connection failed. Retry.", "Conexão falhou. Tente novamente.");
     if (state.link == WIFI_SCANNING) return system_text("Scanning...", "Buscando...");
     if (state.link == WIFI_ASSOCIATING) return system_text("Connecting...", "Conectando...");
+    if (state.error) return system_text("Connection failed. Retry.", "Conexão falhou. Tente novamente.");
     if (state.link == WIFI_ASSOCIATED) return system_text("Waiting for IP...", "Aguardando IP...");
     if (state.link == WIFI_ONLINE) return system_text("Connected", "Conectado");
     if (!state.can_connect) return system_text("Passive scan only", "Somente busca passiva");
@@ -116,12 +116,12 @@ static void network_scan(void) {
                                       "Busca pausada durante a conexão.");
         return;
     }
-    int rc = wifi_scan_start();
+    int rc = wifi_user_scan();
     network_message = rc ? system_text("Scan unavailable or busy. Retry.", "Busca indisponível ou ocupada. Tente novamente.") : "";
     network_first = 0;
 }
 static void network_connect(void) {
-    int rc = wifi_connect_ap(&network_selected, network_secret);
+    int rc = wifi_user_connect(&network_selected, network_secret);
     memset(network_secret, 0, sizeof(network_secret));
     network_password = false;
     network_message = rc ? system_text("Cannot connect. Check password (8-63 characters) and retry.",
@@ -184,7 +184,10 @@ static void network_draw(int a, int b, int width) {
         char masked[WIFI_MAX_PASSWORD + 1];
         unsigned n = strlen(network_secret);
         memset(masked, '*', n); masked[n] = 0;
-        row(a, b + 431, width - 125, system_text("Password", "Senha"), masked);
+        const char *prompt = wifi_profile_known(&network_selected)
+            ? system_text("Blank: use saved password", "Em branco: usar senha salva")
+            : system_text("Password", "Senha");
+        row(a, b + 431, width - 125, prompt, masked);
         button(a + width - 115, b + 442, 115, system_text("Connect", "Conectar"));
     } else label(a + 8, b + 440, network_message);
 }

@@ -3,7 +3,7 @@
 #include "settings.h"
 #include "task.h"
 #include "web.h"
-#include "wifi.h"
+#include "wifi_profiles.h"
 #include "storage.h"
 #define INK 0x20344f
 #define SECONDARY 0x586d85
@@ -109,7 +109,7 @@ static void change_page(int page) {
         wifi_selected = -1;
         wifi_password[0] = 0;
         wifi_connect_rc = 0;
-        wifi_scan_rc = wifi_scan_start();
+        wifi_scan_rc = wifi_user_scan();
         wifi_state_rc = wifi_state(&wifi_link);
         wifi_last_refresh = 0;
     }
@@ -121,7 +121,7 @@ static void change_page(int page) {
 static void setup_wifi_connect(void) {
     if (wifi_selected < 0 || (unsigned)wifi_selected >= wifi_count)
         return;
-    wifi_connect_rc = wifi_connect_ap(&wifi_aps[wifi_selected], wifi_password);
+    wifi_connect_rc = wifi_user_connect(&wifi_aps[wifi_selected], wifi_password);
     secret_clear(wifi_password, sizeof(wifi_password));
     ui_dirty = true;
 }
@@ -430,7 +430,9 @@ void setup_draw(void) {
         if (wifi_selected >= 0 && (unsigned)wifi_selected < wifi_count) {
             const WifiAp *chosen = &wifi_aps[wifi_selected];
             if (chosen->security == WIFI_WPA2_PSK)
-                entry(557, tr("Senha Wi-Fi", "Wi-Fi password"), wifi_password, 0, true, 475);
+                entry(557, wifi_profile_known(chosen)
+                           ? tr("Em branco: usar senha salva", "Blank: use saved password")
+                           : tr("Senha Wi-Fi", "Wi-Fi password"), wifi_password, 0, true, 475);
             else
                 text(160, 565, tr("Esta rede não exige senha.", "This network requires no password."),
                      13, SECONDARY);
@@ -639,7 +641,7 @@ void setup_pointer(int x, int y, int buttons) {
     }
     if (setup_page == 3) {
         if (hit(x, y, 650, 350, 216, 38)) {
-            wifi_scan_rc = wifi_scan_start();
+            wifi_scan_rc = wifi_user_scan();
             wifi_count = wifi_first = 0;
             wifi_selected = -1;
             wifi_connect_rc = 0;
@@ -904,7 +906,8 @@ void setup_poll(void) {
         strcat(region, "\ntimezone=");
         strcat(region, zones[selected_region]);
         strcat(region, "\nclock=UTC\n");
-        if (!account_store() || !settings_write() || fs_write("/etc/region", region, false) ||
+        if (!account_store() || !settings_write() || !wifi_profiles_write() ||
+            fs_write("/etc/region", region, false) ||
             fs_write("/etc/setup-complete", "LunaOS setup v1\n", false) ||
             !fs_save_to(selected_disk) || !fs_verify_on(selected_disk)) {
             fail("Unable to save/verify destination configuration.");

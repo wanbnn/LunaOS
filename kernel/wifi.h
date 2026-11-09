@@ -6,6 +6,7 @@
 #define WIFI_MAX_APS 32
 #define WIFI_MAX_SSID 32
 #define WIFI_MAX_PASSWORD 63
+#define WIFI_PSK_HEX_LEN 64
 typedef enum {
     WIFI_DOWN = 0, WIFI_SCANNING = 1, WIFI_IDLE = 2,
     WIFI_ASSOCIATING = 3, WIFI_ASSOCIATED = 4, WIFI_ONLINE = 5
@@ -41,6 +42,7 @@ int wifi_register_driver(const WifiDriverOps *ops, void *context);
 void wifi_unregister_driver(const WifiDriverOps *ops);
 int wifi_scan_start(void);
 int wifi_scan_results(WifiAp *out, unsigned cap, unsigned *count);
+/* WPA2 accepts a passphrase or a 64-digit hexadecimal PSK. */
 int wifi_connect_ap(const WifiAp *ap, const char *password);
 int wifi_state(WifiState *out);
 void wifi_poll(void);

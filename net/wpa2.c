@@ -15,9 +15,22 @@ static void hmac(const br_hmac_key_context *key, const void *data, size_t n, uin
     br_hmac_context h; br_hmac_init(&h,key,0); br_hmac_update(&h,data,n); br_hmac_out(&h,out);
     wipe(&h,sizeof(h));
 }
+static int hex_digit(unsigned char c) {
+    if(c>='0' && c<='9') return c-'0';
+    c|=32;
+    return c>='a' && c<='f' ? c-'a'+10 : -1;
+}
 int wpa2_pmk(const char *pass, const uint8_t *ssid, size_t n, uint8_t pmk[32]) {
     if(!pass || !ssid || !n || n>32 || !pmk) return EINVAL;
     size_t bytes=0; while(bytes<64 && pass[bytes]) bytes++;
+    if(bytes==64 && !pass[64]) {
+        for(unsigned i=0;i<32;i++) {
+            int hi=hex_digit(pass[2*i]), lo=hex_digit(pass[2*i+1]);
+            if(hi<0 || lo<0) { wipe(pmk,32); return EINVAL; }
+            pmk[i]=(hi<<4)|lo;
+        }
+        return 0;
+    }
     if(bytes<8 || bytes>63) return EINVAL;
     br_hmac_key_context key; br_hmac_key_init(&key,&br_sha1_vtable,pass,bytes);
     uint8_t salt[36], u[20], block[20]; memcpy(salt,ssid,n);

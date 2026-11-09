@@ -6,7 +6,7 @@
 #include "storage.h"
 #include "devkit.h"
 #include "memory.h"
-#include "wifi.h"
+#include "wifi_profiles.h"
 #include "../drivers/iwl_pcie.h"
 #include "../drivers/rtw8822be_pcie.h"
 #include "install.h"
@@ -52,6 +52,7 @@ void kmain(void) {
     lunasdk_edu_init();
     rtw8822be_init();
     wifi_intel_init();
+    wifi_profiles_init();
     gui_init();
     gui_draw();
     serial_write("READY\n");
@@ -92,6 +93,7 @@ void kmain(void) {
         }
         if ((int32_t)(frame_clock - next_net) >= 0) {
             net_poll();
+            wifi_profiles_poll(!setup_active);
             clock_poll();
             next_net = frame_clock + 5;
         }

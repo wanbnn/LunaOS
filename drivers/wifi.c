@@ -91,8 +91,8 @@ int wifi_connect_ap(const WifiAp *ap, const char *password) {
     if (ap->security == WIFI_WPA2_PSK) {
         if (!password) return WIFI_EINVAL;
         size_t n = 0;
-        while (password[n] && n <= WIFI_MAX_PASSWORD) n++;
-        if (n < 8 || n > WIFI_MAX_PASSWORD) return WIFI_EINVAL;
+        while (n <= WIFI_PSK_HEX_LEN && password[n]) n++;
+        if (n < 8 || n > WIFI_PSK_HEX_LEN) return WIFI_EINVAL;
     }
     WifiState s;
     rc = wifi_state(&s);

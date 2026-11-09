@@ -7,6 +7,7 @@
 #define IO (-5)
 #define TIMEOUT (-110)
 #define UNSUPPORTED (-95)
+#define AP_SILENCE_MS 15000u
 static void wipe(void *p,size_t n) { volatile uint8_t *v=p;while(n--) *v++=0; }
 /* Avoid host _FORTIFY_SOURCE memcpy_chk references in the freestanding kernel. */
 static void copy(void *dst,const void *src,size_t n) {
@@ -103,6 +104,12 @@ static int rx_msdu(void *v,uint8_t *out,unsigned cap,unsigned *bytes,bool *encry
         if(rc!=1 || n>sizeof(f)) return INVALID;
         Luna80211Header h;
         if(luna80211_header(f,n,&h)) continue;
+        if(h.type==0 && h.subtype==8 && n>=h.header_len+12 &&
+           !h.protected_frame && !memcmp(h.source,c->ap.bssid,6) &&
+           !memcmp(h.bssid,c->ap.bssid,6)) {
+            c->last_ap_rx=c->radio.now(c->radio.context);
+            continue;
+        }
         /* The post-association path must still observe AP disconnects.
          * Return through the station's error path so keys/DHCP are closed
          * after this receive callback returns, not while it is on the stack. */
@@ -151,6 +158,7 @@ static int rx_msdu(void *v,uint8_t *out,unsigned cap,unsigned *bytes,bool *encry
             continue;
         }
         c->ethernet_rx++;
+        c->last_ap_rx=c->radio.now(c->radio.context);
         *bytes=count;*encrypted=crypted;return 1;
     }
     return 0;
@@ -169,6 +177,7 @@ static int associated(WifiClient *c,unsigned aid) {
                                    c->rsn,c->rsn_len,c->radio.now(c->radio.context));
     wipe(c->password,sizeof(c->password));
     if(rc) {fail(c,rc);return rc;}
+    c->last_ap_rx=c->radio.now(c->radio.context);
     c->stage=WIFI_CLIENT_PORT;
     return 0;
 }
@@ -186,8 +195,8 @@ int wifi_client_start(WifiClient *c,const WifiClientRadio *radio,const uint8_t m
     if(ap->security==WIFI_WPA2_PSK) {
         if(!pass || !rsn || rsn_len<20 || rsn_len>WPA2_RSN_MAX ||
            rsn[0]!=48 || rsn[1]!=rsn_len-2) return INVALID;
-        while(n<=WIFI_MAX_PASSWORD && pass[n]) n++;
-        if(n<8 || n>WIFI_MAX_PASSWORD) return INVALID;
+        while(n<=WIFI_PSK_HEX_LEN && pass[n]) n++;
+        if(n<8 || n>WIFI_PSK_HEX_LEN) return INVALID;
     }
     /* Only the scanned AP supplies these parameters; never auto-roam into
      * a new BSSID or silently downgrade an encrypted network to open. */
@@ -209,6 +218,8 @@ void wifi_client_poll(WifiClient *c) {
     if(c->stage==WIFI_CLIENT_PORT) {
         wifi_station_poll(&c->station,c->radio.now(c->radio.context));
         if(c->station.link==WIFI_DOWN) fail(c,c->station.error?c->station.error:IO);
+        else if((uint32_t)(c->radio.now(c->radio.context)-c->last_ap_rx)>=AP_SILENCE_MS)
+            fail(c,TIMEOUT);
         return;
     }
     if((int32_t)(c->radio.now(c->radio.context)-c->deadline)>=0) {

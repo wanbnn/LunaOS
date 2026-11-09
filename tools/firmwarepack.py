@@ -5,7 +5,8 @@ from pathlib import Path
 import re
 import struct
 
-SECTOR = 24576
+LAYOUT = Path(__file__).resolve().parents[1] / "kernel/image_layout.h"
+SECTOR = int(re.search(r"^#define LUNA_FIRMWARE_SECTOR (\d+)u$", LAYOUT.read_text(), re.M)[1])
 LIMIT = 2 * 1024 * 1024
 MAX_FILE = 2 * 1024 * 1024
 MAX_ENTRIES = 16
