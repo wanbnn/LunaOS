@@ -163,6 +163,22 @@ Os scripts LunaPy existentes ainda podem usar `luna` diretamente.
 `luna.hardware.pci.get(index)` devolve uma descrição textual ou `None`.
 O port usa a API de hardware do LunaSDK e aceita scripts confiáveis.
 
+### Ambientes por projeto
+
+```sh
+python -m venv .venv
+venv activate .venv
+python app.py
+deactivate
+sync
+```
+
+O `venv` do LunaOS cria um diretório de bibliotecas `lib` dentro do
+ambiente. Enquanto ele está ativo, o MicroPython usa esse diretório no
+lugar do `lib` do usuário. Todos os ambientes usam o mesmo interpretador
+embarcado. A ativação dura até `deactivate` ou até reiniciar o sistema.
+`sync` grava os diretórios do LunaFS no disco.
+
 ## CMake e SDK C: compilação no host, integração no kernel
 
 O projeto CMake em [`sdk/native/CMakeLists.txt`](../sdk/native/CMakeLists.txt)

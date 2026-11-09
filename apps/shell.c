@@ -27,7 +27,7 @@ static const char *commands[] = {
     "uname",  "free",  "uptime",  "date",     "pci",     "net",     "ifconfig", "dns", "ping",  "wget",
     "browse", "audio", "beep",    "sync",     "history", "source",  "set",      "env",   "true",
     "false",  "sleep", "reboot",  "poweroff", "about",   "ps",      "tasks",    "kill",  "ringtest",
-    "js",     "python", "dev",   "bench", "perf", "drvinfo", "whoami",   "setup",   "drvtest", "fwinfo",   "wifidiag", "wifi", "memtest", 0};
+    "js",     "python", "venv",  "deactivate", "dev",   "bench", "perf", "drvinfo", "whoami",   "setup",   "drvtest", "fwinfo",   "wifidiag", "wifi", "memtest", 0};
 #define CAP 8192
 static void emit(char *out, const char *s) {
     append(out, s, CAP);
@@ -792,6 +792,8 @@ static int execute(int argc, char **a, const char *input, char *out) {
         return javascript_eval(a[1], out, CAP) == 0 ? 0 : 1;
     } else if (!strcmp(c, "python")) {
         return python_command(argc, a, out, CAP);
+    } else if (!strcmp(c, "venv") || !strcmp(c, "deactivate")) {
+        return python_venv_command(argc, a, out, CAP);
     } else if (!strcmp(c, "dev")) {
         return developer_command(argc, a, out, CAP);
     } else if (!strcmp(c, "setup")) {

@@ -79,7 +79,7 @@ mp_lexer_t *mp_lexer_new_from_file(qstr filename) {
     return mp_lexer_new_from_str_len(filename, source, len, len + 1);
 }
 
-static int run_code(const char *source, const char *path, int argc, char **argv) {
+static int run_code(const char *source, const char *path, const char *lib, int argc, char **argv) {
     nlr_buf_t nlr;
     if (nlr_push(&nlr) == 0) {
         nlr_set_abort(&nlr);
@@ -95,6 +95,7 @@ static int run_code(const char *source, const char *path, int argc, char **argv)
         } else {
             mp_obj_list_append(mp_sys_argv, mp_obj_new_str("-c", 2));
         }
+        mp_obj_list_append(mp_sys_path, mp_obj_new_str(lib, strlen(lib)));
         for (int i = 0; i < argc; ++i)
             mp_obj_list_append(mp_sys_argv, mp_obj_new_str(argv[i], strlen(argv[i])));
 
@@ -134,6 +135,11 @@ static int run_code(const char *source, const char *path, int argc, char **argv)
 
 static int execute(const char *source, const char *path, int argc, char **argv,
                    char *out, size_t cap) {
+    char lib[PATH_CAP];
+    if (!python_library_path(lib)) {
+        append(out, "Python: active environment is missing. Use venv deactivate.\n", cap);
+        return 1;
+    }
     uint32_t flags = drv_irq_save();
     Task *owner = session.owner ? task_by_pid(session.owner) : NULL;
     if (owner && owner->state != TASK_EXITED) {
@@ -159,7 +165,7 @@ static int execute(const char *source, const char *path, int argc, char **argv,
     mp_stack_set_limit(PYTHON_STACK_BYTES);
     gc_init(heap, (uint8_t *)heap + PYTHON_HEAP_BYTES);
     mp_init();
-    int result = run_code(source, path, argc, argv);
+    int result = run_code(source, path, lib, argc, argv);
     nlr_set_abort(NULL);
     mp_deinit();
     heap_release(heap);
@@ -181,10 +187,12 @@ int python_command(int argc, char **argv, char *out, size_t cap) {
         append(out, "MicroPython " MICROPY_VERSION_STRING " on LunaOS\n", cap);
         return 0;
     }
+    if (argc == 4 && !strcmp(argv[1], "-m") && !strcmp(argv[2], "venv"))
+        return python_venv_create(argv[3], out, cap);
     if (argc >= 3 && !strcmp(argv[1], "-c"))
         return execute(argv[2], NULL, argc - 3, argv + 3, out, cap);
     if (argc >= 2 && argv[1][0] != '-')
         return python_run_file(argv[1], argc - 2, argv + 2, out, cap);
-    append(out, "usage: python --version | -c CODE [ARGS...] | FILE.py [ARGS...]\n", cap);
+    append(out, "usage: python --version | -c CODE [ARGS...] | FILE.py [ARGS...] | -m venv PATH\n", cap);
     return argc == 2 && !strcmp(argv[1], "--help") ? 0 : 2;
 }

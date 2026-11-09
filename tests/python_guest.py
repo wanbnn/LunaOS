@@ -28,6 +28,17 @@ def main():
         guest.command("echo 'import sibling; print(sibling.value)' > main.py")
         guest.command("python main.py", "42\n")
         guest.command("python missing.py", "OSError")
+        guest.command("python -m venv .venv", "Created Python environment")
+        guest.command("venv create alternate", "Created Python environment")
+        guest.command("echo 'value = 52' > .venv/lib/project_only.py")
+        guest.command("venv activate .venv", "Activated /home/luna/.venv")
+        guest.command("python -c 'import project_only; print(project_only.value)'", "52\n")
+        guest.command("venv activate alternate", "Activated /home/luna/alternate")
+        guest.command("python -c 'import project_only'", "ImportError")
+        guest.command("deactivate", "Python environment deactivated")
+        guest.command("python -c 'import project_only'", "ImportError")
+        guest.command("venv activate .venv/lib", "environment not found")
+        guest.command("python -m venv /etc/unsafe", "choose a path within your home")
     finally:
         guest.close()
 
