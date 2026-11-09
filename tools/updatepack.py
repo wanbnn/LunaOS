@@ -15,6 +15,12 @@ DELTA_MAGIC = b'LUNADLT2'
 DELTA_BITMAP_BYTES = 32
 EXCLUDED_START = 8 * 1024 * 1024
 EXCLUDED_END = 12 * 1024 * 1024
+IMAGE_INFO_OFFSET = EXCLUDED_START - 512
+LEGACY_IMAGE_INFO_OFFSET = 7168 * 512
+
+
+class LegacyImageLayout(ValueError):
+    pass
 
 
 def check_commit(commit):
@@ -26,9 +32,12 @@ def read_image(path, commit=None):
     raw = Path(path).read_bytes()
     if len(raw) != IMAGE_BYTES or raw[510:512] != b'\x55\xaa':
         raise ValueError('expected a 66 MiB LunaOS BIOS/UEFI image')
-    if raw[16383 * 512:16383 * 512 + 8] != b'LUNAIMG1':
+    if raw[IMAGE_INFO_OFFSET:IMAGE_INFO_OFFSET + 8] != b'LUNAIMG1':
+        if (raw[LEGACY_IMAGE_INFO_OFFSET:LEGACY_IMAGE_INFO_OFFSET + 8] == b'LUNAIMG1'
+                and struct.unpack_from('<I', raw, 454)[0] == 8192):
+            raise LegacyImageLayout('image uses the previous LunaFS partition layout')
         raise ValueError('missing LunaOS image metadata')
-    if commit is not None and commit.encode() not in raw[:4 * 1024 * 1024]:
+    if commit is not None and commit.encode() not in raw[512:IMAGE_INFO_OFFSET]:
         raise ValueError('image does not contain the requested compiled commit')
     return raw
 
@@ -103,4 +112,7 @@ if __name__ == '__main__':
         parser.error('--base-image and --base-commit must be supplied together')
     build(args.image, args.output, args.commit, legacy_assets=args.legacy_assets)
     if args.base_image:
-        build_delta(args.image, args.base_image, args.output, args.commit, args.base_commit)
+        try:
+            build_delta(args.image, args.base_image, args.output, args.commit, args.base_commit)
+        except LegacyImageLayout as exc:
+            print(f'Skipping differential package: {exc}')

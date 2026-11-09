@@ -19,9 +19,10 @@ bool update_manifest_valid(const uint8_t *m, size_t n, const char *commit) {
         if (!((commit[i] >= '0' && commit[i] <= '9') || (commit[i] >= 'a' && commit[i] <= 'f'))) return false;
     for (unsigned i = 0; i < UPDATE_RECORDS; i++) {
         const uint8_t *r = m + 64 + i * 40;
-        /* Fixed layout excludes BOTH live LunaFS snapshot slots (4-8 MiB). */
-        unsigned chunk = i < 16 ? i : i + 16;
-        if (word(r) != chunk * (UPDATE_CHUNK_BYTES / 512) ||
+        unsigned sector = i * (UPDATE_CHUNK_BYTES / 512);
+        if (sector >= LUNA_VOLUME_START)
+            sector += LUNA_LIVE_SECTORS;
+        if (word(r) != sector ||
             word(r + 4) > UPDATE_CHUNK_BYTES + 1024) return false;
     }
     return true;
