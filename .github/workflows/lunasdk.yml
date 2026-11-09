@@ -6,10 +6,9 @@ on:
       - 'kernel/lunasdk_*'
       - 'kernel/devkit.*'
       - 'apps/developer.c'
-      - 'apps/lunapy.c'
+      - 'apps/python/**'
       - 'apps/javascript.c'
       - 'tests/lunasdk_*'
-      - 'tests/lunapy.c'
       - 'tests/devkit.c'
       - 'sdk/native/**'
       - 'Makefile'
@@ -19,10 +18,9 @@ on:
       - 'kernel/lunasdk_*'
       - 'kernel/devkit.*'
       - 'apps/developer.c'
-      - 'apps/lunapy.c'
+      - 'apps/python/**'
       - 'apps/javascript.c'
       - 'tests/lunasdk_*'
-      - 'tests/lunapy.c'
       - 'tests/devkit.c'
       - 'sdk/native/**'
       - 'Makefile'
@@ -34,8 +32,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - name: Validate LunaSDK ABI and LunaPy preview contracts
-        run: make test-devkit test-lunasdk-hardware test-lunapy
+      - name: Validate LunaSDK ABI contracts
+        run: make test-devkit test-lunasdk-hardware
       - name: Compile native driver examples for i386
         run: |
           sudo apt-get update

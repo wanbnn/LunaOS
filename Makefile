@@ -46,7 +46,7 @@ build/font.h: tools/fontgen.py assets/fonts/InterTight.ttf assets/fonts/NotoSans
 	$(PYTHON) tools/fontgen.py
 build/notices.h: tools/notices.py assets/fonts/OFL.txt assets/fonts/NotoSans-OFL.txt \
              assets/fonts/Montserrat-OFL.txt assets/fonts/NotoSansSymbols2-OFL.txt \
-             assets/icons/lucide/LICENSE $(wildcard assets/licenses/*) third_party/quickjs/LICENSE third_party/musl/COPYRIGHT third_party/bearssl/LICENSE.txt third_party/stb/LICENSE third_party/uacpi/LICENSE $(wildcard third_party/lexbor/LICENSE third_party/litehtml/LICENSE third_party/litehtml/src/gumbo/LICENSE)
+             assets/icons/lucide/LICENSE $(wildcard assets/licenses/*) third_party/quickjs/LICENSE third_party/micropython/LICENSE third_party/musl/COPYRIGHT third_party/bearssl/LICENSE.txt third_party/stb/LICENSE third_party/uacpi/LICENSE $(wildcard third_party/lexbor/LICENSE third_party/litehtml/LICENSE third_party/litehtml/src/gumbo/LICENSE)
 	$(PYTHON) tools/notices.py
 build/uacpi/%.o: third_party/uacpi/source/%.c $(shell find third_party/uacpi/include -name '*.h')
 	@mkdir -p $(dir $@)
@@ -78,6 +78,13 @@ third_party/musl/config.mak: third_party/musl/configure
 	cd third_party/musl && ./configure --target=i386 --prefix=/luna CC='gcc -m32' CFLAGS='-O2 -fno-pie -fno-stack-protector' --disable-shared
 third_party/musl/lib/libc.a: third_party/musl/config.mak
 	$(MAKE) -C third_party/musl -j4 AR=ar RANLIB=ranlib lib/libc.a
+# Keep MicroPython's qstr/module generation in its upstream build system.
+MICROPYTHON_LIB := build/micropython/libmicropython.a
+.PHONY: micropython-native
+micropython-native: $(MICROPYTHON_LIB)
+$(MICROPYTHON_LIB): FORCE third_party/musl/lib/libc.a
+	+$(MAKE) -C apps/python PYTHON="$(PYTHON)" LUNA_FLAGS="$(subst third_party/,../../third_party/,$(subst -Ikernel,-I../../kernel,$(subst -Ibuild,-I../../build,$(NATIVEFLAGS))))"
+
 $(JS_OBJECTS) build/lib/runtime.o build/apps/javascript.o build/ui/web_js.o build/drivers/tls.o $(BEAR_OBJECTS): third_party/musl/lib/libc.a
 ifeq ($(LUNA_LEXBOR),1)
 build/ui/web_lexbor.o: third_party/musl/lib/libc.a
@@ -171,8 +178,8 @@ OBJECTS += build/ui/litehtml_bridge.o build/lib/cxx_runtime.o build/lib/cxx_glib
 LITEHTML_LIBS := $(LITEHTML_NATIVE)/liblitehtml.a $(LITEHTML_NATIVE)/src/gumbo/libgumbo.a $(LITEHTML_LIBSTDCXX) $(LITEHTML_LIBSUPCXX) $(LITEHTML_LIBGCC_EH)
 build/kernel.elf: $(LITEHTML_LIBS)
 endif
-build/kernel.elf: $(OBJECTS) build/libbearssl.a $(LEXBOR_NATIVE_LIB) kernel/link.ld
-	$(LD) -m elf_i386 -T kernel/link.ld --gc-sections -Map build/kernel.map -o $@ $(OBJECTS) build/libbearssl.a $(LEXBOR_NATIVE_LIB) $(LITEHTML_LIBS) third_party/musl/lib/libc.a $(LIBGCC32)
+build/kernel.elf: $(OBJECTS) build/libbearssl.a $(LEXBOR_NATIVE_LIB) $(MICROPYTHON_LIB) kernel/link.ld
+	$(LD) -m elf_i386 -T kernel/link.ld --gc-sections -Map build/kernel.map -o $@ $(OBJECTS) build/libbearssl.a $(LEXBOR_NATIVE_LIB) $(LITEHTML_LIBS) $(MICROPYTHON_LIB) third_party/musl/lib/libc.a $(LIBGCC32)
 build/kernel.bin: build/kernel.elf
 	objcopy -O binary $< $@
 
@@ -200,7 +207,7 @@ run-iso: all
 	LUNA_IMAGE=dist/LunaOS.iso tools/run-qemu.sh
 run: all
 	tools/run-qemu.sh
-test: all test-rtw8822be-coex test-rtw8822be-fifo test-storage test-storage-sdhci test-lunafs2 test-lunasdk-hardware test-lunapy test-devkit test-motion test-pmm test-heap test-wpa2 test-wifi-ccmp test-wifi-client test-rtw8822be-tx-dma test-dhcp test-wifi-station test-iwl-firmware test-iwl-pcie test-wifi-intel test-wifi-scan test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
+test: all test-rtw8822be-coex test-rtw8822be-fifo test-storage test-storage-sdhci test-lunafs2 test-lunasdk-hardware test-devkit test-motion test-pmm test-heap test-wpa2 test-wifi-ccmp test-wifi-client test-rtw8822be-tx-dma test-dhcp test-wifi-station test-iwl-firmware test-iwl-pcie test-wifi-intel test-wifi-scan test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
 	$(PYTHON) tests/smoke.py
 	$(PYTHON) tests/multitask.py
 	$(PYTHON) tests/desktop.py
@@ -208,11 +215,12 @@ test: all test-rtw8822be-coex test-rtw8822be-fifo test-storage test-storage-sdhc
 	$(PYTHON) tests/native_resolution.py
 	$(PYTHON) tests/https.py
 	$(PYTHON) tests/driver_services.py
+	$(PYTHON) tests/python_guest.py
 	$(PYTHON) tests/setup.py
 	$(PYTHON) tests/iso.py
 test-iso-install: all
 	LUNA_SETUP_ISO=1 LUNA_TEST_DIR=build/test-iso-install $(PYTHON) tests/setup.py
-check: all test-rtw8822be-coex test-rtw8822be-fifo test-storage test-storage-sdhci test-lunafs2 test-lunasdk-hardware test-lunapy test-devkit test-motion test-pmm test-heap test-wpa2 test-dhcp test-wifi-station test-iwl-firmware test-iwl-pcie test-wifi-intel test-wifi-scan test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
+check: all test-rtw8822be-coex test-rtw8822be-fifo test-storage test-storage-sdhci test-lunafs2 test-lunasdk-hardware test-devkit test-motion test-pmm test-heap test-wpa2 test-dhcp test-wifi-station test-iwl-firmware test-iwl-pcie test-wifi-intel test-wifi-scan test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
 	$(PYTHON) tools/check_image.py
 	$(PYTHON) tools/check_iso.py
 clean:
@@ -271,15 +279,14 @@ build/ui/web_image.o: ui/web_image.c ui/webengine.h third_party/stb/stb_image.h 
 	@mkdir -p build/ui
 	$(CC) $(NATIVEFLAGS) -c $< -o $@
 
-.PHONY: test-lunasdk-hardware test-lunapy
+.PHONY: test-lunasdk-hardware test-lunapy test-python
 test-lunasdk-hardware:
 	@mkdir -p build
 	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=address,undefined -Ikernel kernel/lunasdk_hardware.c tests/lunasdk_hardware.c -o build/lunasdk-hardware-test
 	./build/lunasdk-hardware-test
-test-lunapy:
-	@mkdir -p build
-	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=address,undefined -Ikernel apps/lunapy.c tests/lunapy.c -o build/lunapy-test
-	./build/lunapy-test
+test-lunapy: test-python
+test-python: dist/LunaOS.img
+	LUNA_TEST_DIR=build/test-python $(PYTHON) tests/python_guest.py
 
 .PHONY: test-devkit
 test-devkit:

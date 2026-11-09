@@ -12,6 +12,7 @@ extra = {
     "Realtek-rtw88-BSD.txt": "assets/licenses/Realtek-rtw88-BSD.txt",
     "Intel-WiFi-Firmware.txt": "assets/licenses/Intel-WiFi-Firmware.txt",
     "Realtek-Firmware.txt": "assets/licenses/Realtek-Firmware.txt",
+    "MicroPython.txt": "third_party/micropython/LICENSE",
     "QuickJS.txt": "third_party/quickjs/LICENSE",
     "BearSSL.txt": "third_party/bearssl/LICENSE.txt",
     "Musl.txt": "third_party/musl/COPYRIGHT",

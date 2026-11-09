@@ -19,6 +19,5 @@ bool random_bytes(void *, size_t);
 
 int javascript_eval(const char *, char *, size_t);
 int javascript_eval_sdk(const char *, const char *, char *, size_t);
-int lunapy_eval_sdk(const char *, char *, size_t);
 void gui_benchmark(char *, size_t);
 #endif

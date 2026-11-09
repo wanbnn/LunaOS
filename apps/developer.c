@@ -5,6 +5,7 @@
 #include "web.h"
 #include "lunasdk_hardware.h"
 #include "heap.h"
+#include "python.h"
 
 static void put(char *out, size_t cap, const char *s) {
     append(out, s, cap);
@@ -187,7 +188,8 @@ int developer_command(int argc, char **argv, char *out, size_t cap) {
             "console.log('First PCI device:', luna.hardware.pci.get(0));\n"
             "luna.fs.write('hello.txt', 'Made inside LunaOS');\n" :
             !strcmp(kind, "py") ?
-            "# LunaPy preview: limited Python syntax, not CPython/MicroPython\n"
+            "# MicroPython on LunaOS\n"
+            "import luna\n"
             "print('Hello from LunaOS')\n"
             "print(luna.hardware.pci.count())\n"
             "print(luna.hardware.pci.get(0))\n" :
@@ -215,8 +217,10 @@ int developer_command(int argc, char **argv, char *out, size_t cap) {
         bool js = extension(argv[2], ".ljs");
         bool py = extension(argv[2], ".py");
         if (!in_home(argv[2]) || (!js && !py)) {
-            put(out, cap, "dev: only .ljs or preview .py programs within your home may run\n"); return 2;
+            put(out, cap, "dev: only .ljs or .py programs within your home may run\n"); return 2;
         }
+        if (py)
+            return python_run_file(argv[2], 0, NULL, out, cap);
         File *f = fs_find(argv[2]);
         if (!f || f->dir) { put(out, cap, "dev: program not found\n"); return 1; }
         /* Copy before execution: the script is allowed to overwrite itself. */
@@ -229,8 +233,7 @@ int developer_command(int argc, char **argv, char *out, size_t cap) {
             put(out, cap, "dev: disk read failed\n");
             return 1;
         }
-        int result = py ? lunapy_eval_sdk(script, out, cap)
-                        : javascript_eval_sdk(script, f->path, out, cap);
+        int result = javascript_eval_sdk(script, f->path, out, cap);
         heap_release(script);
         return result ? 1 : 0;
     }
@@ -248,7 +251,7 @@ int developer_command(int argc, char **argv, char *out, size_t cap) {
     }
     put(out, cap, "LunaSDK v2 / native hardware bridge\n");
     put(out, cap, "dev new NAME [js|py|c]  create source in your home\n");
-    put(out, cap, "dev run FILE.ljs|.py   execute JS or preview Python\n");
+    put(out, cap, "dev run FILE.ljs|.py   execute JS or MicroPython\n");
     put(out, cap, "dev hardware pci      enumerate real PCI devices\n");
     put(out, cap, "dev hardware read ... read PCI configuration safely\n");
     put(out, cap, "dev driver            manage virtual and native device endpoints\n");

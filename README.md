@@ -27,7 +27,7 @@ O LunaOS tem **bootloader próprio**, **kernel próprio em C**, **interface grá
 - Desktop com dock, pesquisa, janelas, compositor 32 bits, **transições suaves nativas**, fontes **Inter Tight**, **Noto Sans** e **Montserrat** (com reserva de símbolos) e ícones **Lucide**.
 - Assistente de primeiro boot, modo live, instalação em IDE e backends **SATA/AHCI, NVMe, USB EHCI/BOT, SDHCI/eMMC e MegaRAID MFI experimentais** (512B LBA; validação em hardware físico pendente), login.
 - Terminal **lunaSH**, Files, Notes, Settings, navegador e Gerenciador de Tarefas.
-- **LunaSDK v2**: aplicativos JavaScript `.ljs`, Python limitado `.py` (prévia), API de descoberta **PCI real** e endpoints de hardware implementados por drivers C nativos; projetos C/CMake ainda são compilados no host.
+- **LunaSDK v2**: aplicativos JavaScript `.ljs`, MicroPython para scripts `.py`, API de descoberta **PCI real** e endpoints de hardware implementados por drivers C nativos; projetos C/CMake ainda são compilados no host.
 - Pilha de rede IPv4 via **RTL8139**, HTTP e HTTPS/TLS 1.2.
 - Navegador com HTML, CSS, DOM/JavaScript **parciais** e decodificação de PNG externo.
 - Scanner passivo e conexão de estação WPA2 experimentais para **RTL8822BE**, ainda sem validação em hardware físico.
@@ -190,7 +190,7 @@ O app **Notes** oferece edição de textos e realce de sintaxe para alguns forma
 
 ### Criar seus próprios aplicativos e dispositivos virtuais
 
-O comando **`dev`** permite editar código dentro do LunaOS com **Notes**, executar scripts `.ljs` com QuickJS e executar uma **prévia limitada** de arquivos `.py`. A API `luna.hardware.pci` enumera dispositivos PCI físicos e lê a área de configuração com validação; drivers C nativos podem registrar endpoints que comunicam com hardware real (o exemplo `qemu-edu` usa PCI/MMIO):
+O comando **`dev`** permite editar código dentro do LunaOS com **Notes**, executar scripts `.ljs` com QuickJS e executar arquivos `.py` com MicroPython. A API `luna.hardware.pci` enumera dispositivos PCI físicos e lê a área de configuração com validação; drivers C nativos podem registrar endpoints que comunicam com hardware real (o exemplo `qemu-edu` usa PCI/MMIO):
 
 ```sh
 dev new hello js
@@ -204,7 +204,7 @@ dev new native_probe c
 dev list
 ```
 
-Os caminhos acima usam o usuário live padrão `luna`; adapte-os ao diretório `/home/SEU_USUARIO` após a instalação. **Drivers C reais usam `kernel/driver.h` para PCI, MMIO, DMA e IRQ e podem publicar um endpoint LunaSDK de leitura/escrita validada**. O exemplo `qemu-edu` depende de um dispositivo QEMU EDU realmente conectado (`tools/run-qemu.sh -device edu`). **CMake ainda roda no host**, já que LunaOS não tem compilador C nativo nem loader ELF; a prévia `.py` aceita somente um subconjunto pequeno da sintaxe Python e não substitui MicroPython/CPython. Scripts não confiáveis ainda não estão isolados do kernel.
+Os caminhos acima usam o usuário live padrão `luna`; adapte-os ao diretório `/home/SEU_USUARIO` após a instalação. **Drivers C reais usam `kernel/driver.h` para PCI, MMIO, DMA e IRQ e podem publicar um endpoint LunaSDK de leitura/escrita validada**. O exemplo `qemu-edu` depende de um dispositivo QEMU EDU realmente conectado (`tools/run-qemu.sh -device edu`). **CMake ainda roda no host**, já que LunaOS não tem compilador C nativo nem loader ELF. A biblioteca disponível para Python é a do port MicroPython. Scripts não confiáveis ainda não estão isolados do kernel.
 
 Contrato, exemplos, limites e teste: [API para desenvolvedores](docs/developer-api.md).
 

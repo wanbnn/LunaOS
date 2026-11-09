@@ -11,14 +11,12 @@ toolchains completos no guest permanece um trabalho separado.
 | Linguagem | Escrever no Notes | Executar no LunaOS | Compilar no LunaOS | Hardware |
 | --- | --- | --- | --- | --- |
 | **JavaScript `.ljs`** | Sim | QuickJS com `dev run` | Não aplicável | PCI real read-only, áudio e endpoints de drivers C nativos |
-| **Python `.py` (LunaPy preview)** | Sim | **Subconjunto experimental** com `dev run` | Não aplicável | Contagem/consulta PCI, áudio e endpoints de drivers C |
+| **Python `.py`** | Sim | MicroPython com `python` e `dev run` | Não aplicável | Contagem/consulta PCI, áudio e endpoints de drivers C |
 | **C `.c`** | Sim | **Não**, sem loader geral | **Não** (CMake só no host por enquanto) | API privilegiada PCI/DMA/MMIO/IRQ em C compilado no kernel |
 
-> **Sem alegações falsas:** o LunaOS **não** tem CPython, MicroPython,
-> GCC/Clang/TCC, CMake executável ou loader ELF dinâmico no guest.
-> O interpretador LunaPy é intencionalmente um subconjunto verificável, não
-> a linguagem Python completa. Binários ELF e drivers compilados fora do
-> sistema não podem ser executados/carregados diretamente nesta versão.
+O LunaOS embarca MicroPython e QuickJS. O porte de CPython e a execução de
+binários ELF externos dependem de uma ABI de processos e de um carregador
+de executáveis. A toolchain de C e o CMake rodam no host.
 
 ## Ferramentas no lunaSH
 
@@ -133,28 +131,37 @@ continuam disponíveis como **dispositivos puramente virtuais**. Eles
 não representam hardware. O registro fixo tem 8 slots para endpoints
 virtuais e nativos; estados em RAM não persistem após reinício.
 
-## Python: subconjunto LunaPy preview
+## Python no LunaOS
 
-```python
-# arquivo scanner.py
-print('Scanning physical PCI devices')
-print(luna.hardware.pci.count())
-print(luna.hardware.pci.get(0))
-print(luna.hardware.pci.read(0,2,0,0,4))
-print(luna.device.read('qemu-edu'))
-luna.audio.beep(660,25)
+O MicroPython 1.29.0 (MIT) executa scripts diretamente no guest. O comando
+`python` aceita `--version`, `-c CODE` ou um arquivo seguido de argumentos.
+
+```sh
+python --version
+python -c 'print(sum(x*x for x in range(5)))'
+dev new scanner py
+python /home/luna/scanner.py
 ```
 
-LunaPy aceita linhas de comentários, expressões literais simples,
-`print(expr)`, chamadas diretas às funções listadas de hardware/áudio,
-`luna.device.read('name')` e `luna.device.write('name','value')`.
-A saída de `pci.get(index)` é uma string descritiva, não um objeto Python.
+Os scripts podem importar módulos `.py` e pacotes com `__init__.py` no
+LunaFS. O diretório do script é o primeiro caminho de importação. Cada
+execução tem seu próprio estado, heap de 2 MiB e um limite de 3 segundos
+verificado nos desvios do bytecode. O port inclui módulos internos como
+`sys`, `gc` e `micropython`.
 
-**Ainda não suporta**: `import`, `def`, atribuições, `for`, `while`,
-classes, pacotes, exceções, `async` e a biblioteca padrão do Python.
-Syntax unsupported retorna erro explícito; **não** há tradução silenciosa
-para JavaScript nem execução de bytecode Python. O objetivo é portar
-MicroPython e substituir esse runner mantendo uma API coerente.
+```python
+import luna
+
+print(luna.hardware.pci.count())
+print(luna.hardware.pci.get(0))
+print(luna.hardware.pci.read(0, 2, 0, 0, 4))
+print(luna.device.read("qemu-edu"))
+luna.audio.beep(660, 25)
+```
+
+Os scripts LunaPy existentes ainda podem usar `luna` diretamente.
+`luna.hardware.pci.get(index)` devolve uma descrição textual ou `None`.
+O port usa a API de hardware do LunaSDK e aceita scripts confiáveis.
 
 ## CMake e SDK C: compilação no host, integração no kernel
 
@@ -181,7 +188,7 @@ Apenas disponibilizar um arquivo `CMakeLists.txt` não resolve isso.
 
 ## Segurança e limitações
 
-- **JS e LunaPy rodam em serviços de confiança do kernel.** Limits de
+- **JS e MicroPython rodam em serviços de confiança do kernel.** Limites de
   memória/tempo reduzem riscos, mas **não constituem sandbox de segurança**.
   Não execute código de terceiros não auditado.
 - Acesso PCI read-only pode expor detalhes de hardware; futuras ABI devem
@@ -197,10 +204,10 @@ Apenas disponibilizar um arquivo `CMakeLists.txt` não resolve isso.
 ## Testes
 
 ```sh
-make test-lunasdk-hardware test-lunapy test-devkit
+make test-lunasdk-hardware test-devkit
+make test-python
 make check
 ```
 
-A primeira verificação testa parser de argumentos, validação e endpoints
-com mocks no host. **Não garante** boot, integração completa do QuickJS
-ou funcionamento em hardware físico sem um teste do guest/QEMU.
+Os testes de ABI usam mocks no host. `make test-python` executa o
+interpretador, os imports do LunaFS e o LunaSDK no guest QEMU.
