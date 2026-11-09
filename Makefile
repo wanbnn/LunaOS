@@ -184,7 +184,7 @@ build/uefi_trampoline.h: build/uefi_trampoline.bin
 	$(PYTHON) -c "from pathlib import Path; d=Path('$<').read_bytes(); Path('$@').write_text('static const unsigned char uefi_trampoline[]={'+','.join(map(str,d))+'};\n')"
 build/uefi_layout.h: build/kernel.elf
 	$(PYTHON) tools/uefi-layout.py
-build/BOOTX64.EFI: boot/uefi.c boot/uefi.h build/uefi_trampoline.h build/uefi_layout.h
+build/BOOTX64.EFI: boot/uefi.c boot/uefi.h kernel/image_layout.h build/uefi_trampoline.h build/uefi_layout.h
 	$(EFI_CC) --target=x86_64-pc-win32-coff -std=c11 -Os -ffreestanding -fno-builtin -fno-stack-protector -fno-asynchronous-unwind-tables -mno-red-zone -mno-stack-arg-probe -mno-sse -mno-mmx -Wall -Wextra -Werror -Ibuild -c boot/uefi.c -o build/uefi.obj
 	$(EFI_LD) /subsystem:efi_application /entry:efi_main /nodefaultlib /machine:x64 /base:0x10000000 /dynamicbase /timestamp:0 /opt:noref /out:$@ build/uefi.obj
 

@@ -1,12 +1,7 @@
 #ifndef LUNA_INSTALL_H
 #define LUNA_INSTALL_H
 #include "luna.h"
-#define LUNA_IMAGE_BYTES (66u * 1024 * 1024)
-/* The payload occupies sectors 1..LUNA_KERNEL_SECTORS-1, the image header
- * sits right after it and the file system starts at LUNA_VOLUME_START. */
-#define LUNA_KERNEL_SECTORS 16383u
-#define LUNA_IMAGE_INFO_SECTOR 16383u
-#define LUNA_VOLUME_START 16384u
+#include "image_layout.h"
 /* Two snapshot slots of 4096 sectors hold the live file system. */
 #define LUNA_LIVE_SECTORS 8192u
 #define LUNA_SOURCES_SECTOR 32768u

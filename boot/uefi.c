@@ -1,9 +1,12 @@
 #include "uefi.h"
 #include "uefi_trampoline.h"
 #include "uefi_layout.h"
+#include "../kernel/image_layout.h"
 #define CORE_BYTES (32u*1024*1024)
 #define ESP_BYTES (34u*1024*1024)
-#define IMAGE_BYTES (CORE_BYTES+ESP_BYTES)
+#define IMAGE_BYTES LUNA_IMAGE_BYTES
+#define IMAGE_INFO_OFFSET (LUNA_IMAGE_INFO_SECTOR * 512u)
+#define KERNEL_OFFSET (LUNA_KERNEL_FIRST_SECTOR * 512u)
 #define LOW_END 0x4000000ull
 static EFI_BOOT_SERVICES *bs;
 static EFI_SYSTEM_TABLE *system_table;
@@ -51,9 +54,9 @@ static int read_blocks(EFI_BLOCK_IO *io,uint64_t offset,uint64_t bytes,void *out
  return !EFI_ERROR(io->ReadBlocks(io,io->Media->MediaId,offset/block,bytes,out));
 }
 static int valid_core(uint8_t *image) {
- uint32_t *meta=(void *)(image+7168u*512);
+ uint32_t *meta=(void *)(image+IMAGE_INFO_OFFSET);
  return image[510]==0x55 && image[511]==0xaa && equal(meta,"LUNAIMG1",8) &&
-     meta[2]==1 && meta[3]==IMAGE_BYTES && meta[6]>0 && meta[6]<3u*1024*1024;
+     meta[2]==1 && meta[3]==IMAGE_BYTES && meta[6]>0 && meta[6]<=IMAGE_INFO_OFFSET-KERNEL_OFFSET;
 }
 /* Prefer the exact parent medium; fallback CORE is for virtual removable media. */
 static int load_parent_core(EFI_HANDLE volume,uint8_t *rom,uint8_t *scratch) {
@@ -74,8 +77,11 @@ static int load_parent_core(EFI_HANDLE volume,uint8_t *rom,uint8_t *scratch) {
    offset=64u*2048;
    if(!read_blocks(io,offset,4096,scratch) || scratch[510]!=0x55 || scratch[511]!=0xaa) continue;
   }
-  if(!read_blocks(io,offset+7168u*512,4096,scratch) || !equal(scratch,"LUNAIMG1",8) ||
-      *(uint32_t *)(scratch+12)!=IMAGE_BYTES) continue;
+  uint32_t block=io->Media->BlockSize;
+  uint32_t within_block=IMAGE_INFO_OFFSET%block;
+  if(!read_blocks(io,offset+IMAGE_INFO_OFFSET-within_block,block,scratch)) continue;
+  uint8_t *meta=scratch+within_block;
+  if(!equal(meta,"LUNAIMG1",8) || *(uint32_t *)(meta+12)!=IMAGE_BYTES) continue;
   chosen=io;best=n;chosen_offset=offset;
  }
  int ok=chosen && read_blocks(chosen,chosen_offset,CORE_BYTES,rom) && valid_core(rom);
@@ -181,7 +187,7 @@ EFI_STATUS efi_main(EFI_HANDLE image,EFI_SYSTEM_TABLE *table) {
  }
  memcpy(bootstrap,uefi_trampoline,sizeof(uefi_trampoline));
  uint64_t *args=(void *)(bootstrap+4096);
- args[0]=(uintptr_t)(rom+65u*512);args[1]=*(uint32_t *)(rom+7168u*512+24);
+ args[0]=(uintptr_t)(rom+KERNEL_OFFSET);args[1]=*(uint32_t *)(rom+IMAGE_INFO_OFFSET+24);
  args[2]=(uintptr_t)(bootstrap+65536-16);args[3]=(uintptr_t)pml4;args[4]=(uintptr_t)prefix;
  say("UEFI GOP ready; exiting firmware services\r\n");
  for(unsigned attempt=0;attempt<4;attempt++) {
