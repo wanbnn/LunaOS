@@ -302,7 +302,8 @@ int main(void) {
     tcp.used = 1;
     assert(stream_read(out, 1) < 0 && tcp.used == 1 && tcp.rto == TCP_RTO_MAX);
     char failure[128];
-    assert(http_end(-1, out, failure, sizeof(failure)) < 0);
+    net_body body = {.data = out, .cap = sizeof(out)};
+    assert(http_end(-1, &body, failure, sizeof(failure)) < 0);
     assert(strstr(failure, "HTTP operation deadline") && !http_operation.active);
     setup();
     segment(tcp.ack + 1, 0x18, "queued", 6);

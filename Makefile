@@ -158,7 +158,7 @@ build/litehtml-patch/line_box.o: $(LITEHTML_PATCH_DIR)/.patched Makefile
 	$(LITEHTML_CXX) $(LITEHTML_CXXFLAGS) $(LITEHTML_PATCH_INC) -c $(LITEHTML_PATCH_DIR)/src/line_box.cpp -o $@
 build/litehtml-patch/render_inline_context.o: $(LITEHTML_PATCH_DIR)/.patched Makefile
 	$(LITEHTML_CXX) $(LITEHTML_CXXFLAGS) $(LITEHTML_PATCH_INC) -c $(LITEHTML_PATCH_DIR)/src/render_inline_context.cpp -o $@
-build/lib/cxx_glibc_compat.o: lib/cxx_glibc_compat.c
+build/lib/cxx_glibc_compat.o: lib/cxx_glibc_compat.c third_party/musl/lib/libc.a
 	@mkdir -p build/lib
 	$(CC) $(CFLAGS) $(MUSLINC) -c $< -o $@
 build/lib/cxx_runtime.o: lib/cxx_runtime.cpp Makefile
