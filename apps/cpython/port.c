@@ -10,7 +10,7 @@
 #define WASM_BYTES (8u * 1024 * 1024)
 #define STDLIB_BYTES (16u * 1024 * 1024)
 #define WASM_STACK_BYTES (128u * 1024)
-#define PYTHON_TIMEOUT_MS 15000u
+#define PYTHON_TIMEOUT_MS 60000u
 
 static const uint8_t wasm_digest[32] = {
     0xf8, 0xbf, 0xa1, 0x6f, 0x51, 0xc7, 0x95, 0x4d, 0xff, 0x8d, 0x77, 0x7a, 0x30, 0x5b, 0xa0, 0x58,

@@ -145,7 +145,7 @@ python app.py
 
 O port WASI lê arquivos do LunaFS, importa módulos e captura a saída no
 lunaSH. A raiz WASI é `/`. Use caminhos absolutos para ler arquivos dentro
-de scripts. O limite de execução é 15 segundos. A entrada interativa,
+de scripts. O limite de execução é 60 segundos. A entrada interativa,
 escrita de arquivos pelo CPython, subprocessos, sockets e extensões
 nativas ficam fora do port atual.
 
