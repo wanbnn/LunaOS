@@ -1,6 +1,8 @@
+diff --git a/include/litehtml/line_box.h b/include/litehtml/line_box.h
+index e22c0b8..8c4f9f1 100644
 --- a/include/litehtml/line_box.h
 +++ b/include/litehtml/line_box.h
-@@ -140,6 +140,7 @@
+@@ -140,6 +140,7 @@ namespace litehtml
  		rendered_width			m_rendered_width;
  
  		std::list< std::unique_ptr<line_box_item> > m_items;
@@ -8,7 +10,7 @@
      public:
  		line_box(pixel_t top, pixel_t left, pixel_t right, const css_line_height_t& line_height, const font_metrics& fm,
  				 text_align align) :
-@@ -163,6 +164,7 @@
+@@ -163,6 +164,7 @@ namespace litehtml
  		pixel_t		   width() const { return m_width; }
  		pixel_t		   line_right() const { return m_right; }
  		rendered_width get_rendered_width() const { return m_rendered_width; }
@@ -16,20 +18,11 @@
  
  		void	add_item(std::unique_ptr<line_box_item> item);
  		bool	can_hold(const std::unique_ptr<line_box_item>& item, white_space ws) const;
---- a/include/litehtml/render_item.h
-+++ b/include/litehtml/render_item.h
-@@ -6,7 +6,7 @@
- #include <tuple>
- #include "html.h"
- #include "types.h"
--#include "line_box.h"
-+#include "litehtml/line_box.h"
- #include "table.h"
- #include "formatting_context.h"
- #include "element.h"
+diff --git a/src/line_box.cpp b/src/line_box.cpp
+index 091a96c..d13cb32 100644
 --- a/src/line_box.cpp
 +++ b/src/line_box.cpp
-@@ -621,6 +621,10 @@
+@@ -621,6 +621,10 @@ std::list< std::unique_ptr<litehtml::line_box_item> > litehtml::line_box::finish
  	current_context.start_lbi = nullptr;
  	//int va_top_bottom = 0;
  
@@ -40,9 +33,54 @@
  	// Second pass:
  	// 1. Vertical align top/bottom
  	// 2. Apply relative shift
+@@ -669,14 +673,20 @@ std::list< std::unique_ptr<litehtml::line_box_item> > litehtml::line_box::finish
+ 			lbi->pos().y += m_top + top_shift;
+ 		}
+ 
+-        lbi->get_el()->apply_relative_shift(containing_block_size);
++        if (lbi->get_type() == line_box_item::type_text_part)
++            lbi->get_el()->apply_relative_shift(containing_block_size);
+ 
+ 		// Calculate and push inline box into the render item element
+ 		if(lbi->get_type() == line_box_item::type_inline_start || lbi->get_type() == line_box_item::type_inline_continue)
+ 		{
+ 			if(lbi->get_type() == line_box_item::type_inline_start)
+ 			{
+-				lbi->get_el()->clear_inline_boxes();
++				auto& item = *lbi->get_el();
++				item.clear_inline_boxes();
++				// Each inline can have multiple markers and layout passes.
++				// Set its origin once so its descendants move by one offset.
++				item.pos().x = item.pos().y = 0;
++				item.apply_relative_shift(containing_block_size);
+ 			}
+ 			inlines.emplace_back(lbi->get_el());
+ 			inlines.back().box.x = lbi->left();
+@@ -687,6 +697,9 @@ std::list< std::unique_ptr<litehtml::line_box_item> > litehtml::line_box::finish
+ 			if(!inlines.empty())
+ 			{
+ 				inlines.back().box.width = lbi->right() - inlines.back().box.x;
++				const auto& origin = inlines.back().element->pos();
++				inlines.back().box.x += origin.x;
++				inlines.back().box.y += origin.y;
+ 				inlines.back().element->add_inline_box(inlines.back().box);
+ 				inlines.pop_back();
+ 			}
+@@ -696,6 +709,9 @@ std::list< std::unique_ptr<litehtml::line_box_item> > litehtml::line_box::finish
+ 	for(auto iter = inlines.rbegin(); iter != inlines.rend(); ++iter)
+ 	{
+ 		iter->box.width =  m_items.back()->right() - iter->box.x;
++		const auto& origin = iter->element->pos();
++		iter->box.x += origin.x;
++		iter->box.y += origin.y;
+ 		iter->element->add_inline_box(iter->box);
+ 
+ 		ret_items.emplace_front(std::unique_ptr<line_box_item>(new lbi_continue(iter->element)));
+diff --git a/src/render_inline_context.cpp b/src/render_inline_context.cpp
+index cfa1de7..143c7ac 100644
 --- a/src/render_inline_context.cpp
 +++ b/src/render_inline_context.cpp
-@@ -244,6 +244,13 @@
+@@ -244,6 +244,13 @@ void litehtml::render_item_inline_context::place_inline(std::unique_ptr<line_box
              line_top = m_line_boxes.back()->top();
          }
  		auto rw = place_float(item->get_el(), line_top, self_size, fmt_ctx);

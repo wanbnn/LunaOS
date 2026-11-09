@@ -105,6 +105,43 @@ class Handler(http.server.BaseHTTPRequestHandler):
             body = large_css
         elif self.path == "/extra.css":
             body = extra_css
+        elif self.path == "/nested/script-page?q=luna&mode=test":
+            body = b"""
+                <style>#proof::after { content: "ready" }</style>
+                <p id="proof">before</p>
+                <script>var order = "inline";</script>
+                <script src="first.js"></script>
+                <script src="missing.js"></script>
+                <script src="/last.js"></script>
+                <script>
+                    document.addEventListener("DOMContentLoaded", function ready() {
+                        document.removeEventListener("DOMContentLoaded", ready);
+                        var proof = document.getElementById("proof");
+                        if (!matchMedia("screen and (min-width: 100px)").matches ||
+                            !getComputedStyle(proof, "::after").getPropertyValue("content").includes("ready"))
+                            throw new Error("screen CSS after load");
+                        var interval = setInterval(() => {
+                            clearInterval(interval);
+                            setTimeout(() => console.log(order + ":" + proof.textContent), 10);
+                        }, 10);
+                    });
+                </script>"""
+        elif self.path == "/nested/first.js":
+            body = b"""
+                if (window.document !== document || !document.currentScript)
+                    throw new Error("script context");
+                var holder = document.createElement("div");
+                holder.innerHTML = " <a>first</a><a>second</a>";
+                if (holder.getElementsByTagName("a").length !== 2 ||
+                    holder.querySelector("a").parentNode !== holder)
+                    throw new Error("fragment DOM");
+                order += "-external";
+            """
+        elif self.path == "/nested/missing.js":
+            self.send_error(404)
+            return
+        elif self.path == "/last.js":
+            body = b'document.getElementById("proof").textContent = "updated"; order += "-after-error";'
         elif self.path == "/large-chunked":
             body = large_download
         elif self.path == "/text-tools":
@@ -230,6 +267,9 @@ try:
     assert css_size == len(expected_css), css_size
     assert memory(g, css_ptr, len(expected_css)) == expected_css
     print("PASS: browser receives a complete 350 KB linked stylesheet over TLS", flush=True)
+    g.command(f"browse https://luna.test:{secured.server_port}/nested/script-page?q=luna&mode=test")
+    g.wait("[page] inline-external-after-error:updated", 60)
+    print("PASS: browse preserves query arguments and executes linked scripts in order", flush=True)
     g.command(f"wget https://luna.test:{secured.server_port}/ /tmp/after-css", "Saved", timeout=35)
     g.command("ping 10.0.2.2", "Reply", timeout=15)
     g.command(

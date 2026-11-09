@@ -178,6 +178,7 @@ extern bool ui_dirty;
 void gui_init(void);
 void gui_draw(void);
 void gui_motion_poll(void);
+void browser_timer_poll(void);
 void gui_refresh_status(void);
 void gui_damage(int, int, int, int);
 void gui_damage_quick(void);

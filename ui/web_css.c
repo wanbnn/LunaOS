@@ -1309,6 +1309,39 @@ void css_apply(WebNode *root, WebRule *rules, int count) {
     css_apply_node(root, rules, count, 0);
 }
 
+const char *css_pseudo_property(WebRule *rules, int count, WebNode *node,
+                                const char *pseudo, const char *name) {
+    const WebDecl *best = 0;
+    int best_specificity = -1;
+    for (int i = 0; i < count; i++) {
+        int specificity = -1;
+        for (int j = 0; j < rules[i].complex_count; j++) {
+            const WebComplex *selector = &rules[i].complexes[j];
+            if (!selector->count || selector->specificity <= specificity)
+                continue;
+            int last = selector->count - 1;
+            WebCompound subject = selector->compounds[last];
+            if (!subject.pseudo || strcmp(subject.pseudo, pseudo))
+                continue;
+            WebComplex base = *selector;
+            base.compounds[last].pseudo = 0;
+            if (complex_matches(&base, node))
+                specificity = selector->specificity;
+        }
+        if (specificity < 0)
+            continue;
+        for (const WebDecl *decl = rules[i].decls; decl; decl = decl->next) {
+            if (!strcmp(decl->name, name) &&
+                (!best || decl->important > best->important ||
+                 (decl->important == best->important && specificity >= best_specificity))) {
+                best = decl;
+                best_specificity = specificity;
+            }
+        }
+    }
+    return best ? best->value : "";
+}
+
 /* ---------- inline style changes from scripts ---------- */
 
 /* Rebuilds the inline style attribute without the named property. */

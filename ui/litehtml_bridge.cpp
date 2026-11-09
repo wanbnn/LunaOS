@@ -24,16 +24,36 @@ static uint32_t rgb(web_color c) {
 static int px(pixel_t value) { return (int)(value + (value >= 0 ? 0.5f : -0.5f)); }
 
 #ifdef LUNA_KERNEL_LITEHTML
-extern "C" uint32_t luna_cxx_render_begin();
+extern "C" uint32_t luna_cxx_render_begin(uint32_t timeout, const char *phase);
 extern "C" void luna_cxx_render_end(uint32_t previous);
 #endif
 class RenderBudget {
 #ifdef LUNA_KERNEL_LITEHTML
-    uint32_t previous = luna_cxx_render_begin();
+    uint32_t previous;
 public:
+    RenderBudget(uint32_t timeout, const char *phase) : previous(luna_cxx_render_begin(timeout, phase)) {}
     ~RenderBudget() { luna_cxx_render_end(previous); }
+#else
+public:
+    RenderBudget(uint32_t, const char *) {}
 #endif
 };
+
+static uint32_t layout_timeout(const WebNode *root) {
+    // Budget CPU time by DOM complexity, independently of physical RAM.
+    constexpr unsigned max_count = 2500;
+    unsigned count = 0;
+    for (const WebNode *node = root; node && count < max_count; ++count) {
+        if (node->first_child) {
+            node = node->first_child;
+        } else {
+            while (node && node != root && !node->next)
+                node = node->parent;
+            node = node && node != root ? node->next : nullptr;
+        }
+    }
+    return 2000 + 4 * count;
+}
 
 /* litehtml v0.10 initializes its layout through createFromString. Its
  * container hook supplies our root and discards the empty seed's children. */
@@ -233,7 +253,8 @@ public:
                     attributes[attr->name] = attr->value;
                 auto element = doc->create_element(child->tag, attributes);
                 if (append(element)) {
-                    source_nodes.emplace(element.get(), child);
+                    if (element->tag() == _a_ && element->get_attr("href"))
+                        source_nodes.emplace(element.get(), child);
                     if (element->tag() == _input_) {
                         string type = lowcase(element->get_attr("type", "text"));
                         const char *label = element->get_attr("value", "");
@@ -298,8 +319,9 @@ public:
 struct LunaLiteDocument {
     LunaContainer container;
     document::ptr doc;
-    LunaLiteDocument(const LunaLiteGraphics& g, int w, int h, WebNode *root) :
-        container(g, w, h, root) {}
+    uint32_t layout_ms;
+    LunaLiteDocument(const LunaLiteGraphics& g, int w, int h, WebNode *root, uint32_t timeout) :
+        container(g, w, h, root), layout_ms(timeout) {}
 };
 extern "C" LunaLiteDocument *luna_lite_create(WebNode *root,
                                                const LunaLiteGraphics *graphics,
@@ -308,9 +330,10 @@ extern "C" LunaLiteDocument *luna_lite_create(WebNode *root,
     WebNode *html = root->first_child;
     while (html && (!html->tag || std::strcmp(html->tag, "html")))
         html = html->next;
-    [[maybe_unused]] RenderBudget budget;
+    const auto timeout = layout_timeout(root);
+    [[maybe_unused]] RenderBudget budget(timeout, "create");
     try {
-        auto out = std::make_unique<LunaLiteDocument>(*graphics, width, height, html ? html : root);
+        auto out = std::make_unique<LunaLiteDocument>(*graphics, width, height, html ? html : root, timeout);
         out->doc = document::createFromString(estring("<!doctype html>", encoding::utf_8),
                                                &out->container);
         out->doc->render((pixel_t)width);
@@ -326,7 +349,7 @@ extern "C" int luna_lite_layout(LunaLiteDocument *d, int width, int height) {
     if (!d || width <= 0 || height <= 0) return -1;
     d->container.width = width;
     d->container.height = height;
-    [[maybe_unused]] RenderBudget budget;
+    [[maybe_unused]] RenderBudget budget(d->layout_ms, "layout");
     try {
         d->doc->media_changed();
         d->doc->render((pixel_t)width);
@@ -339,7 +362,7 @@ extern "C" bool luna_lite_draw(LunaLiteDocument *d, int x, int y) {
     if (!d)
         return false;
     position clip(0, 0, (pixel_t)d->container.width, (pixel_t)d->container.height);
-    [[maybe_unused]] RenderBudget budget;
+    [[maybe_unused]] RenderBudget budget(1200, "draw");
     try {
         d->doc->draw(0, (pixel_t)x, (pixel_t)y, &clip);
         return true;
@@ -351,7 +374,7 @@ extern "C" WebNode *luna_lite_hit_link(LunaLiteDocument *d, int x, int y, int sc
     auto render = d->doc->root_render();
     if (!render)
         return nullptr;
-    [[maybe_unused]] RenderBudget budget;
+    [[maybe_unused]] RenderBudget budget(1200, "hit test");
     try {
         auto hit = render->get_element_by_point(x, y, x, y - scroll, nullptr);
         for (; hit; hit = hit->parent()) {

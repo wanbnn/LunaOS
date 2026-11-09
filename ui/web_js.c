@@ -1,6 +1,8 @@
 /* QuickJS bindings for the Luna Browser DOM. Scripts run inside the kernel
  * service with a memory and time budget, the same runtime used by lunaSH. */
 #include "quickjs.h"
+#include "heap.h"
+#include "web.h"
 #include "webengine.h"
 
 typedef struct WebListener {
@@ -18,14 +20,24 @@ typedef struct WebTimer {
     JSValue fn;
     int id;
     uint32_t due;
+    uint32_t interval;
     bool cancelled;
     struct WebTimer *next;
 } WebTimer;
+typedef struct WebMediaListener {
+    JSValue query, callback;
+    bool matches;
+    struct WebMediaListener *next;
+} WebMediaListener;
 
 static JSRuntime *js_runtime;
 static JSContext *js_context;
+static JSClassID js_node_class, js_style_class, js_media_class;
 static WebNode *js_document;
+static WebNode *js_current_script;
 static WebTimer *js_timers;
+static WebMediaListener *js_media;
+static bool js_resize_pending;
 /* Keep detached nodes alive for JS references until document teardown.
  * Reattached nodes are removed from this list so the document owns them. */
 typedef struct WebDetachedNode {
@@ -56,6 +68,7 @@ static void track_detached(WebNode *node) {
 }
 static int js_timer_id;
 static bool js_document_dirty;
+static const char *js_ready_state;
 static uint32_t js_deadline;
 
 static int interrupt_js(JSRuntime *rt, void *opaque) {
@@ -65,18 +78,8 @@ static int interrupt_js(JSRuntime *rt, void *opaque) {
 }
 
 static WebNode *node_from_value(JSContext *ctx, JSValueConst value) {
-    if (JS_IsUndefined(value) || JS_IsNull(value))
-        return 0;
-    JSValue hidden = JS_GetPropertyStr(ctx, value, "__node");
-    if (JS_IsUndefined(hidden) || JS_IsNull(hidden)) {
-        JS_FreeValue(ctx, hidden);
-        return 0;
-    }
-    int64_t pointer = 0;
-    if (JS_ToInt64(ctx, &pointer, hidden) != 0)
-        pointer = 0;
-    JS_FreeValue(ctx, hidden);
-    return (WebNode *)(uintptr_t)pointer;
+    (void)ctx;
+    return JS_GetOpaque(value, js_node_class);
 }
 static WebJsState *state_of(WebNode *node) {
     if (!node)
@@ -90,12 +93,10 @@ static JSValue make_element(JSContext *ctx, WebNode *node) {
     WebJsState *state = state_of(node);
     if (state && !JS_IsUndefined(state->object))
         return JS_DupValue(ctx, state->object);
-    JSValue object = JS_NewObject(ctx);
+    JSValue object = JS_NewObjectClass(ctx, js_node_class);
     if (JS_IsException(object))
         return object;
-    JS_DefinePropertyValueStr(ctx, object, "__node",
-                               JS_NewInt64(ctx, (int64_t)(uintptr_t)node), JS_PROP_CONFIGURABLE);
-    install_element(ctx, object);
+    JS_SetOpaque(object, node);
     if (!state) {
         state = web_malloc(sizeof(WebJsState));
         memset(state, 0, sizeof(*state));
@@ -108,6 +109,58 @@ static JSValue make_element(JSContext *ctx, WebNode *node) {
 
 static void mark_dirty(void) { js_document_dirty = true; }
 static void install_style(JSContext *ctx, JSValue object);
+
+static bool remove_attribute(WebNode *node, const char *name) {
+    for (WebAttr **link = &node->attrs; *link; link = &(*link)->next) {
+        if (!web_strcasecmp((*link)->name, name)) {
+            WebAttr *dead = *link;
+            *link = dead->next;
+            web_free(dead->name);
+            web_free(dead->value);
+            web_free(dead);
+            return true;
+        }
+    }
+    return false;
+}
+
+static void log_callback_exception(const char *context) {
+    JSValue exception = JS_GetException(js_context);
+    const char *message = JS_ToCString(js_context, exception);
+    char line[256] = "";
+    append(line, message ? message : "unknown error", sizeof(line));
+    serial_write(context);
+    serial_write(line);
+    serial_write("\n");
+    if (message)
+        JS_FreeCString(js_context, message);
+    if (JS_IsObject(exception)) {
+        JSValue stack = JS_GetPropertyStr(js_context, exception, "stack");
+        if (JS_IsString(stack)) {
+            const char *text = JS_ToCString(js_context, stack);
+            if (text) {
+                line[0] = 0;
+                append(line, text, sizeof(line));
+                serial_write(line);
+                serial_write("\n");
+                JS_FreeCString(js_context, text);
+            }
+        }
+        JS_FreeValue(js_context, stack);
+    }
+    JS_FreeValue(js_context, exception);
+}
+
+static WebNode *listener_node(JSContext *ctx, JSValueConst value) {
+    WebNode *node = node_from_value(ctx, value);
+    if (!node && JS_IsObject(value)) {
+        JSValue global = JS_GetGlobalObject(ctx);
+        if (JS_VALUE_GET_PTR(value) == JS_VALUE_GET_PTR(global))
+            node = js_document;
+        JS_FreeValue(ctx, global);
+    }
+    return node;
+}
 
 /* ---------- element properties ---------- */
 
@@ -124,6 +177,16 @@ enum {
     PROP_HREF,
     PROP_TITLE,
     PROP_NODE_TYPE,
+    PROP_NODE_NAME,
+    PROP_NODE_VALUE,
+    PROP_OWNER_DOCUMENT,
+    PROP_PARENT_NODE,
+    PROP_CHILD_NODES,
+    PROP_CHECKED,
+    PROP_DISABLED,
+    PROP_OFFSET_WIDTH,
+    PROP_OFFSET_HEIGHT,
+    PROP_CSS_TEXT,
     PROP_IS_CONNECTED,
     PROP_VALUE,
     PROP_FIRST_CHILD,
@@ -136,6 +199,7 @@ enum {
     PROP_BODY,
     PROP_DOCUMENT_ELEMENT,
     PROP_HEAD,
+    PROP_CURRENT_SCRIPT,
     PROP_LOCATION,
     PROP_INNER_WIDTH,
     PROP_INNER_HEIGHT,
@@ -192,6 +256,12 @@ static const char *style_property_name(int magic) {
             return "font-weight";
         case PROP_STYLE_BASE + 23:
             return "border";
+        case PROP_STYLE_BASE + 24:
+            return "overflow";
+        case PROP_STYLE_BASE + 25:
+            return "float";
+        case PROP_STYLE_BASE + 26:
+            return "opacity";
         default:
             return 0;
     }
@@ -207,6 +277,10 @@ static JSValue style_get(JSContext *ctx, WebNode *node, int magic) {
     const char *name = style_property_name(magic);
     if (!name)
         return JS_UNDEFINED;
+    char declared[128];
+    css_get_property(node, name, declared, sizeof(declared));
+    if (*declared)
+        return JS_NewString(ctx, declared);
     WebStyle *s = &node->style;
     char buffer[32];
     if (!strcmp(name, "color")) {
@@ -275,7 +349,8 @@ static JSValue style_get(JSContext *ctx, WebNode *node, int magic) {
     return JS_NewString(ctx, "");
 }
 static JSValue element_getter(JSContext *ctx, JSValueConst this_val, int magic) {
-    WebNode *node = node_from_value(ctx, this_val);
+    WebNode *node = magic == PROP_CSS_TEXT || magic >= PROP_STYLE_BASE ?
+                    JS_GetOpaque(this_val, js_style_class) : node_from_value(ctx, this_val);
     if (!node)
         return JS_UNDEFINED;
     if (magic >= PROP_STYLE_BASE)
@@ -335,18 +410,18 @@ static JSValue element_getter(JSContext *ctx, JSValueConst this_val, int magic) 
             return JS_NewString(ctx, buffer);
         }
         case PROP_STYLE: {
-            JSValue object = JS_NewObject(ctx);
-            JS_DefinePropertyValueStr(ctx, object, "__node",
-                                       JS_NewInt64(ctx, (int64_t)(uintptr_t)node),
-                                       JS_PROP_CONFIGURABLE);
-            install_style(ctx, object);
+            JSValue object = JS_NewObjectClass(ctx, js_style_class);
+            if (JS_IsException(object))
+                return object;
+            JS_SetOpaque(object, node);
             return object;
         }
-        case PROP_CHILDREN: {
+        case PROP_CHILDREN:
+        case PROP_CHILD_NODES: {
             JSValue array = JS_NewArray(ctx);
             uint32_t index = 0;
             for (WebNode *c = node->first_child; c; c = c->next)
-                if (c->type == WEB_ELEMENT)
+                if (magic == PROP_CHILD_NODES || c->type == WEB_ELEMENT)
                     JS_SetPropertyUint32(ctx, array, index++, make_element(ctx, c));
             return array;
         }
@@ -361,6 +436,10 @@ static JSValue element_getter(JSContext *ctx, JSValueConst this_val, int magic) 
             if (node->parent && node->parent->type == WEB_ELEMENT)
                 return make_element(ctx, node->parent);
             return JS_NULL;
+        case PROP_PARENT_NODE:
+            return node->parent ? make_element(ctx, node->parent) : JS_NULL;
+        case PROP_OWNER_DOCUMENT:
+            return node == js_document ? JS_NULL : make_element(ctx, js_document);
         case PROP_HREF: {
             const char *href = web_attr(node, "href");
             return JS_NewString(ctx, href ? href : "");
@@ -370,9 +449,30 @@ static JSValue element_getter(JSContext *ctx, JSValueConst this_val, int magic) 
             return JS_NewString(ctx, title ? title : "");
         }
         case PROP_NODE_TYPE:
-            return JS_NewInt32(ctx, node->type == WEB_ELEMENT ? 1 :
+            return JS_NewInt32(ctx, node == js_document ? 9 :
+                                    node->type == WEB_ELEMENT ? 1 :
                                     node->type == WEB_TEXT ? 3 :
                                     node->type == WEB_COMMENT ? 8 : 11);
+        case PROP_NODE_NAME:
+            if (node->type == WEB_TEXT || node->type == WEB_COMMENT)
+                return JS_NewString(ctx, node->type == WEB_TEXT ? "#text" : "#comment");
+            if (node == js_document || node->type != WEB_ELEMENT)
+                return JS_NewString(ctx, node->tag ? node->tag : "");
+            return element_getter(ctx, this_val, PROP_TAG_NAME);
+        case PROP_NODE_VALUE:
+            return node->text ? JS_NewString(ctx, node->text) : JS_NULL;
+        case PROP_CHECKED:
+            return JS_NewBool(ctx, web_attr_has(node, "checked"));
+        case PROP_DISABLED:
+            return JS_NewBool(ctx, web_attr_has(node, "disabled"));
+        case PROP_OFFSET_WIDTH:
+            return JS_NewInt32(ctx, node->w);
+        case PROP_OFFSET_HEIGHT:
+            return JS_NewInt32(ctx, node->h);
+        case PROP_CSS_TEXT: {
+            const char *style = web_attr(node, "style");
+            return JS_NewString(ctx, style ? style : "");
+        }
         case PROP_IS_CONNECTED:
             return web_node_is_connected(node) ? JS_TRUE : JS_FALSE;
         case PROP_TEMPLATE_CONTENT:
@@ -406,12 +506,58 @@ static JSValue element_getter(JSContext *ctx, JSValueConst this_val, int magic) 
 }
 static JSValue element_setter(JSContext *ctx, JSValueConst this_val, JSValueConst value,
                               int magic) {
-    WebNode *node = node_from_value(ctx, this_val);
+    WebNode *node = magic == PROP_CSS_TEXT || magic >= PROP_STYLE_BASE ?
+                    JS_GetOpaque(this_val, js_style_class) : node_from_value(ctx, this_val);
     if (!node)
         return JS_UNDEFINED;
+    if (magic == PROP_CHECKED || magic == PROP_DISABLED) {
+        const char *name = magic == PROP_CHECKED ? "checked" : "disabled";
+        if (JS_ToBool(ctx, value))
+            web_set_attr(node, name, "");
+        else
+            remove_attribute(node, name);
+        if (web_node_is_connected(node))
+            mark_dirty();
+        return JS_UNDEFINED;
+    }
     const char *text = JS_ToCString(ctx, value);
     if (!text)
+        return JS_EXCEPTION;
+    if (magic == PROP_INNER_HTML || magic == PROP_TEXT_CONTENT || magic == PROP_CSS_TEXT) {
+        if (magic == PROP_CSS_TEXT) {
+            web_set_attr(node, "style", text);
+        } else if (magic == PROP_TEXT_CONTENT && (node->type == WEB_TEXT || node->type == WEB_COMMENT)) {
+            web_free(node->text);
+            node->text = web_strdup(text);
+        } else {
+            WebNode *fragment = 0;
+            if (magic == PROP_INNER_HTML) {
+                fragment = web_parse_fragment(node->tag ? node->tag : "div", text, strlen(text));
+                if (!fragment) {
+                    JS_FreeCString(ctx, text);
+                    return JS_ThrowTypeError(ctx, "Cannot parse HTML fragment");
+                }
+            }
+            while (node->first_child) {
+                WebNode *child = node->first_child;
+                web_node_detach(child);
+                track_detached(child);
+            }
+            if (fragment) {
+                while (fragment->first_child)
+                    web_node_append(node, fragment->first_child);
+                web_free_tree(fragment);
+            } else if (*text) {
+                WebNode *child = web_node_new(WEB_TEXT);
+                child->text = web_strdup(text);
+                web_node_append(node, child);
+            }
+        }
+        JS_FreeCString(ctx, text);
+        if (web_node_is_connected(node))
+            mark_dirty();
         return JS_UNDEFINED;
+    }
     char buffer[1024];
     size_t n = strlen(text);
     if (n >= sizeof(buffer))
@@ -448,42 +594,6 @@ static JSValue element_setter(JSContext *ctx, JSValueConst this_val, JSValueCons
             web_set_attr(node, "value", buffer);
             mark_dirty();
             break;
-        case PROP_TEXT_CONTENT: {
-            while (node->first_child) {
-                WebNode *child = node->first_child;
-                web_node_detach(child);
-                track_detached(child);
-            }
-            if (buffer[0]) {
-                WebNode *text = web_node_new(WEB_TEXT);
-                text->text = web_strdup(buffer);
-                web_node_append(node, text);
-            }
-            mark_dirty();
-            break;
-        }
-        case PROP_INNER_HTML: {
-            while (node->first_child) {
-                WebNode *child = node->first_child;
-                web_node_detach(child);
-                track_detached(child);
-            }
-            WebNode *parsed = 0;
-            char error[128];
-            if (web_parse(buffer, (size_t)strlen(buffer), &parsed, error, sizeof(error)) &&
-                parsed) {
-                while (parsed->first_child) {
-                    WebNode *child = parsed->first_child;
-                    /* Detach from the temporary document before ownership
-                     * moves: otherwise freeing parsed frees inserted nodes. */
-                    web_node_detach(child);
-                    web_node_append(node, child);
-                }
-                web_free_tree(parsed);
-            }
-            mark_dirty();
-            break;
-        }
         default:
             break;
     }
@@ -494,7 +604,7 @@ static JSValue element_setter(JSContext *ctx, JSValueConst this_val, JSValueCons
 
 static JSValue js_add_event_listener(JSContext *ctx, JSValueConst this_val, int argc,
                                       JSValueConst *argv) {
-    WebNode *node = node_from_value(ctx, this_val);
+    WebNode *node = listener_node(ctx, this_val);
     if (!node || argc < 2)
         return JS_UNDEFINED;
     const char *type = JS_ToCString(ctx, argv[0]);
@@ -527,7 +637,7 @@ static JSValue js_add_event_listener(JSContext *ctx, JSValueConst this_val, int 
 }
 static JSValue js_remove_event_listener(JSContext *ctx, JSValueConst this_val, int argc,
                                          JSValueConst *argv) {
-    WebNode *node = node_from_value(ctx, this_val);
+    WebNode *node = listener_node(ctx, this_val);
     if (!node || argc < 2)
         return JS_UNDEFINED;
     const char *type = JS_ToCString(ctx, argv[0]);
@@ -561,15 +671,16 @@ static void collect_matching(WebNode *node, const char *selector, WebNode **out,
 }
 static JSValue js_query_selector(JSContext *ctx, JSValueConst this_val, int argc,
                                  JSValueConst *argv) {
-    (void)this_val;
-    if (!argc || !js_document)
+    WebNode *root = node_from_value(ctx, this_val);
+    if (!argc || !root)
         return JS_NULL;
     const char *selector = JS_ToCString(ctx, argv[0]);
     if (!selector)
         return JS_NULL;
     WebNode *matches[64];
     int count = 0;
-    collect_matching(js_document, selector, matches, &count, 64);
+    for (WebNode *child = root->first_child; child && !count; child = child->next)
+        collect_matching(child, selector, matches, &count, 1);
     JS_FreeCString(ctx, selector);
     if (!count)
         return JS_NULL;
@@ -577,20 +688,72 @@ static JSValue js_query_selector(JSContext *ctx, JSValueConst this_val, int argc
 }
 static JSValue js_query_selector_all(JSContext *ctx, JSValueConst this_val, int argc,
                                      JSValueConst *argv) {
-    (void)this_val;
-    if (!argc || !js_document)
+    WebNode *root = node_from_value(ctx, this_val);
+    if (!argc || !root)
         return JS_NewArray(ctx);
     const char *selector = JS_ToCString(ctx, argv[0]);
     if (!selector)
         return JS_NewArray(ctx);
     WebNode *matches[256];
     int count = 0;
-    collect_matching(js_document, selector, matches, &count, 256);
+    for (WebNode *child = root->first_child; child && count < 256; child = child->next)
+        collect_matching(child, selector, matches, &count, 256);
     JS_FreeCString(ctx, selector);
     JSValue array = JS_NewArray(ctx);
     for (int i = 0; i < count; i++)
         JS_SetPropertyUint32(ctx, array, (uint32_t)i, make_element(ctx, matches[i]));
     return array;
+}
+static bool collect_tags(JSContext *ctx, WebNode *root, const char *tag,
+                         JSValueConst result, uint32_t *count) {
+    for (WebNode *node = root->first_child; node; node = node->next) {
+        if (node->type == WEB_ELEMENT && (!strcmp(tag, "*") || !web_strcasecmp(node->tag, tag)) &&
+            JS_SetPropertyUint32(ctx, result, (*count)++, make_element(ctx, node)) < 0)
+            return false;
+        if (!collect_tags(ctx, node, tag, result, count))
+            return false;
+    }
+    return true;
+}
+static JSValue js_get_elements_by_tag(JSContext *ctx, JSValueConst this_val, int argc,
+                                     JSValueConst *argv) {
+    WebNode *root = node_from_value(ctx, this_val);
+    if (!root || !argc)
+        return JS_NewArray(ctx);
+    const char *tag = JS_ToCString(ctx, argv[0]);
+    if (!tag)
+        return JS_EXCEPTION;
+    JSValue result = JS_NewArray(ctx);
+    uint32_t count = 0;
+    bool ok = !JS_IsException(result) && collect_tags(ctx, root, tag, result, &count);
+    JS_FreeCString(ctx, tag);
+    if (!ok) {
+        JS_FreeValue(ctx, result);
+        return JS_EXCEPTION;
+    }
+    return result;
+}
+static JSValue js_has_child_nodes(JSContext *ctx, JSValueConst this_val, int argc,
+                                  JSValueConst *argv) {
+    (void)argc; (void)argv;
+    WebNode *node = node_from_value(ctx, this_val);
+    return JS_NewBool(ctx, node && node->first_child);
+}
+static JSValue js_matches(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    WebNode *node = node_from_value(ctx, this_val);
+    if (!node || node->type != WEB_ELEMENT || !argc)
+        return JS_FALSE;
+    const char *selector = JS_ToCString(ctx, argv[0]);
+    if (!selector)
+        return JS_EXCEPTION;
+    bool match = css_match_selector(selector, node);
+    JS_FreeCString(ctx, selector);
+    return JS_NewBool(ctx, match);
+}
+static JSValue js_element_constructor(JSContext *ctx, JSValueConst new_target, int argc,
+                                      JSValueConst *argv) {
+    (void)new_target; (void)argc; (void)argv;
+    return JS_ThrowTypeError(ctx, "Illegal constructor");
 }
 static JSValue js_get_element_by_id(JSContext *ctx, JSValueConst this_val, int argc,
                                     JSValueConst *argv) {
@@ -626,23 +789,27 @@ static JSValue js_create_element(JSContext *ctx, JSValueConst this_val, int argc
     JS_FreeCString(ctx, tag);
     WebNode *node = web_node_new(WEB_ELEMENT);
     node->tag = web_strdup(name);
+    track_detached(node);
     return make_element(ctx, node);
 }
 static JSValue js_create_document_fragment(JSContext *ctx, JSValueConst this_val,
                                              int argc, JSValueConst *argv) {
     (void)this_val; (void)argc; (void)argv;
-    return make_element(ctx, web_node_new(WEB_DOCUMENT_FRAGMENT));
+    WebNode *node = web_node_new(WEB_DOCUMENT_FRAGMENT);
+    track_detached(node);
+    return make_element(ctx, node);
 }
-static JSValue js_create_text_node(JSContext *ctx, JSValueConst this_val, int argc,
-                                   JSValueConst *argv) {
+static JSValue js_create_character_node(JSContext *ctx, JSValueConst this_val, int argc,
+                                        JSValueConst *argv, int type) {
     (void)this_val;
     if (!argc)
         return JS_NULL;
     const char *text = JS_ToCString(ctx, argv[0]);
     if (!text)
         return JS_NULL;
-    WebNode *node = web_node_new(WEB_TEXT);
+    WebNode *node = web_node_new(type);
     node->text = web_strdup(text);
+    track_detached(node);
     JS_FreeCString(ctx, text);
     return make_element(ctx, node);
 }
@@ -652,10 +819,13 @@ static JSValue js_append_child(JSContext *ctx, JSValueConst this_val, int argc,
                                JSValueConst *argv) {
     WebNode *parent = node_from_value(ctx, this_val);
     WebNode *child = argc ? node_from_value(ctx, argv[0]) : 0;
-    if (!parent || !child || !web_node_insert_before(parent, child, 0))
+    bool moving_connected = web_node_is_connected(child);
+    if (!parent || !child || child == js_document || !web_node_insert_before(parent, child, 0))
         return JS_ThrowTypeError(ctx, "Invalid appendChild tree mutation");
-    untrack_detached(child);
-    mark_dirty();
+    if (child->parent)
+        untrack_detached(child);
+    if (moving_connected || web_node_is_connected(parent))
+        mark_dirty();
     return make_element(ctx, child);
 }
 static JSValue js_attach_shadow(JSContext *ctx, JSValueConst this_val, int argc,
@@ -683,17 +853,22 @@ static JSValue js_clone_node(JSContext *ctx, JSValueConst this_val, int argc,
     if (!source)
         return JS_NULL;
     bool deep = argc > 0 && JS_ToBool(ctx, argv[0]);
-    return make_element(ctx, web_node_clone(source, deep));
+    WebNode *copy = web_node_clone(source, deep);
+    track_detached(copy);
+    return make_element(ctx, copy);
 }
 static JSValue js_insert_before(JSContext *ctx, JSValueConst this_val, int argc,
                                 JSValueConst *argv) {
     WebNode *parent = node_from_value(ctx, this_val);
     WebNode *child = argc ? node_from_value(ctx, argv[0]) : 0;
     WebNode *reference = argc > 1 ? node_from_value(ctx, argv[1]) : 0;
-    if (!parent || !child || !web_node_insert_before(parent, child, reference))
+    bool moving_connected = web_node_is_connected(child);
+    if (!parent || !child || child == js_document || !web_node_insert_before(parent, child, reference))
         return JS_ThrowTypeError(ctx, "Invalid insertBefore tree mutation");
-    untrack_detached(child);
-    mark_dirty();
+    if (child->parent)
+        untrack_detached(child);
+    if (moving_connected || web_node_is_connected(parent))
+        mark_dirty();
     return make_element(ctx, child);
 }
 static JSValue js_remove_child(JSContext *ctx, JSValueConst this_val, int argc,
@@ -704,7 +879,8 @@ static JSValue js_remove_child(JSContext *ctx, JSValueConst this_val, int argc,
         return JS_ThrowTypeError(ctx, "removeChild requires a direct child");
     web_node_detach(child);
     track_detached(child);
-    mark_dirty();
+    if (web_node_is_connected(parent))
+        mark_dirty();
     return make_element(ctx, child);
 }
 static JSValue js_replace_child(JSContext *ctx, JSValueConst this_val, int argc,
@@ -712,12 +888,15 @@ static JSValue js_replace_child(JSContext *ctx, JSValueConst this_val, int argc,
     WebNode *parent = node_from_value(ctx, this_val);
     WebNode *next = argc > 0 ? node_from_value(ctx, argv[0]) : 0;
     WebNode *old = argc > 1 ? node_from_value(ctx, argv[1]) : 0;
-    if (!parent || !next || !old || !web_node_replace_child(parent, next, old))
+    bool moving_connected = web_node_is_connected(next);
+    if (!parent || !next || !old || next == js_document || !web_node_replace_child(parent, next, old))
         return JS_ThrowTypeError(ctx, "Invalid replaceChild tree mutation");
-    untrack_detached(next);
+    if (next->parent)
+        untrack_detached(next);
     if (next != old) {
         track_detached(old);
-        mark_dirty();
+        if (moving_connected || web_node_is_connected(parent))
+            mark_dirty();
     }
     return make_element(ctx, old);
 }
@@ -762,7 +941,8 @@ static JSValue js_set_attribute(JSContext *ctx, JSValueConst this_val, int argc,
             if (*p >= 'A' && *p <= 'Z')
                 *p = (char)(*p + 32);
         web_set_attr(node, lower, value);
-        mark_dirty();
+        if (web_node_is_connected(node))
+            mark_dirty();
     }
     if (name)
         JS_FreeCString(ctx, name);
@@ -803,19 +983,8 @@ static JSValue js_remove_attribute(JSContext *ctx, JSValueConst this_val, int ar
         return JS_UNDEFINED;
     const char *name = JS_ToCString(ctx, argv[0]);
     if (name) {
-        WebAttr **link = &node->attrs;
-        while (*link) {
-            if (!web_strcasecmp((*link)->name, name)) {
-                WebAttr *dead = *link;
-                *link = dead->next;
-                web_free(dead->name);
-                web_free(dead->value);
-                web_free(dead);
-                mark_dirty();
-                continue;
-            }
-            link = &(*link)->next;
-        }
+        if (remove_attribute(node, name) && web_node_is_connected(node))
+            mark_dirty();
         JS_FreeCString(ctx, name);
     }
     return JS_UNDEFINED;
@@ -836,6 +1005,133 @@ static JSValue js_get_bounding_rect(JSContext *ctx, JSValueConst this_val, int a
     JS_SetPropertyStr(ctx, rect, "left", JS_NewInt32(ctx, node->x));
     return rect;
 }
+static void computed_pixels(JSContext *ctx, JSValueConst style, const char *name, int value) {
+    char text[24];
+    number(text, value < 0 ? 0 : (unsigned)value);
+    strcat(text, "px");
+    JS_SetPropertyStr(ctx, style, name, JS_NewString(ctx, text));
+}
+static JSValue computed_value(JSContext *ctx, JSValueConst style, int argc, JSValueConst *argv) {
+    if (!argc)
+        return JS_NewString(ctx, "");
+    const char *name = JS_ToCString(ctx, argv[0]);
+    if (!name)
+        return JS_EXCEPTION;
+    char property[64];
+    size_t used = 0;
+    for (const char *p = name; *p && used < sizeof(property) - 1; p++) {
+        if (*p == '-' && p[1] >= 'a' && p[1] <= 'z') {
+            p++;
+            property[used++] = (char)(*p - 'a' + 'A');
+        } else {
+            property[used++] = *p;
+        }
+    }
+    property[used] = 0;
+    JS_FreeCString(ctx, name);
+    JSValue value = JS_GetPropertyStr(ctx, style, property);
+    if (JS_IsString(value) || JS_IsException(value))
+        return value;
+    JS_FreeValue(ctx, value);
+    return JS_NewString(ctx, "");
+}
+static JSValue js_computed_style(JSContext *ctx, JSValueConst this_val, int argc,
+                                  JSValueConst *argv) {
+    (void)this_val;
+    WebNode *node = argc ? node_from_value(ctx, argv[0]) : 0;
+    if (!node || node->type != WEB_ELEMENT || node == js_document)
+        return JS_ThrowTypeError(ctx, "getComputedStyle requires an element");
+    JSValue result = JS_NewObject(ctx);
+    if (JS_IsException(result))
+        return result;
+    JS_SetPropertyStr(ctx, result, "getPropertyValue",
+                      JS_NewCFunction(ctx, computed_value, "getPropertyValue", 1));
+    if (argc > 1 && !JS_IsNull(argv[1]) && !JS_IsUndefined(argv[1])) {
+        const char *pseudo = JS_ToCString(ctx, argv[1]);
+        if (pseudo && *pseudo == ':') {
+            const char *name = pseudo + (pseudo[1] == ':' ? 2 : 1);
+            const char *content = web_pseudo_property(node, name, "content");
+            JS_SetPropertyStr(ctx, result, "content", JS_NewString(ctx, *content ? content : "none"));
+            JS_FreeCString(ctx, pseudo);
+            return result;
+        }
+        if (pseudo)
+            JS_FreeCString(ctx, pseudo);
+    }
+    const WebStyle *style = &node->style;
+    JS_SetPropertyStr(ctx, result, "display", style_get(ctx, node, PROP_STYLE_BASE + 2));
+    JS_SetPropertyStr(ctx, result, "boxSizing",
+                      JS_NewString(ctx, style->border_box ? "border-box" : "content-box"));
+    static const char *const positions[] = {"static", "relative", "absolute", "fixed"};
+    JS_SetPropertyStr(ctx, result, "position", JS_NewString(ctx, positions[style->position & 3]));
+    computed_pixels(ctx, result, "width", style->border_box ? node->w : node->content_w);
+    computed_pixels(ctx, result, "height", style->border_box ? node->h : node->content_h);
+    static const char *const margin[] = {"marginTop", "marginRight", "marginBottom", "marginLeft"};
+    static const char *const padding[] = {"paddingTop", "paddingRight", "paddingBottom", "paddingLeft"};
+    static const char *const border[] = {"borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth"};
+    for (int side = 0; side < 4; side++) {
+        computed_pixels(ctx, result, margin[side], style->margin[side]);
+        computed_pixels(ctx, result, padding[side], style->padding[side]);
+        computed_pixels(ctx, result, border[side], style->border_shown[side] ? style->border[side] : 0);
+    }
+    return result;
+}
+
+static JSValue js_media_matches(JSContext *ctx, JSValueConst query) {
+    JSValue media = JS_GetPropertyStr(ctx, query, "media");
+    const char *text = JS_ToCString(ctx, media);
+    bool matches = text && css_media_matches(text);
+    if (text)
+        JS_FreeCString(ctx, text);
+    JS_FreeValue(ctx, media);
+    return JS_NewBool(ctx, matches);
+}
+static JSValue js_media_listener(JSContext *ctx, JSValueConst query, int argc,
+                                 JSValueConst *argv, int remove) {
+    if (JS_GetClassID(query) != js_media_class || !argc || !JS_IsFunction(ctx, argv[0]))
+        return JS_UNDEFINED;
+    for (WebMediaListener **link = &js_media; *link; link = &(*link)->next) {
+        WebMediaListener *entry = *link;
+        if (JS_VALUE_GET_PTR(entry->query) != JS_VALUE_GET_PTR(query) ||
+            JS_VALUE_GET_PTR(entry->callback) != JS_VALUE_GET_PTR(argv[0]))
+            continue;
+        if (remove) {
+            *link = entry->next;
+            JS_FreeValue(ctx, entry->query);
+            JS_FreeValue(ctx, entry->callback);
+            web_free(entry);
+        }
+        return JS_UNDEFINED;
+    }
+    if (!remove) {
+        WebMediaListener *entry = web_malloc(sizeof(*entry));
+        entry->query = JS_DupValue(ctx, query);
+        entry->callback = JS_DupValue(ctx, argv[0]);
+        entry->matches = JS_ToBool(ctx, js_media_matches(ctx, query));
+        entry->next = js_media;
+        js_media = entry;
+    }
+    return JS_UNDEFINED;
+}
+static JSValue js_match_media(JSContext *ctx, JSValueConst this_val, int argc,
+                               JSValueConst *argv) {
+    (void)this_val;
+    JSValue media = argc ? JS_ToString(ctx, argv[0]) : JS_NewString(ctx, "");
+    if (JS_IsException(media))
+        return media;
+    JSValue query = JS_NewObjectClass(ctx, js_media_class);
+    if (JS_IsException(query)) {
+        JS_FreeValue(ctx, media);
+        return query;
+    }
+    static const JSCFunctionListEntry methods[] = {
+        JS_CGETSET_DEF("matches", js_media_matches, 0),
+        JS_CFUNC_MAGIC_DEF("addListener", 1, js_media_listener, 0),
+        JS_CFUNC_MAGIC_DEF("removeListener", 1, js_media_listener, 1)};
+    JS_DefinePropertyValueStr(ctx, query, "media", media, JS_PROP_ENUMERABLE);
+    JS_SetPropertyFunctionList(ctx, query, methods, sizeof(methods) / sizeof(methods[0]));
+    return query;
+}
 static JSValue js_noop(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)ctx;
     (void)this_val;
@@ -853,7 +1149,7 @@ static JSValue js_click(JSContext *ctx, JSValueConst this_val, int argc, JSValue
 }
 static JSValue js_style_set_property(JSContext *ctx, JSValueConst this_val, int argc,
                                      JSValueConst *argv) {
-    WebNode *node = node_from_value(ctx, this_val);
+    WebNode *node = JS_GetOpaque(this_val, js_style_class);
     if (!node || argc < 2)
         return JS_UNDEFINED;
     const char *name = JS_ToCString(ctx, argv[0]);
@@ -870,7 +1166,7 @@ static JSValue js_style_set_property(JSContext *ctx, JSValueConst this_val, int 
 }
 static JSValue js_style_get_property(JSContext *ctx, JSValueConst this_val, int argc,
                                      JSValueConst *argv) {
-    WebNode *node = node_from_value(ctx, this_val);
+    WebNode *node = JS_GetOpaque(this_val, js_style_class);
     if (!node || argc < 1)
         return JS_NewString(ctx, "");
     const char *name = JS_ToCString(ctx, argv[0]);
@@ -884,7 +1180,7 @@ static JSValue js_style_get_property(JSContext *ctx, JSValueConst this_val, int 
 }
 static JSValue js_style_remove_property(JSContext *ctx, JSValueConst this_val, int argc,
                                         JSValueConst *argv) {
-    WebNode *node = node_from_value(ctx, this_val);
+    WebNode *node = JS_GetOpaque(this_val, js_style_class);
     if (!node || argc < 1)
         return JS_UNDEFINED;
     const char *name = JS_ToCString(ctx, argv[0]);
@@ -898,24 +1194,30 @@ static JSValue js_style_remove_property(JSContext *ctx, JSValueConst this_val, i
 
 /* ---------- timers ---------- */
 
-static JSValue js_set_timeout(JSContext *ctx, JSValueConst this_val, int argc,
-                               JSValueConst *argv) {
+static JSValue schedule_timer(JSContext *ctx, JSValueConst callback, uint32_t delay,
+                              uint32_t interval) {
+    WebTimer *timer = web_malloc(sizeof(*timer));
+    *timer = (WebTimer){.fn = JS_DupValue(ctx, callback), .id = ++js_timer_id,
+                        .due = frame_clock + delay, .interval = interval};
+    WebTimer **link = &js_timers;
+    while (*link && (int32_t)((*link)->due - timer->due) <= 0)
+        link = &(*link)->next;
+    timer->next = *link;
+    *link = timer;
+    return JS_NewInt32(ctx, timer->id);
+}
+static JSValue js_set_timer(JSContext *ctx, JSValueConst this_val, int argc,
+                             JSValueConst *argv, int repeat) {
     (void)this_val;
     if (!argc || !JS_IsFunction(ctx, argv[0]))
         return JS_UNDEFINED;
-    int delay = 0;
+    int32_t delay = 0;
     if (argc > 1)
-        JS_ToInt32(ctx, &delay, argv[1]);
+        if (JS_ToInt32(ctx, &delay, argv[1]))
+            return JS_EXCEPTION;
     if (delay < 0)
         delay = 0;
-    WebTimer *timer = web_malloc(sizeof(WebTimer));
-    memset(timer, 0, sizeof(*timer));
-    timer->fn = JS_DupValue(ctx, argv[0]);
-    timer->id = ++js_timer_id;
-    timer->due = frame_clock + (uint32_t)delay;
-    timer->next = js_timers;
-    js_timers = timer;
-    return JS_NewInt32(ctx, timer->id);
+    return schedule_timer(ctx, argv[0], (uint32_t)delay, repeat ? (uint32_t)(delay ? delay : 1) : 0);
 }
 static JSValue js_clear_timeout(JSContext *ctx, JSValueConst this_val, int argc,
                                  JSValueConst *argv) {
@@ -934,14 +1236,7 @@ static JSValue js_request_animation_frame(JSContext *ctx, JSValueConst this_val,
     (void)this_val;
     if (!argc || !JS_IsFunction(ctx, argv[0]))
         return JS_UNDEFINED;
-    WebTimer *timer = web_malloc(sizeof(WebTimer));
-    memset(timer, 0, sizeof(*timer));
-    timer->fn = JS_DupValue(ctx, argv[0]);
-    timer->id = ++js_timer_id;
-    timer->due = frame_clock + 16;
-    timer->next = js_timers;
-    js_timers = timer;
-    return JS_NewInt32(ctx, timer->id);
+    return schedule_timer(ctx, argv[0], 16, 0);
 }
 
 /* ---------- events ---------- */
@@ -990,24 +1285,32 @@ void web_js_dispatch(WebNode *target, const char *type, WebNode *root) {
     JS_SetPropertyStr(js_context, event, "stopPropagation",
                        JS_NewCFunction(js_context, js_stop_propagation, "stopPropagation", 0));
     for (WebNode *node = target; node; node = node->parent) {
-        JS_SetPropertyStr(js_context, event, "currentTarget", make_element(js_context, node));
         WebJsState *state = state_of(node);
+        if (!state || !state->listeners)
+            continue;
+        JSValue current = make_element(js_context, node);
+        JS_SetPropertyStr(js_context, event, "currentTarget", JS_DupValue(js_context, current));
+        JSValue callbacks = JS_NewArray(js_context);
+        uint32_t count = 0;
         for (WebListener *listener = state ? state->listeners : 0; listener;
              listener = listener->next) {
             if (strcmp(listener->type, type))
                 continue;
-            JSValue result = JS_Call(js_context, listener->fn, JS_UNDEFINED, 1, (JSValueConst *)&event);
-            if (JS_IsException(result)) {
-                JSValue error = JS_GetException(js_context);
-                const char *text = JS_ToCString(js_context, error);
-                if (text)
-                    serial_write(text);
-                if (text)
-                    JS_FreeCString(js_context, text);
-                JS_FreeValue(js_context, error);
-            }
+            if (JS_SetPropertyUint32(js_context, callbacks, count,
+                                    JS_DupValue(js_context, listener->fn)) < 0)
+                break;
+            count++;
+        }
+        for (uint32_t i = 0; i < count; i++) {
+            JSValue callback = JS_GetPropertyUint32(js_context, callbacks, i);
+            JSValue result = JS_Call(js_context, callback, current, 1, (JSValueConst *)&event);
+            JS_FreeValue(js_context, callback);
+            if (JS_IsException(result))
+                log_callback_exception("Browser: JavaScript event: ");
             JS_FreeValue(js_context, result);
         }
+        JS_FreeValue(js_context, callbacks);
+        JS_FreeValue(js_context, current);
         JSValue stopped = JS_GetPropertyStr(js_context, event, "__stopped");
         bool halted = JS_ToBool(js_context, stopped);
         JS_FreeValue(js_context, stopped);
@@ -1043,7 +1346,9 @@ static JSValue document_getter(JSContext *ctx, JSValueConst this_val, int magic)
             return JS_NULL;
         }
         case PROP_READY_STATE:
-            return JS_NewString(ctx, "complete");
+            return JS_NewString(ctx, js_ready_state);
+        case PROP_CURRENT_SCRIPT:
+            return js_current_script ? make_element(ctx, js_current_script) : JS_NULL;
         case PROP_TITLE: {
             WebNode *title = web_find_first(js_document, "title");
             if (title) {
@@ -1080,6 +1385,9 @@ static const JSCFunctionListEntry element_functions[] = {
     JS_CFUNC_DEF("removeEventListener", 2, js_remove_event_listener),
     JS_CFUNC_DEF("querySelector", 1, js_query_selector),
     JS_CFUNC_DEF("querySelectorAll", 1, js_query_selector_all),
+    JS_CFUNC_DEF("getElementsByTagName", 1, js_get_elements_by_tag),
+    JS_CFUNC_DEF("hasChildNodes", 0, js_has_child_nodes),
+    JS_CFUNC_DEF("matches", 1, js_matches),
     JS_CFUNC_DEF("appendChild", 1, js_append_child),
     JS_CFUNC_DEF("insertBefore", 2, js_insert_before),
     JS_CFUNC_DEF("cloneNode", 1, js_clone_node),
@@ -1113,6 +1421,15 @@ static void install_element(JSContext *ctx, JSValue object) {
         JS_CGETSET_MAGIC_DEF("href", element_getter, element_setter, PROP_HREF),
         JS_CGETSET_MAGIC_DEF("title", element_getter, element_setter, PROP_TITLE),
         JS_CGETSET_MAGIC_DEF("nodeType", element_getter, 0, PROP_NODE_TYPE),
+        JS_CGETSET_MAGIC_DEF("nodeName", element_getter, 0, PROP_NODE_NAME),
+        JS_CGETSET_MAGIC_DEF("nodeValue", element_getter, 0, PROP_NODE_VALUE),
+        JS_CGETSET_MAGIC_DEF("ownerDocument", element_getter, 0, PROP_OWNER_DOCUMENT),
+        JS_CGETSET_MAGIC_DEF("parentNode", element_getter, 0, PROP_PARENT_NODE),
+        JS_CGETSET_MAGIC_DEF("childNodes", element_getter, 0, PROP_CHILD_NODES),
+        JS_CGETSET_MAGIC_DEF("checked", element_getter, element_setter, PROP_CHECKED),
+        JS_CGETSET_MAGIC_DEF("disabled", element_getter, element_setter, PROP_DISABLED),
+        JS_CGETSET_MAGIC_DEF("offsetWidth", element_getter, 0, PROP_OFFSET_WIDTH),
+        JS_CGETSET_MAGIC_DEF("offsetHeight", element_getter, 0, PROP_OFFSET_HEIGHT),
         JS_CGETSET_MAGIC_DEF("isConnected", element_getter, 0, PROP_IS_CONNECTED),
         JS_CGETSET_MAGIC_DEF("content", element_getter, 0, PROP_TEMPLATE_CONTENT),
         JS_CGETSET_MAGIC_DEF("shadowRoot", element_getter, 0, PROP_SHADOW_ROOT),
@@ -1136,6 +1453,7 @@ static const JSCFunctionListEntry style_functions[] = {
 
 static void install_style(JSContext *ctx, JSValue object) {
     static const JSCFunctionListEntry properties[] = {
+        JS_CGETSET_MAGIC_DEF("cssText", element_getter, element_setter, PROP_CSS_TEXT),
         JS_CGETSET_MAGIC_DEF("color", element_getter, element_setter, PROP_STYLE_BASE + 0),
         JS_CGETSET_MAGIC_DEF("backgroundColor", element_getter, element_setter, PROP_STYLE_BASE + 1),
         JS_CGETSET_MAGIC_DEF("display", element_getter, element_setter, PROP_STYLE_BASE + 2),
@@ -1159,6 +1477,9 @@ static void install_style(JSContext *ctx, JSValue object) {
         JS_CGETSET_MAGIC_DEF("lineHeight", element_getter, element_setter, PROP_STYLE_BASE + 20),
         JS_CGETSET_MAGIC_DEF("background", element_getter, element_setter, PROP_STYLE_BASE + 21),
         JS_CGETSET_MAGIC_DEF("border", element_getter, element_setter, PROP_STYLE_BASE + 23),
+        JS_CGETSET_MAGIC_DEF("overflow", element_getter, element_setter, PROP_STYLE_BASE + 24),
+        JS_CGETSET_MAGIC_DEF("cssFloat", element_getter, element_setter, PROP_STYLE_BASE + 25),
+        JS_CGETSET_MAGIC_DEF("opacity", element_getter, element_setter, PROP_STYLE_BASE + 26),
         {0, 0, 0, 0, 0}};
     JS_SetPropertyFunctionList(ctx, object, properties,
                                 (int)(sizeof(properties) / sizeof(properties[0])) - 1);
@@ -1167,7 +1488,7 @@ static void install_style(JSContext *ctx, JSValue object) {
 }
 
 static void build_document(JSContext *ctx, WebNode *root) {
-    JSValue document = JS_NewObject(ctx);
+    JSValue document = make_element(ctx, root);
     JS_SetPropertyStr(ctx, document, "getElementById",
                        JS_NewCFunction(ctx, js_get_element_by_id, "getElementById", 1));
     JS_SetPropertyStr(ctx, document, "querySelector",
@@ -1177,7 +1498,11 @@ static void build_document(JSContext *ctx, WebNode *root) {
     JS_SetPropertyStr(ctx, document, "createElement",
                        JS_NewCFunction(ctx, js_create_element, "createElement", 1));
     JS_SetPropertyStr(ctx, document, "createTextNode",
-                       JS_NewCFunction(ctx, js_create_text_node, "createTextNode", 1));
+                       JS_NewCFunctionMagic(ctx, js_create_character_node, "createTextNode", 1,
+                                            JS_CFUNC_generic_magic, WEB_TEXT));
+    JS_SetPropertyStr(ctx, document, "createComment",
+                       JS_NewCFunctionMagic(ctx, js_create_character_node, "createComment", 1,
+                                            JS_CFUNC_generic_magic, WEB_COMMENT));
     JS_SetPropertyStr(ctx, document, "createDocumentFragment",
                        JS_NewCFunction(ctx, js_create_document_fragment, "createDocumentFragment", 0));
     JS_SetPropertyStr(ctx, document, "addEventListener",
@@ -1187,30 +1512,24 @@ static void build_document(JSContext *ctx, WebNode *root) {
     JS_SetPropertyStr(ctx, document, "dispatchEvent",
                        JS_NewCFunction(ctx, js_dispatch_event, "dispatchEvent", 1));
     static const JSCFunctionListEntry properties[] = {
-        {"body", JS_PROP_CONFIGURABLE, JS_DEF_CGETSET_MAGIC, PROP_BODY, 0},
-        {"documentElement", JS_PROP_CONFIGURABLE, JS_DEF_CGETSET_MAGIC, PROP_DOCUMENT_ELEMENT, 0},
-        {"head", JS_PROP_CONFIGURABLE, JS_DEF_CGETSET_MAGIC, PROP_HEAD, 0},
-        {"title", JS_PROP_CONFIGURABLE, JS_DEF_CGETSET_MAGIC, PROP_TITLE, 0},
-        {"readyState", JS_PROP_CONFIGURABLE, JS_DEF_CGETSET_MAGIC, PROP_READY_STATE, 0},
-        {0, 0, 0, 0, 0}};
+        JS_CGETSET_MAGIC_DEF("body", document_getter, 0, PROP_BODY),
+        JS_CGETSET_MAGIC_DEF("documentElement", document_getter, 0, PROP_DOCUMENT_ELEMENT),
+        JS_CGETSET_MAGIC_DEF("head", document_getter, 0, PROP_HEAD),
+        JS_CGETSET_MAGIC_DEF("title", document_getter, 0, PROP_TITLE),
+        JS_CGETSET_MAGIC_DEF("readyState", document_getter, 0, PROP_READY_STATE),
+        JS_CGETSET_MAGIC_DEF("currentScript", document_getter, 0, PROP_CURRENT_SCRIPT),
+        JS_PROP_STRING_DEF("compatMode", "CSS1Compat", 0)};
     JS_SetPropertyFunctionList(ctx, document, properties,
-                                (int)(sizeof(properties) / sizeof(properties[0])) - 1);
+                                (int)(sizeof(properties) / sizeof(properties[0])));
     JSValue global = JS_GetGlobalObject(ctx);
     JS_SetPropertyStr(ctx, global, "document", document);
     JS_FreeValue(ctx, global);
 }
 static void build_window(JSContext *ctx, const char *url) {
     JSValue global = JS_GetGlobalObject(ctx);
-    JSValue window = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, window, "setTimeout",
-                       JS_NewCFunction(ctx, js_set_timeout, "setTimeout", 2));
-    JS_SetPropertyStr(ctx, window, "clearTimeout",
-                       JS_NewCFunction(ctx, js_clear_timeout, "clearTimeout", 1));
-    JS_SetPropertyStr(ctx, window, "requestAnimationFrame",
-                       JS_NewCFunction(ctx, js_request_animation_frame, "requestAnimationFrame", 1));
-    JS_SetPropertyStr(ctx, window, "addEventListener",
+    JS_SetPropertyStr(ctx, global, "addEventListener",
                        JS_NewCFunction(ctx, js_add_event_listener, "addEventListener", 2));
-    JS_SetPropertyStr(ctx, window, "removeEventListener",
+    JS_SetPropertyStr(ctx, global, "removeEventListener",
                        JS_NewCFunction(ctx, js_remove_event_listener, "removeEventListener", 2));
     JSValue location = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, location, "href", JS_NewString(ctx, url ? url : ""));
@@ -1229,12 +1548,25 @@ static void build_window(JSContext *ctx, const char *url) {
     }
     hostname[n] = 0;
     JS_SetPropertyStr(ctx, location, "hostname", JS_NewString(ctx, hostname));
-    JS_SetPropertyStr(ctx, window, "location", location);
-    JS_SetPropertyStr(ctx, global, "window", window);
+    JS_SetPropertyStr(ctx, global, "location", location);
+    JSValue navigator = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, navigator, "userAgent", JS_NewString(ctx, "Luna Browser/0.3 (LunaOS)"));
+    JS_SetPropertyStr(ctx, navigator, "platform", JS_NewString(ctx, "LunaOS i386"));
+    JS_SetPropertyStr(ctx, global, "navigator", navigator);
+    JS_SetPropertyStr(ctx, global, "window", JS_DupValue(ctx, global));
+    JS_SetPropertyStr(ctx, global, "self", JS_DupValue(ctx, global));
+    JS_SetPropertyStr(ctx, global, "getComputedStyle",
+                       JS_NewCFunction(ctx, js_computed_style, "getComputedStyle", 1));
+    JS_SetPropertyStr(ctx, global, "matchMedia",
+                       JS_NewCFunction(ctx, js_match_media, "matchMedia", 1));
     JS_SetPropertyStr(ctx, global, "setTimeout",
-                       JS_NewCFunction(ctx, js_set_timeout, "setTimeout", 2));
+                       JS_NewCFunctionMagic(ctx, js_set_timer, "setTimeout", 2, JS_CFUNC_generic_magic, 0));
+    JS_SetPropertyStr(ctx, global, "setInterval",
+                       JS_NewCFunctionMagic(ctx, js_set_timer, "setInterval", 2, JS_CFUNC_generic_magic, 1));
     JS_SetPropertyStr(ctx, global, "clearTimeout",
                        JS_NewCFunction(ctx, js_clear_timeout, "clearTimeout", 1));
+    JS_SetPropertyStr(ctx, global, "clearInterval",
+                       JS_NewCFunction(ctx, js_clear_timeout, "clearInterval", 1));
     JS_SetPropertyStr(ctx, global, "requestAnimationFrame",
                        JS_NewCFunction(ctx, js_request_animation_frame, "requestAnimationFrame", 1));
     JSValue console = JS_NewObject(ctx);
@@ -1277,12 +1609,26 @@ static void collect_scripts(WebNode *node, WebNode **out, int *count) {
     for (WebNode *c = node->first_child; c; c = c->next)
         collect_scripts(c, out, count);
 }
+
+static bool fetch_script(const char *src, char *url, size_t cap, char **body, size_t *length) {
+    char error[192] = "";
+    if (!*src || !net_url_resolve(web_document_url(), src, url, cap) ||
+        (strncmp(url, "http://", 7) && strncmp(url, "https://", 8)))
+        return false;
+    return net_http_alloc(url, body, length, error, sizeof(error)) >= 0;
+}
+
 bool web_js_run(WebNode *root, char *error, size_t ecap) {
     if (error && ecap)
         error[0] = 0;
     if (!root)
         return false;
     web_js_release();
+    WebNode *scripts[32];
+    int count = 0;
+    collect_scripts(root, scripts, &count);
+    if (!count)
+        return true;
     js_runtime = JS_NewRuntime();
     if (!js_runtime) {
         if (error)
@@ -1292,7 +1638,16 @@ bool web_js_run(WebNode *root, char *error, size_t ecap) {
     /* Runtime allocations use the growable physical-memory-backed heap. */
     JS_SetMaxStackSize(js_runtime, 48 * 1024);
     JS_SetInterruptHandler(js_runtime, interrupt_js, 0);
-    js_context = JS_NewContext(js_runtime);
+    JS_NewClassID(&js_node_class);
+    JS_NewClassID(&js_style_class);
+    JS_NewClassID(&js_media_class);
+    static const JSClassDef node_class = {.class_name = "Node"};
+    static const JSClassDef style_class = {.class_name = "CSSStyleDeclaration"};
+    static const JSClassDef media_class = {.class_name = "MediaQueryList"};
+    if (!JS_NewClass(js_runtime, js_node_class, &node_class) &&
+        !JS_NewClass(js_runtime, js_style_class, &style_class) &&
+        !JS_NewClass(js_runtime, js_media_class, &media_class))
+        js_context = JS_NewContext(js_runtime);
     if (!js_context) {
         JS_FreeRuntime(js_runtime);
         js_runtime = 0;
@@ -1301,69 +1656,151 @@ bool web_js_run(WebNode *root, char *error, size_t ecap) {
         return false;
     }
     js_document = root;
+    js_ready_state = "loading";
+    JSValue node_prototype = JS_NewObject(js_context);
+    install_element(js_context, node_prototype);
+    JSValue element = JS_NewCFunction2(js_context, js_element_constructor, "Element", 0,
+                                       JS_CFUNC_constructor, 0);
+    JS_SetConstructor(js_context, element, node_prototype);
+    JSValue global = JS_GetGlobalObject(js_context);
+    JS_SetPropertyStr(js_context, global, "Element", element);
+    JS_FreeValue(js_context, global);
+    JS_SetClassProto(js_context, js_node_class, node_prototype);
+    JSValue style_prototype = JS_NewObject(js_context);
+    install_style(js_context, style_prototype);
+    JS_SetClassProto(js_context, js_style_class, style_prototype);
     js_deadline = frame_clock + 250;
     build_document(js_context, root);
     build_window(js_context, web_document_url());
-    WebNode *scripts[32];
-    int count = 0;
-    collect_scripts(root, scripts, &count);
     bool failed = false;
     for (int i = 0; i < count; i++) {
         const char *src = web_attr(scripts[i], "src");
-        if (src)
-            continue; /* external scripts are not fetched yet */
-        char source[16384];
-        source[0] = 0;
-        web_node_text(scripts[i], source, sizeof(source));
-        if (!source[0])
-            continue;
+        char url[512] = "", *body = 0, *converted = 0;
+        const char *source = "";
+        size_t length = 0;
+        if (src) {
+            if (!fetch_script(src, url, sizeof(url), &body, &length)) {
+                if (!failed && error) {
+                    append(error, "JavaScript could not be loaded: ", ecap);
+                    append(error, src, ecap);
+                }
+                failed = true;
+                if (body)
+                    heap_release(body);
+                continue;
+            }
+            if (body) {
+                converted = web_convert_legacy_text(body, &length);
+                source = converted ? converted : body;
+            }
+        } else {
+            const WebNode *child = scripts[i]->first_child;
+            if (child && child->type == WEB_TEXT && child->text) {
+                source = child->text;
+                length = strlen(source);
+            }
+        }
         js_deadline = frame_clock + 250;
-        JSValue value = JS_Eval(js_context, source, strlen(source), "<page>", JS_EVAL_TYPE_GLOBAL);
+        js_current_script = scripts[i];
+        JSValue value = JS_Eval(js_context, source, length, src ? url : "<page>", JS_EVAL_TYPE_GLOBAL);
+        js_current_script = 0;
+        web_free(converted);
+        if (body)
+            heap_release(body);
         if (JS_IsException(value)) {
             /* A failing script must not stop the page from being shown. */
+            JSValue exception = JS_GetException(js_context);
+            const char *text = JS_ToCString(js_context, exception);
             if (!failed) {
                 failed = true;
-                JSValue exception = JS_GetException(js_context);
-                const char *text = JS_ToCString(js_context, exception);
                 if (error) {
                     append(error, "JavaScript error: ", ecap);
                     append(error, text ? text : "unknown", ecap);
                 }
-                if (text)
-                    JS_FreeCString(js_context, text);
-                JS_FreeValue(js_context, exception);
             }
-        }
-        JS_FreeValue(js_context, value);
-        drain_jobs();
-    }
-    if (!failed) {
-        web_js_dispatch(root, "DOMContentLoaded", root);
-        drain_jobs();
-        web_js_dispatch(root, "load", root);
-        drain_jobs();
-    }
-    return !failed;
-}
-void web_js_pump(void) {
-    if (!js_context || !js_timers)
-        return;
-    bool ran = false;
-    for (WebTimer *timer = js_timers; timer; timer = timer->next) {
-        if (timer->cancelled || timer->due > frame_clock)
-            continue;
-        timer->cancelled = true;
-        js_deadline = frame_clock + 100;
-        JSValue result = JS_Call(js_context, timer->fn, JS_UNDEFINED, 0, 0);
-        if (JS_IsException(result)) {
-            JSValue exception = JS_GetException(js_context);
-            const char *text = JS_ToCString(js_context, exception);
-            if (text)
-                serial_write(text);
+            serial_write("Browser: JavaScript error in ");
+            serial_write(src ? url : "<page>");
+            serial_write(": ");
+            serial_write(text ? text : "unknown");
+            serial_write("\n");
             if (text)
                 JS_FreeCString(js_context, text);
             JS_FreeValue(js_context, exception);
         }
+        JS_FreeValue(js_context, value);
+        drain_jobs();
+    }
+    return !failed;
+}
+void web_js_finish_document(void) {
+    if (!js_context || strcmp(js_ready_state, "loading"))
+        return;
+    js_deadline = frame_clock + 250;
+    js_ready_state = "interactive";
+    web_js_dispatch(js_document, "DOMContentLoaded", js_document);
+    drain_jobs();
+    js_ready_state = "complete";
+    web_js_dispatch(js_document, "load", js_document);
+    drain_jobs();
+}
+bool web_js_timer_ready(void) {
+    if (js_resize_pending)
+        return true;
+    for (const WebTimer *timer = js_timers; timer; timer = timer->next)
+        if (!timer->cancelled && (int32_t)(frame_clock - timer->due) >= 0)
+            return true;
+    return false;
+}
+void web_js_viewport_changed(void) {
+    if (js_context)
+        js_resize_pending = true;
+}
+static void dispatch_resize(void) {
+    js_resize_pending = false;
+    js_deadline = frame_clock + 250;
+    JSValue pending = JS_NewArray(js_context);
+    uint32_t count = 0;
+    for (WebMediaListener *entry = js_media; entry; entry = entry->next) {
+        bool matches = JS_ToBool(js_context, js_media_matches(js_context, entry->query));
+        if (matches == entry->matches)
+            continue;
+        if (JS_SetPropertyUint32(js_context, pending, count, JS_DupValue(js_context, entry->query)) < 0 ||
+            JS_SetPropertyUint32(js_context, pending, count + 1, JS_DupValue(js_context, entry->callback)) < 0)
+            break;
+        entry->matches = matches;
+        count += 2;
+    }
+    for (uint32_t i = 0; i < count; i += 2) {
+        JSValue query = JS_GetPropertyUint32(js_context, pending, i);
+        JSValue callback = JS_GetPropertyUint32(js_context, pending, i + 1);
+        JSValue result = JS_Call(js_context, callback, query, 1, (JSValueConst *)&query);
+        if (JS_IsException(result))
+            log_callback_exception("Browser: JavaScript media query: ");
+        JS_FreeValue(js_context, result);
+        JS_FreeValue(js_context, callback);
+        JS_FreeValue(js_context, query);
+    }
+    JS_FreeValue(js_context, pending);
+    web_js_dispatch(js_document, "resize", js_document);
+}
+void web_js_pump(void) {
+    if (!js_context)
+        return;
+    bool ran = js_resize_pending;
+    if (js_resize_pending)
+        dispatch_resize();
+    int last_timer = js_timer_id;
+    for (WebTimer *timer = js_timers; timer; timer = timer->next) {
+        if (timer->cancelled || timer->id > last_timer || (int32_t)(frame_clock - timer->due) < 0)
+            continue;
+        if (timer->interval)
+            timer->due = frame_clock + timer->interval;
+        else
+            timer->cancelled = true;
+        js_deadline = frame_clock + 100;
+        JSValue result = JS_Call(js_context, timer->fn, JS_UNDEFINED, 0, 0);
+        if (JS_IsException(result))
+            log_callback_exception("Browser: JavaScript timer: ");
         JS_FreeValue(js_context, result);
         ran = true;
     }
@@ -1378,10 +1815,8 @@ void web_js_pump(void) {
         }
         link = &timer->next;
     }
-    if (ran) {
+    if (ran)
         drain_jobs();
-        js_document_dirty = true;
-    }
 }
 bool web_js_dirty(void) { return js_document_dirty; }
 void web_js_clear_dirty(void) { js_document_dirty = false; }
@@ -1437,6 +1872,14 @@ void web_js_release(void) {
         timer = next;
     }
     js_timers = 0;
+    js_resize_pending = false;
+    while (js_media) {
+        WebMediaListener *entry = js_media;
+        js_media = entry->next;
+        JS_FreeValue(js_context, entry->query);
+        JS_FreeValue(js_context, entry->callback);
+        web_free(entry);
+    }
     if (js_context) {
         JS_FreeContext(js_context);
         js_context = 0;

@@ -3,12 +3,13 @@
 #include <stddef.h>
 #include <stdint.h>
 extern "C" {
-#include "../kernel/memory.h"
+#include "../kernel/heap.h"
 }
 extern "C" void *malloc(size_t);
 extern "C" void free(void *);
 extern "C" void abort(void);
 extern "C" void serial_write(const char *);
+extern "C" void number(char *, uint32_t);
 extern "C" volatile uint32_t frame_clock;
 extern "C" uint32_t task_memory_enter(uint32_t pid);
 extern "C" void task_memory_leave(uint32_t previous);
@@ -16,15 +17,15 @@ namespace std {
 [[noreturn]] void __throw_bad_alloc();
 }
 
-static size_t renderer_bytes_left;
-static size_t renderer_memory_check;
 static uint32_t renderer_deadline;
+static uint32_t renderer_start;
+static const char *renderer_phase;
 static bool renderer_active;
 
-extern "C" uint32_t luna_cxx_render_begin(void) {
-    renderer_bytes_left = 96 * 1024 * 1024;
-    renderer_memory_check = renderer_bytes_left;
-    renderer_deadline = frame_clock + 1200;
+extern "C" uint32_t luna_cxx_render_begin(uint32_t timeout, const char *phase) {
+    renderer_start = frame_clock;
+    renderer_deadline = renderer_start + timeout;
+    renderer_phase = phase;
     renderer_active = true;
     // litehtml interns names in static tables that outlive the browser task.
     return task_memory_enter(1);
@@ -32,32 +33,31 @@ extern "C" uint32_t luna_cxx_render_begin(void) {
 extern "C" void luna_cxx_render_end(uint32_t previous) {
     renderer_active = false;
     task_memory_leave(previous);
+    uint32_t elapsed = frame_clock - renderer_start;
+    if (elapsed >= 1000) {
+        char ms[16];
+        number(ms, elapsed);
+        serial_write("Browser: litehtml ");
+        serial_write(renderer_phase);
+        serial_write(" took ");
+        serial_write(ms);
+        serial_write(" ms\n");
+    }
 }
 
 static void *allocate(size_t n) {
-    if (renderer_active) {
-        if (n > renderer_bytes_left) {
-            serial_write("Browser: litehtml allocation budget exceeded\n");
-            std::__throw_bad_alloc();
-        }
-        if ((int32_t)(frame_clock - renderer_deadline) >= 0) {
-            serial_write("Browser: litehtml render deadline exceeded\n");
-            std::__throw_bad_alloc();
-        }
-        renderer_bytes_left -= n;
-        if (renderer_bytes_left <= renderer_memory_check) {
-            MemoryStats memory;
-            memory_stats(&memory);
-            if (memory.free_bytes < n + 1024 * 1024) {
-                serial_write("Browser: litehtml yielded to the low-memory reserve\n");
-                std::__throw_bad_alloc();
-            }
-            renderer_memory_check = renderer_bytes_left - (renderer_bytes_left > 65536 ? 65536 : renderer_bytes_left);
-        }
-    }
-    void *p = malloc(n ? n : 1);
-    if (!p)
+    if (renderer_active && (int32_t)(frame_clock - renderer_deadline) >= 0) {
+        serial_write("Browser: litehtml render deadline exceeded\n");
         std::__throw_bad_alloc();
+    }
+    // The heap checks actual physical pages when it needs a new arena.
+    // Reused or freed blocks do not count against a cumulative quota.
+    void *p = renderer_active ? heap_allocate_reserving(n, 1024 * 1024) : malloc(n ? n : 1);
+    if (!p) {
+        if (renderer_active)
+            serial_write("Browser: litehtml heap growth failed with system reserve\n");
+        std::__throw_bad_alloc();
+    }
     return p;
 }
 void *operator new(size_t n) { return allocate(n); }

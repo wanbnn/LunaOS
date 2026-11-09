@@ -31,11 +31,11 @@ capturas da primeira sessão registram a sessão real e estão em
 | Envio de formulário | **Pesquisa Google** e **Estou com sorte** não iniciaram navegação. | O teste de clique do litehtml devolve links com `href`. O caminho atual não aciona botões de envio nem serializa os campos do formulário. [Pesquisa Google](../build/browser-usability/10-google-botao-pesquisa.png) · [Estou com sorte](../build/browser-usability/11-google-estou-com-sorte.png) · [Detecção de cliques](../ui/litehtml_bridge.cpp#L350) | pendente |
 | Teclado virtual do Google | O clique no ícone de teclado não abriu o controle. | O clique não chega a um controle interativo pelo caminho atual. A execução de scripts externos também está ausente. A dependência específica do teclado virtual não foi isolada. [Captura](../build/browser-usability/12-google-teclado-virtual.png) · [Cliques](../ui/litehtml_bridge.cpp#L350) · [Scripts](../ui/web_js.c#L1311) | pendente |
 | Busca pela barra de endereço | Pressionar Enter com `python tutorial` gerou **Invalid host**. | A barra trata o texto como destino de navegação. Na ausência de um esquema, acrescenta `https://` e pode tentar `http://` em seguida. Não há encaminhamento de termos a um buscador. [Captura](../build/browser-usability/14-google-texto-enter.png) · [Carregamento](../ui/desktop.c#L256) | pendente |
-| Scripts do Python.org | O site exibiu seu aviso de que os scripts interativos não rodaram. | O Luna ignora `<script src>`. Em teste anterior da mesma build, o documento também registrou `TypeError: not a function` ao executar scripts da página. O aviso é conteúdo do site. [Captura](../build/browser-usability/01-python-inicio.png) · [Execução de scripts](../ui/web_js.c#L1311) | pendente |
-| Menu da documentação | O painel lateral sobrepôs o conteúdo e permaneceu aberto após clicar no ícone do menu. A caixa **Quick search** também apareceu larga e cortada à direita. | O menu usa um controle de formulário e lógica em [menu.js](https://docs.python.org/3/_static/menu.js). O Luna não aciona esse controle nem baixa o script. A causa exata do tamanho da caixa de busca não foi isolada. [Antes](../build/browser-usability/19-docs-antes-menu.png) · [Depois](../build/browser-usability/20-docs-depois-menu.png) | pendente |
+| Scripts do Python.org | No primeiro teste, a página exibiu a faixa vermelha `#nojs`. | A página atual baixa scripts clássicos e inicializa Modernizr, jQuery e Masonry. A faixa desapareceu no reteste por HTTPS. A compatibilidade com APIs usadas por outros scripts segue parcial. | **Faixa corrigida** |
+| Menu da documentação | O painel lateral sobrepôs o conteúdo e permaneceu aberto após clicar no ícone do menu. A caixa **Quick search** também apareceu larga e cortada à direita. | O menu usa um controle de formulário e lógica em [menu.js](https://docs.python.org/3/_static/menu.js). O Luna passou a baixar o script. A ativação do controle pelo clique ainda está pendente. A causa exata do tamanho da caixa de busca não foi isolada. [Antes](../build/browser-usability/19-docs-antes-menu.png) · [Depois](../build/browser-usability/20-docs-depois-menu.png) | pendente |
 | Âncoras na mesma página | Clicar em **Menu** no Python.org mudou o endereço para `#site-map`, recarregou a página e deixou a rolagem no topo. | O navegador resolve o fragmento como endereço e chama o carregamento completo, sem saltar para o elemento de destino. [Captura](../build/browser-usability/02-python-menu.png) · [Navegação por links](../ui/desktop.c#L481) | pendente |
-| Consistência do layout após recarga | Na recarga provocada por **Menu**, o layout do Python.org passou para o renderizador legado. O conteúdo continuou disponível, com a navegação visualmente diferente. | Duas causas, ambas medidas nesta rodada: o log registrava `Browser: litehtml render deadline exceeded` e, com 64 MiB, `Browser: litehtml yielded to the low-memory reserve`. Nos dois casos o navegador caía no motor legado e mantinha essa queda para o resto da sessão. Ver [Memória do renderizador](#memória-do-renderizador). [Antes](../build/browser-usability/01-python-inicio.png) · [Depois](../build/browser-usability/02-python-menu.png) · [Log](../build/browser-usability/transcript.log) · [Prazo do renderizador](../lib/cxx_runtime.cpp#L43) | pendente |
-| `position: relative` em linha | O texto do botão **Donate** do Python.org some: o fundo do botão fica no lugar e o texto é desenhado 152 px abaixo, fora da vista. | O deslocamento é aplicado quatro vezes sobre a posição do elemento, uma por passada de layout, e a posição da caixa em linha não é refeita entre as passadas. O fundo e o texto saem de posições diferentes. | pendente |
+| Consistência do layout após recarga | Na recarga provocada por **Menu**, o layout do Python.org passou para o renderizador legado. O conteúdo continuou disponível, com a navegação visualmente diferente. | Duas causas, ambas medidas nesta rodada: o log registrava `Browser: litehtml render deadline exceeded` e, com 64 MiB, `Browser: litehtml yielded to the low-memory reserve`. Nos dois casos o navegador caía no motor legado e mantinha essa queda para o resto da sessão. Ver [Memória do renderizador](#memória-do-renderizador). [Antes](../build/browser-usability/01-python-inicio.png) · [Depois](../build/browser-usability/02-python-menu.png) · [Log](../build/browser-usability/transcript.log) · [Prazo do renderizador](../lib/cxx_runtime.cpp#L43) | litehtml preservado em duas cargas com 4 GiB |
+| `position: relative` em linha | No primeiro teste, o texto do botão **Donate** aparecia abaixo do fundo. | O deslocamento agora é aplicado uma vez ao fundo e ao texto. O teste repete o layout e verifica que ambos se movem 38 px. | **corrigido** |
 | Documento grande | A busca avançada do Google foi recusada com **Chunked document exceeds the destination size limit**, e a página não abriu. | O destino da resposta tinha 128 KiB fixos, e o buffer de recepção recusava a resposta acima de 520 KiB. Ver [Documento grande](#documento-grande). | **corrigido** |
 | Endereço com `&` no shell | `browse https://www.google.com/advanced_search?hl=pt-BR&autohuser=0` respondeu **lunaSH: unsupported operator**. | O shell tratava o `&` como operador e recusava a linha inteira; o `?` já era literal. Um `&` sozinho passou a fazer parte da palavra, e só o `&&` continua sendo o operador que junta dois comandos. | **corrigido** |
 | Roda do mouse | Dois acionamentos da roda não alteraram a posição da página no QEMU. As setas funcionaram. | A roda não tinha caminho nenhum: o quarto valor do pacote VMMouse era descartado e não existia evento de rolagem na fila da GUI. [Após a roda](../build/browser-usability/04-python-roda.png) · [Após as setas](../build/browser-usability/05-python-setas.png) · [Entrada do mouse](../drivers/input.c#L214) | **corrigido** |
@@ -164,8 +164,8 @@ delas é um defeito do renderizador.
 
 | Causa | Sintoma | Situação |
 | --- | --- | --- |
-| O site não roda JavaScript | O aviso vermelho `#nojs`, a segunda linha de menu e o conteúdo do herói são a versão de fallback do próprio site. | Pendente: exige executar `<script src>` e a pilha jQuery. |
-| Ícones em fonte私ativa | O ícone de busca e o glifo `≡` do menu vêm da fonte do site; nenhuma das nossas os tem. | **Corrigido**: o glifo ausente virou a caixa vazia de um navegador, no lugar do `?`. |
+| Execução de JavaScript | A faixa vermelha `#nojs` fazia parte da versão exibida no primeiro teste. | **Corrigido** para a faixa. O Modernizr trocou a classe `no-js` por `js` e jQuery e Masonry foram carregados. |
+| Ícones em fonte privativa | O ícone de busca e o glifo `≡` do menu vêm da fonte do site; nenhuma das nossas os tem. | **Corrigido**: o glifo ausente virou a caixa vazia de um navegador, no lugar do `?`. |
 | Largura da janela | A janela do Luna tem cerca de 775 px de conteúdo; o CSS do site troca o campo de busca para 14 em acima de 940 px. | Comportamento correto, não defeito. |
 | `float` no cabeçalho | O botão **Donate** aparece abaixo do painel de busca, e não ao lado dele. | **Corrigido**: a largura do contêiner não somava o float que divide a linha com o conteúdo. |
 
@@ -181,7 +181,7 @@ Medido com uma página de prova servida pelo host e carregada pelo Luna:
 | Cascata entre folha base e regra de mídia | Funciona: a regra de `@media` vence a base. |
 | `position: absolute` | Funciona. |
 | `::before` com `content` | Funciona. |
-| `display: grid` | **Não funciona**: os itens ficam empilhados. |
+| `display: grid` | O litehtml desenha colunas com comprimentos, frações, `repeat()`, `minmax()`, espaçamento e itens que ocupam várias colunas. O teste verifica também `auto-fit` ao redimensionar. |
 
 ### `float`: a largura do contêiner
 
@@ -207,10 +207,9 @@ O contêiner precisa caber o conteúdo e o float, que dividem a mesma linha, e
 não o maior dos dois. A correção está em
 [tools/litehtml-float-width.patch](../tools/litehtml-float-width.patch): a
 caixa da linha passa a guardar a largura do float que divide a linha com ela.
-Como a correção muda um cabeçalho do litehtml, os dois arquivos que o usam são
-compilados fora da árvore de terceiros, com o patch aplicado pelo `Makefile`.
-O teste está em [tests/litehtml_float_test.cpp](../tests/litehtml_float_test.cpp)
-e roda no CI.
+O Makefile aplica os patches em uma cópia do litehtml antes de compilar. O
+teste está em [tests/litehtml_float_test.cpp](../tests/litehtml_float_test.cpp)
+e roda com `make test-litehtml` no CI.
 
 ### Memória do renderizador
 
@@ -234,3 +233,30 @@ O limite é o tamanho do DOM, não o tamanho do arquivo: a busca avançada do
 Google, com 284 KiB, cabe a 64 MiB e sai com o CSS inteiro; o Python.org, com
 52 KiB de HTML e 350 KiB de folha de estilo, não cabe. São os milhares de
 elementos do cabeçalho e do mapa do site que pesam, não o texto.
+
+
+### Reteste com scripts externos e 4 GiB
+
+O teste HTTPS local abriu uma URL com `?` e `&` via `browse`. A página
+executou scripts clássicos embutidos e externos em ordem, resolveu
+um caminho relativo e continuou depois de um 404. O último script alterou
+o DOM, e um temporizador confirmou a alteração depois de
+`DOMContentLoaded`.
+
+O litehtml deixou de contabilizar 96 MiB de alocações acumuladas por
+operação. Ele reaproveita as arenas e cresce conforme as páginas físicas
+livres, com uma reserva de 1 MiB para o sistema. No teste de heap,
+uma alocação de 100 MiB passou e o descarte devolveu as páginas.
+O prazo de CPU do layout passou a considerar o número de nós.
+
+A IMG e a ISO chegaram ao desktop em QEMU UEFI x64 com 4 GiB. Nesse
+perfil, o kernel i386 sem PAE identificou 3.139.376 KiB endereçáveis,
+com aproximadamente 2.995.600 KiB de páginas livres no desktop inicial.
+Duas cargas por HTTPS do Python.org mantiveram o litehtml ativo. O
+layout levou cerca de 1,1 a 1,5 s no reteste final emulado. A faixa
+`#nojs` desapareceu e o rótulo Donate ficou dentro do fundo amarelo.
+[Captura](../dist/browser-python-uefi-4g.png)
+
+Com 64 MiB, a cópia local da mesma página ainda usou o renderizador
+legado. O log indicou que a próxima arena ultrapassaria a reserva do
+sistema. Depois da queda, havia 1.492 KiB de páginas físicas livres.

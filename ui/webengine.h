@@ -24,6 +24,7 @@ typedef struct WebFragment {
 
 /* dom */
 bool web_parse(const char *html, size_t len, WebNode **root, char *error, size_t ecap);
+WebNode *web_parse_fragment(const char *tag, const char *html, size_t len);
 void web_free_tree(WebNode *node);
 WebNode *web_node_new(unsigned char type);
 void web_node_append(WebNode *parent, WebNode *child);
@@ -41,6 +42,7 @@ const char *web_attr(const WebNode *node, const char *name);
 void web_set_attr(WebNode *node, const char *name, const char *value);
 bool web_attr_has(const WebNode *node, const char *name);
 void web_node_text(WebNode *node, char *out, size_t cap);
+char *web_convert_legacy_text(const char *text, size_t *length);
 WebNode *web_find_by_id(WebNode *root, const char *id);
 WebNode *web_find_first(WebNode *root, const char *tag);
 bool web_is_void_tag(const char *tag);
@@ -52,6 +54,7 @@ bool css_media_matches(const char *query);
 bool css_parse_sheet(const char *text, WebRule **rules, int *count);
 void css_free_sheet(WebRule *rules, int count);
 void css_apply(WebNode *root, WebRule *rules, int count);
+const char *css_pseudo_property(WebRule *, int count, WebNode *, const char *pseudo, const char *name);
 void css_set_property(WebNode *node, const char *name, const char *value);
 void css_get_property(WebNode *node, const char *name, char *out, size_t cap);
 void css_remove_property(WebNode *node, const char *name);
@@ -68,6 +71,9 @@ void web_free_fragments(void);
 
 /* script engine */
 bool web_js_run(WebNode *root, char *error, size_t ecap);
+void web_js_finish_document(void);
+bool web_js_timer_ready(void);
+void web_js_viewport_changed(void);
 void web_js_dispatch(WebNode *target, const char *type, WebNode *root);
 void web_js_pump(void);
 bool web_js_dirty(void);
@@ -91,7 +97,9 @@ void web_set_viewport(int width, int height);
 int web_scroll_offset(void);
 bool web_click(int x, int y, char *href, size_t cap);
 bool web_has_document(void);
+bool web_document_ready(void);
 const char *web_error_text(void);
 const char *web_document_url(void);
+const char *web_pseudo_property(WebNode *, const char *pseudo, const char *name);
 
 #endif

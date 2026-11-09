@@ -1,0 +1,396 @@
+diff --git a/include/litehtml/element.h b/include/litehtml/element.h
+index da83e75..3ff96e4 100644
+--- a/include/litehtml/element.h
++++ b/include/litehtml/element.h
+@@ -215,6 +215,7 @@ namespace litehtml
+ 	{
+ 		if (css().get_display() == display_block ||
+ 			css().get_display() == display_flex ||
++			css().get_display() == display_grid ||
+ 			css().get_display() == display_table ||
+ 			css().get_display() == display_list_item)
+ 		{
+diff --git a/include/litehtml/html_tag.h b/include/litehtml/html_tag.h
+index 7f3938f..8a61467 100644
+--- a/include/litehtml/html_tag.h
++++ b/include/litehtml/html_tag.h
+@@ -71,6 +71,7 @@ namespace litehtml
+ 
+ 		template<class Type>
+ 		const Type&			get_property(string_id name, bool inherited, const Type& default_value, uint_ptr css_properties_member_offset) const;
++		const property_value& specified_property(string_id name) const { return m_style.get_property(name); }
+ 		bool				get_custom_property(string_id name, css_token_vector& result) const;
+ 
+ 		elements_list&	children();
+diff --git a/include/litehtml/render_grid.h b/include/litehtml/render_grid.h
+new file mode 100644
+index 0000000..25ef201
+--- /dev/null
++++ b/include/litehtml/render_grid.h
+@@ -0,0 +1,250 @@
++#ifndef LITEHTML_RENDER_GRID_H
++#define LITEHTML_RENDER_GRID_H
++
++#include "document.h"
++#include "html_tag.h"
++#include "render_flex.h"
++
++namespace litehtml
++{
++    // Row auto-placement for explicit columns, the layout used by the
++    // sponsorship cards and responsive lists.
++    class render_item_grid final : public render_item_flex
++    {
++        static constexpr int max_columns = 128;
++        struct track
++        {
++            pixel_t minimum = 0;
++            float fraction = 0;
++        };
++
++        static const property_value& property(const element& el, string_id name)
++        {
++            static const property_value empty;
++            const auto* tag = dynamic_cast<const html_tag*>(&el);
++            return tag ? tag->specified_property(name) : empty;
++        }
++
++        pixel_t pixels(css_length length, pixel_t width) const
++        {
++            src_el()->get_document()->cvt_units(length, css().get_font_metrics(), width);
++            return length.calc_percent(width);
++        }
++
++        pixel_t gap(string_id name, pixel_t width) const
++        {
++            const auto& value = property(*src_el(), name);
++            return value.is<css_length>() ? pixels(value.get<css_length>(), width) : 0;
++        }
++
++        bool parse_track(const css_token& token, pixel_t width, track& out) const
++        {
++            if (token.type == DIMENSION && lowcase(token.unit) == "fr" && token.n.number >= 0)
++            {
++                out = {0, token.n.number};
++                return true;
++            }
++            if (token.ident() == "auto")
++            {
++                out = {0, 1};
++                return true;
++            }
++            if (token.type == CV_FUNCTION && lowcase(token.name) == "minmax" &&
++                token.value.size() == 3 && token.value[1].type == COMMA)
++            {
++                track minimum, maximum;
++                if (!parse_track(token.value.front(), width, minimum) ||
++                    !parse_track(token.value.back(), width, maximum))
++                    return false;
++                out = {std::max(minimum.minimum, maximum.minimum), maximum.fraction};
++                return true;
++            }
++            css_length length;
++            if (!length.from_token(token, f_length_percentage | f_positive))
++                return false;
++            out = {pixels(length, width), 0};
++            return true;
++        }
++
++        vector<track> columns(pixel_t width, pixel_t spacing, int items) const
++        {
++            const auto& property_value = property(*src_el(), _id("grid-template-columns"));
++            if (!property_value.is<css_token_vector>())
++                return {{0, 1}};
++            vector<track> result;
++            for (const auto& token : property_value.get<css_token_vector>())
++            {
++                track value;
++                if (token.type == CV_FUNCTION && lowcase(token.name) == "repeat" &&
++                    token.value.size() >= 3 && token.value[1].type == COMMA)
++                {
++                    const auto& count = token.value.front();
++                    const auto keyword = count.ident();
++                    if ((keyword == "auto-fit" || keyword == "auto-fill") && token.value.size() == 3 &&
++                        parse_track(token.value.back(), width, value))
++                    {
++                        const auto available = std::max(0.0f, width + spacing);
++                        const auto step = std::max(1.0f, value.minimum + spacing);
++                        int n = static_cast<int>(std::min(float(max_columns), available / step));
++                        if (keyword == "auto-fit")
++                            n = std::min(n, items);
++                        result.insert(result.end(), std::max(1, n), value);
++                    }
++                    else if (count.type == NUMBER && count.n.number_type == css_number_integer &&
++                             count.n.number >= 1 && count.n.number <= max_columns)
++                    {
++                        vector<track> pattern;
++                        for (size_t i = 2; i < token.value.size(); ++i)
++                        {
++                            if (!parse_track(token.value[i], width, value))
++                                return {{0, 1}};
++                            pattern.push_back(value);
++                        }
++                        const int repeat = static_cast<int>(count.n.number);
++                        if (pattern.size() * repeat + result.size() > max_columns)
++                            return {{0, 1}};
++                        for (int i = 0; i < repeat; ++i)
++                            result.insert(result.end(), pattern.begin(), pattern.end());
++                    }
++                    else
++                        return {{0, 1}};
++                }
++                else if (parse_track(token, width, value))
++                    result.push_back(value);
++                else
++                    return {{0, 1}};
++                if (result.size() > max_columns)
++                    return {{0, 1}};
++            }
++            return result.empty() ? vector<track>{{0, 1}} : result;
++        }
++
++        static int grid_line(const css_token& token, int columns)
++        {
++            if (token.type != NUMBER || token.n.number_type != css_number_integer ||
++                token.n.number < -columns - 1 || token.n.number > columns + 1 ||
++                token.n.number == 0)
++                return -1;
++            const int line = static_cast<int>(token.n.number);
++            return line > 0 ? line - 1 : columns + 1 + line;
++        }
++
++        rendered_width _render_content(pixel_t, pixel_t, bool second_pass,
++                                       const containing_block_context& size,
++                                       formatting_context* context) override
++        {
++            const auto row_gap = gap(_id("row-gap"), size.render_width);
++            const auto column_gap = gap(_id("column-gap"), size.render_width);
++            int items = 0;
++            for (const auto& child : children())
++            {
++                const auto position = child->css().get_position();
++                if (position != element_position_absolute && position != element_position_fixed)
++                    ++items;
++            }
++            auto tracks = columns(size.render_width, column_gap, items);
++            const int count = static_cast<int>(tracks.size());
++            pixel_t minimum = (count - 1) * column_gap;
++            for (const auto& track : tracks)
++                minimum += track.minimum;
++
++            // Freeze tracks whose minimum already exceeds their share.
++            pixel_t space = std::max(0.0f, size.render_width - (count - 1) * column_gap);
++            float fractions = 0;
++            for (const auto& track : tracks)
++            {
++                fractions += track.fraction;
++                if (!track.fraction)
++                    space -= track.minimum;
++            }
++            for (bool changed = true; changed && fractions > 0;)
++            {
++                changed = false;
++                for (auto& track : tracks)
++                {
++                    if (track.fraction && track.minimum > space * track.fraction / fractions)
++                    {
++                        space -= track.minimum;
++                        fractions -= track.fraction;
++                        track.fraction = 0;
++                        changed = true;
++                    }
++                }
++            }
++            vector<pixel_t> edges(1, 0);
++            for (const auto& track : tracks)
++            {
++                pixel_t width = track.fraction ? space * track.fraction / fractions : track.minimum;
++                edges.push_back(edges.back() + width + column_gap);
++            }
++
++            int column = 0;
++            pixel_t top = 0, row_height = 0;
++            vector<render_item*> row;
++            auto finish_row = [&]()
++            {
++                for (auto* child : row)
++                {
++                    if (child->css().get_height().is_predefined() && !child->src_el()->is_replaced())
++                        child->pos().height += row_height - child->height();
++                }
++                row.clear();
++                top += row_height + row_gap;
++                row_height = 0;
++                column = 0;
++            };
++            for (const auto& child : children())
++            {
++                const auto position = child->css().get_position();
++                if (position == element_position_absolute || position == element_position_fixed)
++                {
++                    if (!second_pass)
++                        child->render(0, top, size, context);
++                    continue;
++                }
++                int start = -1, span = 1;
++                const auto& placement = property(*child->src_el(), _id("grid-column"));
++                if (placement.is<css_token_vector>())
++                {
++                    const auto& tokens = placement.get<css_token_vector>();
++                    if (!tokens.empty())
++                        start = grid_line(tokens.front(), count);
++                    if (start >= count)
++                        start = -1;
++                    if (tokens.size() == 3 && tokens[1].ch == '/' && start >= 0)
++                        span = std::max(1, grid_line(tokens.back(), count) - start);
++                    const size_t span_at = tokens.size() == 4 && tokens[1].ch == '/' ? 2 : 0;
++                    if (tokens.size() == span_at + 2 && tokens[span_at].ident() == "span")
++                    {
++                        int end = grid_line(tokens.back(), count);
++                        if (end >= 0)
++                            span = std::min(count, end + 1);
++                    }
++                }
++                if ((start >= 0 && start < column) || (start < 0 && column + span > count))
++                    finish_row();
++                if (start >= 0)
++                    column = start;
++                const int end = std::min(count, column + span);
++                const auto width = edges[end] - edges[column] - column_gap;
++                child->render(edges[column], top, size.new_width(width), context);
++                row_height = std::max(row_height, child->height());
++                row.push_back(child.get());
++                column = end;
++            }
++            if (!row.empty())
++                finish_row();
++            m_pos.height = items ? top - row_gap : 0;
++            return {edges.back() - column_gap, minimum};
++        }
++
++    public:
++        using render_item_flex::render_item_flex;
++        std::shared_ptr<render_item> clone() override
++        {
++            return std::make_shared<render_item_grid>(src_el());
++        }
++    };
++}
++
++#endif
+diff --git a/include/litehtml/types.h b/include/litehtml/types.h
+index d046eac..936ce33 100644
+--- a/include/litehtml/types.h
++++ b/include/litehtml/types.h
+@@ -422,7 +422,7 @@ namespace litehtml
+ 		}
+ 	};
+ 
+-#define  style_display_strings		"none;block;inline;inline-block;inline-table;list-item;table;table-caption;table-cell;table-column;table-column-group;table-footer-group;table-header-group;table-row;table-row-group;inline-text;flex;inline-flex"
++#define  style_display_strings		"none;block;inline;inline-block;inline-table;list-item;table;table-caption;table-cell;table-column;table-column-group;table-footer-group;table-header-group;table-row;table-row-group;inline-text;flex;inline-flex;grid"
+ 
+ 	enum style_display
+ 	{
+@@ -444,6 +444,7 @@ namespace litehtml
+ 		display_inline_text,
+ 		display_flex,
+ 		display_inline_flex,
++		display_grid,
+ 	};
+ 
+ #define  font_size_strings		"xx-small;x-small;small;medium;large;x-large;xx-large;smaller;larger"
+diff --git a/src/css_properties.cpp b/src/css_properties.cpp
+index 59ef0f7..8e8c158 100644
+--- a/src/css_properties.cpp
++++ b/src/css_properties.cpp
+@@ -511,6 +511,16 @@ void litehtml::css_properties::compute_flex(const html_tag* el, const document::
+ 	}
+ 	m_flex_align_self = (flex_align_items) el->get_property<int>(_align_self_, false, flex_align_items_auto, offset(m_flex_align_self));
+ 	auto parent = el->parent();
++	if (parent && parent->css().m_display == display_grid)
++	{
++		m_float = float_none;
++		if (m_display == display_inline || m_display == display_inline_block)
++			m_display = display_block;
++		else if (m_display == display_inline_table)
++			m_display = display_table;
++		else if (m_display == display_inline_flex)
++			m_display = display_flex;
++	}
+ 	if (parent && (parent->css().m_display == display_flex || parent->css().m_display == display_inline_flex))
+ 	{
+ 		m_flex_grow = el->get_property<float>(_flex_grow_, false, 0, offset(m_flex_grow));
+diff --git a/src/element.cpp b/src/element.cpp
+index ba339ea..473b453 100644
+--- a/src/element.cpp
++++ b/src/element.cpp
+@@ -3,6 +3,7 @@
+ #include "document.h"
+ #include "render_item.h"
+ #include "render_flex.h"
++#include "render_grid.h"
+ #include "render_inline.h"
+ #include "render_table.h"
+ #include "el_before_after.h"
+@@ -158,6 +159,9 @@ std::shared_ptr<render_item> element::create_render_item(const std::shared_ptr<r
+ 	} else if(css().get_display() == display_flex || css().get_display() == display_inline_flex)
+ 	{
+ 		ret = std::make_shared<render_item_flex>(shared_from_this());
++	} else if(css().get_display() == display_grid)
++	{
++		ret = std::make_shared<render_item_grid>(shared_from_this());
+ 	}
+ 	if(ret)
+ 	{
+@@ -277,7 +281,8 @@ bool element::is_block_formatting_context() const
+ 	if(m_css.get_display() == display_block)
+ 	{
+ 		auto par = parent();
+-		if(par && (par->css().get_display() == display_inline_flex || par->css().get_display() == display_flex))
++		if(par && (par->css().get_display() == display_inline_flex || par->css().get_display() == display_flex ||
++				   par->css().get_display() == display_grid))
+ 		{
+ 			return true;
+ 		}
+@@ -286,6 +291,7 @@ bool element::is_block_formatting_context() const
+ 		   m_css.get_display() == display_table_cell ||
+ 		   m_css.get_display() == display_inline_flex ||
+ 		   m_css.get_display() == display_flex ||
++		   m_css.get_display() == display_grid ||
+ 		   m_css.get_display() == display_table_caption ||
+ 		   is_root() ||
+ 		   m_css.get_float() != float_none ||
+diff --git a/src/style.cpp b/src/style.cpp
+index f93745f..eb7a624 100644
+--- a/src/style.cpp
++++ b/src/style.cpp
+@@ -527,6 +527,29 @@ void style::add_property(string_id name, const css_token_vector& value, const st
+ 
+ 	// https://drafts.csswg.org/css-variables-2/#defining-variables
+ 	default:
++		if (_s(name) == "grid-template-columns" || _s(name) == "grid-column")
++		{
++			add_parsed_property(name, property_value(value, important));
++			break;
++		}
++		if (_s(name) == "gap")
++		{
++			css_length row, column;
++			const int flags = f_length_percentage | f_positive;
++			if (value.size() <= 2 &&
++			    row.from_token(value.front(), flags, "normal") &&
++			    column.from_token(value.back(), flags, "normal"))
++			{
++				add_parsed_property(_id("row-gap"), property_value(row, important));
++				add_parsed_property(_id("column-gap"), property_value(column, important));
++			}
++			break;
++		}
++		if (_s(name) == "row-gap" || _s(name) == "column-gap")
++		{
++			add_length_property(name, val, "normal", f_length_percentage | f_positive, important);
++			break;
++		}
+ 		if (_s(name).substr(0, 2) == "--" && _s(name).size() >= 3 &&
+ 			(value.empty() || is_declaration_value(value)))
+ 			add_parsed_property(name, property_value(value, important));

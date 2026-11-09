@@ -105,4 +105,17 @@ bool web_parse_lexbor(const char *html, size_t len, WebNode **root,
     return *root != NULL;
 }
 
+WebNode *web_parse_fragment(const char *tag, const char *html, size_t len) {
+    lxb_html_document_t *document = lxb_html_document_create();
+    if (!document)
+        return NULL;
+    lxb_html_element_t *context = lxb_html_document_create_element(
+        document, (const lxb_char_t *)tag, strlen(tag), NULL);
+    lxb_dom_node_t *node = context ? lxb_html_document_parse_fragment(
+        document, lxb_dom_interface_element(context), (const lxb_char_t *)html, len) : NULL;
+    WebNode *fragment = node ? convert_node(node, 0) : NULL;
+    lxb_html_document_destroy(document);
+    return fragment;
+}
+
 #endif /* LUNA_USE_LEXBOR */

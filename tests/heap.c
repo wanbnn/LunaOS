@@ -17,6 +17,9 @@ int memory_allocate(uint32_t n,uint32_t align,uint32_t mask,uint32_t boundary,bo
     return rc;
 }
 int memory_release(const PmmAllocation *p) { return pmm_release(&pool,p); }
+void memory_stats(MemoryStats *out) {
+    *out = (MemoryStats){.free_bytes = (uint64_t)pool.free_pages * PMM_PAGE};
+}
 int main(void) {
     size_t length=128*1024*1024;
     void *region=mmap(0,length,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_32BIT,-1,0);
@@ -24,6 +27,10 @@ int main(void) {
     PmmRange map[]={{(uintptr_t)region,length,1,1}};
     size_t bytes=pmm_metadata_bytes(map,1);void *meta=calloc(1,bytes);assert(meta);
     assert(!pmm_init(&pool,map,1,0,0,meta,bytes));uint32_t before=pool.free_pages;
+    size_t free_bytes = (size_t)before * PMM_PAGE;
+    assert(!heap_allocate_reserving(free_bytes - PMM_PAGE, PMM_PAGE));
+    void *renderer = heap_allocate_reserving(100u * 1024 * 1024, PMM_PAGE);
+    assert(renderer && !heap_release(renderer) && pool.free_pages == before);
     void *large=heap_allocate(12*1024*1024);assert(large && heap_usable_size(large)>=12*1024*1024);
     memset(large,0xa5,12*1024*1024);
     void *items[1000];

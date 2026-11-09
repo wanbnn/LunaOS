@@ -19,10 +19,20 @@ ainda depende dos limites de recursos do navegador e de sua implementação de
 JavaScript e formulários. Gradientes e carregamento de novos recursos por
 `@import` ainda não estão implementados.
 
-O navegador mostra o documento enquanto baixa os recursos externos. Folhas de
-estilo grandes são processadas em grupos de regras completas, e o layout de
-elementos flutuantes tem um limite de tentativas por caixa. Se o litehtml atingir
-o limite de recursos, o Luna mantém o documento aberto com o renderizador legado.
+O primeiro layout usa as folhas externas já carregadas. Folhas grandes são
+processadas em grupos de regras completas. O QuickJS executa scripts
+clássicos embutidos e externos em ordem de documento. Os temporizadores
+rodam na tarefa do navegador e as alterações de DOM pedem novo layout.
+
+O litehtml pode usar a memória física endereçável que o kernel tiver
+disponível. Ao expandir uma arena, o alocador preserva 1 MiB de páginas
+livres para o sistema. O prazo de CPU para criar e recalcular o layout
+cresce com o número de nós. Quando o renderizador falha, o Luna mantém
+o documento aberto com o renderizador legado.
+
+`make test-litehtml` usa os mesmos patches que a imagem do sistema.
+Os patches cobrem a largura e o avanço de elementos flutuantes e as
+colunas de Grid usadas nas páginas de patrocínio do Python.org.
 
 O kernel liga a biblioteca litehtml, seu Gumbo e o runtime estático do G++.
 Os submódulos preservam as licenças do litehtml (BSD-3-Clause) e do Gumbo

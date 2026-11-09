@@ -7,6 +7,8 @@
  * PID ownership is not a user-mode heap mapping/security boundary. */
 typedef struct { uint64_t committed_bytes, live_bytes; uint32_t allocations, arenas; } HeapStats;
 void *heap_allocate(size_t);
+/* Reuse existing arenas, but leave this much physical RAM free when growing. */
+void *heap_allocate_reserving(size_t bytes, size_t reserve);
 void *heap_allocate_owned(size_t,uint32_t pid);
 void *heap_resize(void *,size_t);
 int heap_release(void *);

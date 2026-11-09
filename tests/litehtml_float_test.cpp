@@ -3,24 +3,7 @@
  *
  * litehtml takes the larger of the two, so the float lands on top of the
  * content. Luna carries a patch for it (tools/litehtml-float-width.patch).
- * Build it the way the CI does, with the patch applied:
- *
- *   cp -r third_party/litehtml/include/litehtml build/litehtml-patch/include/
- *   cp third_party/litehtml/src/line_box.cpp third_party/litehtml/src/render_inline_context.cpp build/litehtml-patch/src/
- *   patch -s -p1 -d build/litehtml-patch < tools/litehtml-float-width.patch
- *   c++ -std=c++17 -O1 -Ibuild/litehtml-patch/include/litehtml \
- *       -Ibuild/litehtml-patch/include -Ithird_party/litehtml/include/litehtml \
- *       -Ithird_party/litehtml/include -Ithird_party/litehtml/src \
- *       -c build/litehtml-patch/src/line_box.cpp -o build/litehtml-patch/line_box.o
- *   c++ -std=c++17 -O1 -Ibuild/litehtml-patch/include/litehtml \
- *       -Ibuild/litehtml-patch/include -Ithird_party/litehtml/include/litehtml \
- *       -Ithird_party/litehtml/include -Ithird_party/litehtml/src \
- *       -c build/litehtml-patch/src/render_inline_context.cpp -o build/litehtml-patch/render_inline_context.o
- *   c++ -std=c++17 -O1 -Ithird_party/litehtml/include -Ithird_party/litehtml/src \
- *       tests/litehtml_float_test.cpp build/litehtml-bridge.o \
- *       build/litehtml-patch/line_box.o build/litehtml-patch/render_inline_context.o \
- *       build/litehtml-host/liblitehtml.a build/litehtml-host/src/gumbo/libgumbo.a \
- *       -o build/litehtml-float-test
+ * Run with the patched renderer using make test-litehtml.
  */
 #include "../ui/litehtml_bridge.h"
 #include "../ui/web_dom_types.h"
@@ -31,10 +14,13 @@
 #include <vector>
 
 struct Rect { int x, y, w, h; uint32_t color; };
-struct Draws { std::vector<Rect> rects; };
+struct Draws { std::vector<Rect> rects; int donate_y = -1; };
 
 static int text_width(void *, const char *s, int font) { return (int)std::strlen(s) * font / 2; }
-static void draw_text(void *, int, int, const char *, int, uint32_t) {}
+static void draw_text(void *ctx, int, int y, const char *text, int, uint32_t) {
+    if (!std::strcmp(text, "DONATE"))
+        static_cast<Draws *>(ctx)->donate_y = y;
+}
 static void fill_rect(void *ctx, int x, int y, int w, int h, uint32_t c) {
     auto *d = (Draws *)ctx;
     if (w > 0 && h > 0) d->rects.push_back({x, y, w, h, c});
@@ -126,5 +112,16 @@ int main() {
         return 1;
     }
     std::printf("PASS: the float container fits the content and the float\n");
+    label->attrs->value = const_cast<char *>(
+        "display:inline;position:relative;top:38px;background:#ffd343;color:#333");
+    Draws shifted;
+    render(root, &shifted);
+    const Rect *shifted_content = find(shifted, 0xffd343);
+    if (!shifted_content || draws.donate_y < 0 || shifted.donate_y - draws.donate_y != 38 ||
+        shifted_content->y - content->y != 38) {
+        std::puts("FAIL: a relative inline must move its text and background once");
+        return 1;
+    }
+    std::puts("PASS: relative inline text and background move together after relayout");
     return 0;
 }

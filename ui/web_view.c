@@ -56,8 +56,7 @@ static void litehtml_rebuild(void) {
     litehtml_graphics.stylesheet = litehtml_stylesheet;
     litehtml_document = luna_lite_create(document_root, &litehtml_graphics,
                                          layout_width, viewport_height);
-    if (!litehtml_document)
-        litehtml_failed = true;
+    litehtml_failed = !litehtml_document;
 }
 #endif
 
@@ -124,6 +123,7 @@ void web_finish_resources(void) {
     else if (images_pending)
         relayout(false);
     styles_pending = images_pending = false;
+    web_js_finish_document();
 }
 /* True when the media attribute of a link element selects a screen. */
 static bool media_selects_screen(const char *media) {
@@ -282,10 +282,10 @@ static void relayout(bool rebuild_renderer) {
     css_apply(document_root, style_rules, style_rule_count);
     web_layout(document_root, layout_width, viewport_height);
 #ifdef LUNA_USE_LITEHTML
-    if (!litehtml_failed && layout_width > 0 && viewport_height > 0) {
-        if (rebuild_renderer || !litehtml_document)
+    if (layout_width > 0 && viewport_height > 0) {
+        if (rebuild_renderer || (!litehtml_document && !litehtml_failed))
             litehtml_rebuild();
-        else if (luna_lite_layout(litehtml_document, layout_width, viewport_height) < 0)
+        else if (litehtml_document && luna_lite_layout(litehtml_document, layout_width, viewport_height) < 0)
             litehtml_disable();
     }
 #else
@@ -294,9 +294,12 @@ static void relayout(bool rebuild_renderer) {
     perf_leave(previous);
 }
 void web_set_viewport(int width, int height) {
+    bool changed = width != layout_width || height != viewport_height;
     layout_width = width;
     viewport_height = height;
     css_set_viewport(width);
+    if (changed)
+        web_js_viewport_changed();
 }
 /* The parser only reads UTF-8. A document whose bytes are not valid UTF-8 is
  * read as windows-1252, the way a browser treats such a page before parsing
@@ -322,16 +325,17 @@ static bool utf8_valid(const char *text, size_t len) {
                 return false;
         } else if ((c & 0xf0) == 0xe0) {
             extra = 2;
-            if (c == 0xe0 && p[i + 1] < 0xa0)
-                return false;
         } else if ((c & 0xf8) == 0xf0) {
             extra = 3;
-            if (c > 0xf4 || (c == 0xf0 && p[i + 1] < 0x90))
+            if (c > 0xf4)
                 return false;
         } else {
             return false;
         }
         if (i + (size_t)extra >= len)
+            return false;
+        if ((c == 0xe0 && p[i + 1] < 0xa0) || (c == 0xed && p[i + 1] >= 0xa0) ||
+            (c == 0xf0 && p[i + 1] < 0x90) || (c == 0xf4 && p[i + 1] >= 0x90))
             return false;
         for (int k = 1; k <= extra; k++)
             if ((p[i + k] & 0xc0) != 0x80)
@@ -360,6 +364,13 @@ static size_t windows1252_to_utf8(const char *text, size_t len, char *out) {
     out[n] = 0;
     return n;
 }
+char *web_convert_legacy_text(const char *text, size_t *length) {
+    if (!*length || utf8_valid(text, *length))
+        return 0;
+    char *converted = web_malloc(*length * 3 + 1);
+    *length = windows1252_to_utf8(text, *length, converted);
+    return converted;
+}
 bool web_load_document(const char *url, const char *html, size_t len, char *error, size_t ecap) {
     web_reset();
     if (url)
@@ -369,12 +380,7 @@ bool web_load_document(const char *url, const char *html, size_t len, char *erro
     parse_error[0] = 0;
     const char *text = html ? html : "";
     size_t size = len;
-    char *converted = 0;
-    if (size && !utf8_valid(text, size)) {
-        converted = web_malloc(size * 3 + 1);
-        if (converted)
-            size = windows1252_to_utf8(text, size, converted);
-    }
+    char *converted = web_convert_legacy_text(text, &size);
     if (converted)
         text = converted;
     bool parsed = web_parse(text, size, &root, parse_error, sizeof(parse_error)) && root;
@@ -386,6 +392,7 @@ bool web_load_document(const char *url, const char *html, size_t len, char *erro
         return false;
     }
     document_root = root;
+    styles_pending = true;
     sheet_length = 0;
     if (sheet_text)
         sheet_text[0] = 0;
@@ -402,12 +409,15 @@ bool web_load_document(const char *url, const char *html, size_t len, char *erro
         strcpy(document_error, js_error);
     }
     web_js_clear_dirty();
-    styles_rebuild(true);
     return true;
 }
 const char *web_document_url(void) { return document_url; }
+const char *web_pseudo_property(WebNode *node, const char *pseudo, const char *name) {
+    return css_pseudo_property(style_rules, style_rule_count, node, pseudo, name);
+}
 const char *web_error_text(void) { return document_error; }
 bool web_has_document(void) { return document_root != 0; }
+bool web_document_ready(void) { return document_root && !styles_pending; }
 int web_content_height(void) {
 #ifdef LUNA_USE_LITEHTML
     if (litehtml_document)
@@ -431,7 +441,7 @@ bool web_scroll_by(int delta) {
     return previous != scroll_offset;
 }
 void web_render(int x, int y, int w, int h) {
-    if (!document_root)
+    if (!web_document_ready())
         return;
     if (w != layout_width || h != viewport_height) {
         web_set_viewport(w, h);

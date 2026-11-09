@@ -188,6 +188,7 @@ static void browser_error_page(const char *message) {    char escaped[512];
     append(page, escaped, sizeof(page));
     append(page, "</p></div></body></html>", sizeof(page));
     web_load_document("about:error", page, strlen(page), 0, 0);
+    web_finish_resources();
 }
 /* Downloads the stylesheets that the document links to and hands them over to
  * the engine, so that real pages keep their visual design. */
@@ -284,6 +285,10 @@ static void browser_load(const char *url) {
             char page_error[256];
             page_error[0] = 0;
             web_load_document(browser_url, body, length, page_error, sizeof(page_error));
+            if (body) {
+                heap_release(body);
+                body = 0;
+            }
             if (page_error[0])
                 browser_error_page(page_error);
             browser_load_stylesheets(browser_url);
@@ -296,7 +301,13 @@ static void browser_load(const char *url) {
     gui_invalidate_app(APP_BROWSER);
 }
 bool browser_is_loading(void) {
-    return browser_loading && !web_has_document();
+    return browser_loading && !web_document_ready();
+}
+static bool browser_timer_pending;
+void browser_timer_poll(void) {
+    if (!browser_loading && !browser_timer_pending && windows[APP_BROWSER].pid &&
+        web_js_timer_ready())
+        browser_timer_pending = task_post(windows[APP_BROWSER].pid, (AppEvent){EVENT_BROWSER_TIMER, 0, 0});
 }
 void browser_open(const char *url) {
     if (strlen(url) >= sizeof(pending_url))
@@ -315,6 +326,7 @@ void app_reset(int app) {
     } else if (app == APP_BROWSER) {
         strcpy(browser_url, "luna://welcome");
         browser_edit = browser_loading = false;
+        browser_timer_pending = false;
         web_reset();
     } else if (app == APP_TASKS) {
         selected_pid = 0;
@@ -326,6 +338,7 @@ void app_close(int app) {
     if (app==APP_BROWSER) {
         web_close();
         browser_loading=false;
+        browser_timer_pending=false;
     }
 }
 static bool matches(const char *s, const char *query) {
@@ -584,6 +597,11 @@ void app_event(int app, AppEvent e) {
         browser_scroll(e.a);
     else if (e.type == EVENT_NAVIGATE && app == APP_BROWSER) {
         browser_load(pending_url);
+    } else if (e.type == EVENT_BROWSER_TIMER && app == APP_BROWSER) {
+        browser_timer_pending = false;
+        web_js_pump();
+        if (web_js_dirty())
+            gui_invalidate_app(APP_BROWSER);
     }
     else if (e.type == EVENT_FILE_PREVIEW && app == APP_FILES)
         load_file_preview();

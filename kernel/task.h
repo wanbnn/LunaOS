@@ -19,6 +19,7 @@
 #define EVENT_FILE_PREVIEW 6
 #define EVENT_SERVICE 7
 #define EVENT_SCROLL 8
+#define EVENT_BROWSER_TIMER 9
 #define CAP_UI 1u
 #define CAP_TASK_CONTROL 2u
 #define CAP_SYSTEM 4u

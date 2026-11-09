@@ -109,6 +109,7 @@ void kmain(void) {
             gui_refresh_status();
         }
         gui_motion_poll();
+        browser_timer_poll();
         uint32_t now = frame_clock * prefs.frame_hz;
         if (ui_dirty && (int32_t)(now - next_frame) >= 0) {
             gui_draw();

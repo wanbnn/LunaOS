@@ -780,6 +780,13 @@ static void parse_end_tag(WebParser *ps) {
 /* The Lexbor tokenizer and tree builder are authoritative when enabled. */
 bool web_parse_lexbor(const char *html, size_t len, WebNode **root,
                       char *error, size_t ecap);
+#else
+WebNode *web_parse_fragment(const char *tag, const char *html, size_t len) {
+    (void)tag;
+    WebNode *fragment = 0;
+    web_parse(html, len, &fragment, 0, 0);
+    return fragment;
+}
 #endif
 bool web_parse(const char *html, size_t len, WebNode **root, char *error, size_t ecap) {
 #ifdef LUNA_USE_LEXBOR

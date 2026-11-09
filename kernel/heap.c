@@ -29,8 +29,7 @@ static void *claim(Arena *arena,Block *b,uint32_t n) {
     arena->live_bytes+=b->bytes; arena->allocations++;
     b->available=0; return (uint8_t *)b+BLOCK_BYTES;
 }
-void *heap_allocate(size_t bytes) { return heap_allocate_owned(bytes,task_memory_owner()); }
-void *heap_allocate_owned(size_t bytes,uint32_t pid) {
+static void *allocate_owned(size_t bytes, uint32_t pid, size_t reserve) {
     if (!pid) return 0;
     if (!bytes) bytes=1;
     if (bytes>UINT32_MAX-ARENA_BYTES-BLOCK_BYTES-PMM_PAGE-16) return 0;
@@ -45,13 +44,28 @@ void *heap_allocate_owned(size_t bytes,uint32_t pid) {
     if (size<GRANULE) size=GRANULE;
     size=(size+PMM_PAGE-1)&~(PMM_PAGE-1);
     PmmAllocation allocation={0};
-    if (memory_allocate(size,PMM_PAGE,UINT32_MAX,0,true,false,&allocation)) return 0;
+    if (reserve) {
+        flags=drv_irq_save();
+        MemoryStats memory;
+        memory_stats(&memory);
+        if (memory.free_bytes >= size && memory.free_bytes - size >= reserve)
+            memory_allocate(size,PMM_PAGE,UINT32_MAX,0,true,false,&allocation);
+        drv_irq_restore(flags);
+    } else {
+        memory_allocate(size,PMM_PAGE,UINT32_MAX,0,true,false,&allocation);
+    }
+    if (!allocation.bytes) return 0;
     Arena *arena=(void *)(uintptr_t)allocation.address;
     Block *block=(void *)((uint8_t *)arena+ARENA_BYTES);
     *block=(Block){size-ARENA_BYTES-BLOCK_BYTES,1,0,MAGIC};
     flags=drv_irq_save();
     *arena=(Arena){.allocation=allocation,.next=arenas,.first=block,.first_free=block,.owner=pid}; arenas=arena;
     void *p=claim(arena,block,wanted); drv_irq_restore(flags); return p;
+}
+void *heap_allocate(size_t bytes) { return allocate_owned(bytes, task_memory_owner(), 0); }
+void *heap_allocate_owned(size_t bytes, uint32_t pid) { return allocate_owned(bytes, pid, 0); }
+void *heap_allocate_reserving(size_t bytes, size_t reserve) {
+    return allocate_owned(bytes, task_memory_owner(), reserve);
 }
 static Block *find(const void *p,Arena **owner,Block **previous) {
     uintptr_t address=(uintptr_t)p;

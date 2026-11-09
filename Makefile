@@ -128,36 +128,37 @@ build/kernel/entry.o: kernel/entry.S
 # Compile with hosted C++ headers because GCC 13 refuses <cmath> in
 # -ffreestanding mode. The resulting objects still use no Linux dynamic
 # linker; unresolved host ABI dependencies must fail the kernel link.
-.PHONY: litehtml-native
-litehtml-native: build/litehtml-native/liblitehtml.a build/ui/litehtml_bridge.o build/lib/cxx_runtime.o build/litehtml-float-progress.o build/litehtml-patch/line_box.o build/litehtml-patch/render_inline_context.o
-build/litehtml-native/liblitehtml.a build/litehtml-native/src/gumbo/libgumbo.a &: Makefile
-	@test -f third_party/litehtml/CMakeLists.txt || (echo "Run git submodule update --init --recursive" && exit 1)
-	cmake -S third_party/litehtml -B build/litehtml-native -DCMAKE_CXX_COMPILER="$(LITEHTML_CXX)" -DCMAKE_C_FLAGS="-m32 -Oz -ffreestanding -fno-pie -fno-pic -fno-stack-protector -ffunction-sections -fdata-sections -mno-sse -mno-mmx -mfpmath=387" -DCMAKE_CXX_FLAGS="$(LITEHTML_CXXFLAGS)" -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY -DLITEHTML_BUILD_TESTING=OFF -DLITEHTML_ENABLE_LINT=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=OFF
-	cmake --build build/litehtml-native --target litehtml --parallel 2
-build/ui/litehtml_bridge.o: ui/litehtml_bridge.cpp ui/litehtml_bridge.h ui/web_dom_types.h Makefile
+LITEHTML_SOURCE := build/litehtml-source
+LITEHTML_NATIVE := build/litehtml-native/patched
+LITEHTML_PATCHES := tools/litehtml-float-progress.patch tools/litehtml-float-width.patch tools/litehtml-grid.patch
+LITEHTML_INC := -I$(LITEHTML_SOURCE)/include -I$(LITEHTML_SOURCE)/src
+
+.PHONY: litehtml-native test-litehtml
+litehtml-native: $(LITEHTML_NATIVE)/liblitehtml.a build/ui/litehtml_bridge.o build/lib/cxx_runtime.o
+$(LITEHTML_SOURCE)/.patched: $(LITEHTML_PATCHES) $(wildcard third_party/litehtml/src/*.cpp third_party/litehtml/include/litehtml/*.h) third_party/litehtml/CMakeLists.txt
+	rm -rf $(LITEHTML_SOURCE).tmp
+	mkdir -p $(LITEHTML_SOURCE).tmp
+	cp -R third_party/litehtml/CMakeLists.txt third_party/litehtml/cmake third_party/litehtml/src third_party/litehtml/include $(LITEHTML_SOURCE).tmp/
+	patch -s -d $(LITEHTML_SOURCE).tmp/src < tools/litehtml-float-progress.patch
+	patch -s -p1 -d $(LITEHTML_SOURCE).tmp < tools/litehtml-float-width.patch
+	patch -s -p1 -d $(LITEHTML_SOURCE).tmp < tools/litehtml-grid.patch
+	rm -rf $(LITEHTML_SOURCE)
+	mv $(LITEHTML_SOURCE).tmp $(LITEHTML_SOURCE)
+	touch $@
+$(LITEHTML_NATIVE)/liblitehtml.a $(LITEHTML_NATIVE)/src/gumbo/libgumbo.a &: Makefile $(LITEHTML_SOURCE)/.patched
+	cmake -S $(LITEHTML_SOURCE) -B $(LITEHTML_NATIVE) -DCMAKE_CXX_COMPILER="$(LITEHTML_CXX)" -DCMAKE_C_FLAGS="-m32 -Oz -ffreestanding -fno-pie -fno-pic -fno-stack-protector -ffunction-sections -fdata-sections -mno-sse -mno-mmx -mfpmath=387" -DCMAKE_CXX_FLAGS="$(LITEHTML_CXXFLAGS)" -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY -DLITEHTML_BUILD_TESTING=OFF -DLITEHTML_ENABLE_LINT=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=OFF
+	cmake --build $(LITEHTML_NATIVE) --target litehtml --parallel 2
+build/ui/litehtml_bridge.o: ui/litehtml_bridge.cpp ui/litehtml_bridge.h ui/web_dom_types.h Makefile $(LITEHTML_SOURCE)/.patched
 	@mkdir -p build/ui
-	$(LITEHTML_CXX) $(LITEHTML_CXXFLAGS) -DLUNA_KERNEL_LITEHTML -Iui -Ikernel -Ithird_party/litehtml/include -Ithird_party/litehtml/src -c $< -o $@
-build/litehtml-float-progress.cpp: third_party/litehtml/src/formatting_context.cpp tools/litehtml-float-progress.patch
-	@mkdir -p build
-	patch -s -o $@ $< tools/litehtml-float-progress.patch
-build/litehtml-float-progress.o: build/litehtml-float-progress.cpp Makefile
-	$(LITEHTML_CXX) $(LITEHTML_CXXFLAGS) -Ithird_party/litehtml/include/litehtml -Ithird_party/litehtml/src -c $< -o $@
-# The width of a float container has to fit the content and the float that
-# share its line. litehtml takes the larger of the two, so the float lands
-# on top of the content. The fix touches the line box, so the patched header
-# and the two sources that use it are built outside the third-party tree.
-LITEHTML_PATCH_DIR := build/litehtml-patch
-LITEHTML_PATCH_INC := -I$(LITEHTML_PATCH_DIR)/include/litehtml -I$(LITEHTML_PATCH_DIR)/include -Ithird_party/litehtml/include/litehtml -Ithird_party/litehtml/include -Ithird_party/litehtml/src
-$(LITEHTML_PATCH_DIR)/.patched: tools/litehtml-float-width.patch third_party/litehtml/src/line_box.cpp third_party/litehtml/src/render_inline_context.cpp third_party/litehtml/include/litehtml/line_box.h third_party/litehtml/include/litehtml/render_item.h
-	@mkdir -p $(LITEHTML_PATCH_DIR)/src $(LITEHTML_PATCH_DIR)/include
-	cp -r third_party/litehtml/include/litehtml $(LITEHTML_PATCH_DIR)/include/
-	cp third_party/litehtml/src/line_box.cpp third_party/litehtml/src/render_inline_context.cpp $(LITEHTML_PATCH_DIR)/src/
-	patch -s -p1 -d $(LITEHTML_PATCH_DIR) < $<
-	@touch $@
-build/litehtml-patch/line_box.o: $(LITEHTML_PATCH_DIR)/.patched Makefile
-	$(LITEHTML_CXX) $(LITEHTML_CXXFLAGS) $(LITEHTML_PATCH_INC) -c $(LITEHTML_PATCH_DIR)/src/line_box.cpp -o $@
-build/litehtml-patch/render_inline_context.o: $(LITEHTML_PATCH_DIR)/.patched Makefile
-	$(LITEHTML_CXX) $(LITEHTML_CXXFLAGS) $(LITEHTML_PATCH_INC) -c $(LITEHTML_PATCH_DIR)/src/render_inline_context.cpp -o $@
+	$(LITEHTML_CXX) $(LITEHTML_CXXFLAGS) -DLUNA_KERNEL_LITEHTML -Iui -Ikernel $(LITEHTML_INC) -c $< -o $@
+test-litehtml: $(LITEHTML_SOURCE)/.patched
+	cmake -S $(LITEHTML_SOURCE) -B build/litehtml-host-patched -DCMAKE_BUILD_TYPE=Release -DLITEHTML_BUILD_TESTING=OFF
+	cmake --build build/litehtml-host-patched --target litehtml --parallel 2
+	$(CXX) -std=c++17 -Wall -Wextra -Werror $(LITEHTML_INC) -c ui/litehtml_bridge.cpp -o build/litehtml-bridge.o
+	$(CXX) -std=c++17 $(LITEHTML_INC) tests/litehtml_bridge_test.cpp build/litehtml-bridge.o build/litehtml-host-patched/liblitehtml.a build/litehtml-host-patched/src/gumbo/libgumbo.a -o build/litehtml-bridge-test
+	./build/litehtml-bridge-test
+	$(CXX) -std=c++17 $(LITEHTML_INC) tests/litehtml_float_test.cpp build/litehtml-bridge.o build/litehtml-host-patched/liblitehtml.a build/litehtml-host-patched/src/gumbo/libgumbo.a -o build/litehtml-float-test
+	./build/litehtml-float-test
 build/lib/cxx_glibc_compat.o: lib/cxx_glibc_compat.c third_party/musl/lib/libc.a
 	@mkdir -p build/lib
 	$(CC) $(CFLAGS) $(MUSLINC) -c $< -o $@
@@ -166,8 +167,8 @@ build/lib/cxx_runtime.o: lib/cxx_runtime.cpp Makefile
 	$(LITEHTML_CXX) $(LITEHTML_CXXFLAGS) -c $< -o $@
 ifeq ($(LUNA_LITEHTML),1)
 CFLAGS += -DLUNA_USE_LITEHTML
-OBJECTS += build/ui/litehtml_bridge.o build/lib/cxx_runtime.o build/lib/cxx_glibc_compat.o build/litehtml-float-progress.o build/litehtml-patch/line_box.o build/litehtml-patch/render_inline_context.o
-LITEHTML_LIBS := build/litehtml-native/liblitehtml.a build/litehtml-native/src/gumbo/libgumbo.a $(LITEHTML_LIBSTDCXX) $(LITEHTML_LIBSUPCXX) $(LITEHTML_LIBGCC_EH)
+OBJECTS += build/ui/litehtml_bridge.o build/lib/cxx_runtime.o build/lib/cxx_glibc_compat.o
+LITEHTML_LIBS := $(LITEHTML_NATIVE)/liblitehtml.a $(LITEHTML_NATIVE)/src/gumbo/libgumbo.a $(LITEHTML_LIBSTDCXX) $(LITEHTML_LIBSUPCXX) $(LITEHTML_LIBGCC_EH)
 build/kernel.elf: $(LITEHTML_LIBS)
 endif
 build/kernel.elf: $(OBJECTS) build/libbearssl.a $(LEXBOR_NATIVE_LIB) kernel/link.ld
