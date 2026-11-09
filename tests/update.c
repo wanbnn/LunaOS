@@ -48,7 +48,7 @@ bool disk_read_on(unsigned index, uint32_t sector, void *out) { return disk_read
 bool disk_write_blocks(unsigned index, uint32_t sector, unsigned count, const void *data) {
     assert(!index && count <= 64 && sector + count <= info.sectors);
     /* No write may touch either live filesystem snapshot slot. */
-    assert(sector + count <= 8192 || sector >= 16384);
+    assert(sector + count <= 16384 || sector >= 24576);
     memcpy(disk + sector * 512, data, count * 512);
     writes++;
     if (fail_write && writes == (unsigned)fail_write) return false;
@@ -147,7 +147,7 @@ int main(void) {
     assert(update_manifest_valid(source_manifest, sizeof(source_manifest), revision));
     assert(!update_manifest_valid(source_manifest, sizeof(source_manifest) - 1, revision));
     uint8_t malformed[UPDATE_MANIFEST_BYTES]; memcpy(malformed, source_manifest, sizeof(malformed));
-    malformed[64] = 0; malformed[65] = 32; /* live LunaFS sector 8192 */
+    malformed[64] = 0; malformed[65] = 64; /* live LunaFS sector 16384 */
     assert(!update_manifest_valid(malformed, sizeof(malformed), revision));
     memcpy(malformed, source_manifest, sizeof(malformed)); malformed[20]--;
     assert(!update_manifest_valid(malformed, sizeof(malformed), revision));
@@ -156,7 +156,7 @@ int main(void) {
     memcpy(original, wanted, LUNA_IMAGE_BYTES);
     /* Installed ID, user data, and old kernel bytes must survive failed updates. */
     memcpy(original + 440, "TEST", 4);
-    memset(original + 8192 * 512, 0xa5, 4096 * 1024);
+    memset(original + 16384 * 512, 0xa5, 4096 * 1024);
     original[100000] ^= 0x77;
     reset(); net_ready = false; update_run(); unchanged(); assert(!requests && !writes);
     reset(); same_commit = true; update_run(); unchanged(); assert(requests == 1 && !writes && update_progress() == 100);
@@ -177,14 +177,14 @@ int main(void) {
     update_run();
     assert(!transient_failures);
     memcpy(wanted + 432, original + 432, 78);
-    memcpy(wanted + 8192 * 512, original + 8192 * 512, 4096 * 1024);
+    memcpy(wanted + 16384 * 512, original + 16384 * 512, 4096 * 1024);
     assert(restarts == 1 && !memcmp(wanted, disk, LUNA_IMAGE_BYTES));
     assert(!update_busy() && !update_owner() && update_progress() == 100);
     /* Exact-base differential: only changed blocks are in one streamed pack. */
     f = fopen("build/update-test/base.img", "rb"); assert(f);
     assert(fread(original, 1, LUNA_IMAGE_BYTES, f) == LUNA_IMAGE_BYTES); fclose(f);
     memcpy(original + 440, "TEST", 4);
-    memset(original + 8192 * 512, 0xa5, 4096 * 1024);
+    memset(original + 16384 * 512, 0xa5, 4096 * 1024);
     reset(); enable_delta = true;
     update_run();
     assert(requests == 2 && restarts == 1 && !memcmp(wanted, disk, LUNA_IMAGE_BYTES));

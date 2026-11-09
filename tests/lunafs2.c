@@ -6,7 +6,7 @@
 #include "../kernel/luna.h"
 #include "../kernel/install.h"
 #include "../kernel/fs_volume.h"
-#define SLOT_START 8192u
+#define SLOT_START LUNA_VOLUME_START
 #define SLOT_SECTORS 4096u
 #define SECTOR_COUNT (224u * 1024u)
 static uint8_t disk[SECTOR_COUNT][512];
@@ -151,7 +151,7 @@ int main(void) {
     uint32_t image_version=1,image_bytes=LUNA_IMAGE_BYTES;
     memcpy(disk[LUNA_IMAGE_INFO_SECTOR]+8,&image_version,4);
     memcpy(disk[LUNA_IMAGE_INFO_SECTOR]+12,&image_bytes,4);
-    uint32_t partitions[3][2]={{8192,65536-8192},{65536,69632},{SECTOR_COUNT-2048,2048}};
+    uint32_t partitions[3][2]={{LUNA_VOLUME_START,65536-LUNA_VOLUME_START},{65536,69632},{SECTOR_COUNT-2048,2048}};
     for(unsigned i=0;i<3;i++) {
         uint8_t *entry=disk[0]+446+i*16;
         entry[4]=i==0?0xda:i==1?0xef:0x83;

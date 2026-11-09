@@ -645,18 +645,37 @@ void gfx_rgba_image(int x, int y, int w, int h, const unsigned char *rgba, int s
 void circle(int x, int y, int r, uint32_t c) {
     round_rect(x - r, y - r, 2 * r, 2 * r, r, c, 255);
 }
+/* Decodes one UTF-8 codepoint. Sequences of three and four bytes are read
+ * properly so characters outside the basic plane keep their shape. */
 static int decode(const char **s) {
     unsigned char c = *(*s)++;
     if (c < 128)
         return c;
-    if ((c & 0xe0) == 0xc0 && **s) {
-        int v = (c & 31) << 6;
-        v |= *(*s)++ & 63;
-        return v;
+    int extra;
+    int value;
+    if ((c & 0xe0) == 0xc0) {
+        extra = 1;
+        value = c & 31;
+    } else if ((c & 0xf0) == 0xe0) {
+        extra = 2;
+        value = c & 15;
+    } else if ((c & 0xf8) == 0xf0) {
+        extra = 3;
+        value = c & 7;
+    } else {
+        return '?';
     }
-    while ((**s & 0xc0) == 0x80)
+    for (int i = 0; i < extra; i++) {
+        unsigned char next = **s;
+        if ((next & 0xc0) != 0x80) {
+            /* A truncated sequence is not a character. The lead byte is
+             * already consumed, so the walk always moves forward. */
+            return '?';
+        }
         (*s)++;
-    return '?';
+        value = (value << 6) | (next & 63);
+    }
+    return value;
 }
 static int font_index(int size) {
     for (int i = 0; i < 5; i++)
@@ -664,12 +683,93 @@ static int font_index(int size) {
             return i;
     return 1;
 }
+/* The family the user chose; the symbol family backs it up for the glyphs
+ * the text families do not carry. */
+static int font_family = 0;
+int graphics_font_family(void) { return font_family; }
+int graphics_font_family_count(void) { return FONT_TEXT_FAMILIES; }
+const char *graphics_font_family_name(int family) {
+    if (family < 0 || family >= FONT_TEXT_FAMILIES)
+        return font_family_names[font_family];
+    return font_family_names[family];
+}
+void graphics_set_font_family(int family) {
+    if (family >= 0 && family < FONT_TEXT_FAMILIES)
+        font_family = family;
+}
+/* Position of a codepoint in the table shared by every family. */
+static int codepoint_slot(int c) {
+    int lo = 0, hi = FONT_CODEPOINTS - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        if ((int)font_codepoints[mid] == c)
+            return mid;
+        if ((int)font_codepoints[mid] < c)
+            lo = mid + 1;
+        else
+            hi = mid - 1;
+    }
+    return -1;
+}
+typedef struct {
+    int family;
+    unsigned short slot;
+} GlyphRef;
+/* Finds the glyph of a codepoint, falling back to the symbol family. A
+ * codepoint no family carries has no glyph: the caller draws the empty box
+ * a browser shows instead of a question mark that the page never asked for. */
+static bool glyph_for(int c, GlyphRef *ref) {
+    int slot = codepoint_slot(c);
+    if (slot < 0)
+        return false;
+    unsigned short s = font_slots[font_family][slot];
+    if (s != 0xFFFF) {
+        ref->family = font_family;
+        ref->slot = s;
+        return true;
+    }
+    s = font_slots[FONT_SYMBOL_FAMILY][slot];
+    if (s != 0xFFFF) {
+        ref->family = FONT_SYMBOL_FAMILY;
+        ref->slot = s;
+        return true;
+    }
+    return false;
+}
+/* Width reserved for a codepoint no family carries. */
+static int missing_advance(int fi) {
+    int slot = codepoint_slot('?');
+    if (slot < 0)
+        return 0;
+    unsigned short s = font_slots[font_family][slot];
+    if (s == 0xFFFF)
+        return 0;
+    return font_glyphs[font_family][fi][s].advance;
+}
+/* The hollow box browsers draw for a glyph the font does not have. */
+static void draw_missing(int x, int y, int adv, int size, uint32_t color) {
+    int w = adv - 2;
+    if (w < 2)
+        w = 2;
+    int h = size * 3 / 4;
+    if (h < 3)
+        h = 3;
+    int top = (size - h) / 2 + 1;
+    for (int j = top; j < top + h; j++)
+        for (int i = 1; i <= w; i++)
+            if (j == top || j == top + h - 1 || i == 1 || i == w)
+                pixel(x + i, y + j, color, 255);
+}
 int text_width(const char *s, int size) {
     int fi = font_index(size), w = 0;
     while (*s) {
         int c = decode(&s);
-        int index = c >= 32 && c < 127 ? c - 32 : c >= 160 && c < 256 ? c - 160 + 95 : '?' - 32;
-        w += font_glyphs[fi][index].advance;
+        GlyphRef ref;
+        if (!glyph_for(c, &ref)) {
+            w += missing_advance(fi);
+            continue;
+        }
+        w += font_glyphs[ref.family][fi][ref.slot].advance;
     }
     return w;
 }
@@ -682,14 +782,20 @@ void text(int x, int y, const char *s, int size, uint32_t color) {
             x = start;
             continue;
         }
-        int index = c >= 32 && c < 127 ? c - 32 : c >= 160 && c < 256 ? c - 160 + 95 : '?' - 32;
-        const Glyph *g = &font_glyphs[fi][index];
+        GlyphRef ref;
+        if (!glyph_for(c, &ref)) {
+            int adv = missing_advance(fi);
+            draw_missing(x, y, adv, size, color);
+            x += adv;
+            continue;
+        }
+        const Glyph *g = &font_glyphs[ref.family][fi][ref.slot];
         int bx, by, bw, bh;
         shape_box(x, y, g->w, g->h, &bx, &by, &bw, &bh);
         for (int j = by; j < by + bh; j++)
             for (int i = bx; i < bx + bw; i++) {
                 unsigned off = g->offset + j * g->w + i;
-                int a = (font_data[fi][off / 2] >> (4 * (off % 2))) & 15;
+                int a = (font_data[ref.family][fi][off / 2] >> (4 * (off % 2))) & 15;
                 if (a)
                     pixel(x + i, y + j, color, a * 17);
             }

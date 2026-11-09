@@ -4,6 +4,9 @@ from pathlib import Path
 
 pairs = {"font_license": "assets/fonts/OFL.txt", "icon_license": "assets/icons/lucide/LICENSE"}
 extra = {
+    "NotoSans-OFL.txt": "assets/fonts/NotoSans-OFL.txt",
+    "Montserrat-OFL.txt": "assets/fonts/Montserrat-OFL.txt",
+    "NotoSansSymbols2-OFL.txt": "assets/fonts/NotoSansSymbols2-OFL.txt",
     "uACPI.txt": "third_party/uacpi/LICENSE",
     "stb.txt": "third_party/stb/LICENSE",
     "Realtek-rtw88-BSD.txt": "assets/licenses/Realtek-rtw88-BSD.txt",
@@ -15,10 +18,13 @@ extra = {
     "GCC-Runtime-Exception.txt": "assets/licenses/GCC-Runtime-Exception.txt",
     "GCC-GPL3.txt": "assets/licenses/GPL-3.txt",
 }
-# Include the vendored Lexbor attribution when the source submodule is present.
-# Keep the ordinary LunaOS build usable without initialized submodules.
-if Path("third_party/lexbor/LICENSE").is_file():
-    extra["Lexbor-Apache-2.0.txt"] = "third_party/lexbor/LICENSE"
+for filename, path in {
+    "Lexbor-Apache-2.0.txt": "third_party/lexbor/LICENSE",
+    "litehtml-BSD.txt": "third_party/litehtml/LICENSE",
+    "Gumbo-Apache-2.0.txt": "third_party/litehtml/src/gumbo/LICENSE",
+}.items():
+    if Path(path).is_file():
+        extra[filename] = path
 
 with Path("build/notices.h").open("w") as f:
     for name, path in pairs.items():

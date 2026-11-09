@@ -1,25 +1,29 @@
-# litehtml + libstdc++ integration status (experimental)
+# litehtml no Luna Browser
 
-## Sources and licenses
-- litehtml v0.10 pinned as Git submodule in `third_party/litehtml` (BSD-3-Clause)
-- Existing Lexbor v3 is the Luna Browser HTML5 parser; litehtml currently has a separate Gumbo-backed document model
-- GCC static libstdc++ and its runtime are supplied **by the compiler/toolchain**, not vendored as an unlicensed binary
-- Keep GCC's runtime library exception, GCC/libstdc++ notices, and source/build provenance for redistribution
+A build padrão usa Lexbor v3.0.0 para interpretar o HTML e litehtml v0.10 para
+aplicar CSS, calcular o layout e desenhar a página. Inicialize os submódulos com
+`git submodule update --init --recursive`. A build requer CMake e G++ com as
+bibliotecas estáticas de 32 bits. Use `make LUNA_LITEHTML=0` para selecionar o
+renderizador legado com Lexbor.
 
-## Current code
-- `ui/litehtml_bridge.cpp`: C++17 `document_container` adapter with C ABI in `ui/litehtml_bridge.h`
-- `ui/litehtml_graphics.c`: native Luna text, rectangle, clipping callbacks; image callback is currently not implemented
-- `lib/cxx_runtime.cpp`: heap-backed new/delete and selected ABI hooks
-- `tests/litehtml_bridge_test.cpp`: host smoke test for flex layout and drawing callbacks
-- `Makefile`: `make litehtml-native` builds i386 static renderer; `LUNA_LITEHTML=1` attempts a kernel link
-- `.github/workflows/litehtml.yml`: host test and experimental kernel link
+O adaptador em `ui/web_lexbor.c` copia a árvore interpretada para `WebNode`,
+usada pelo QuickJS. `ui/litehtml_bridge.cpp` cria os elementos de layout a partir
+dessa árvore. O Gumbo incluído no litehtml inicializa apenas um documento vazio,
+que o adaptador preenche com os elementos do Luna. Mudanças feitas por scripts
+reconstroem a representação de layout. Cliques em links usam as caixas do
+litehtml e são encaminhados ao nó correspondente no DOM do Luna.
 
-## Critical release gates
-1. Complete toolchain compatibility: host Ubuntu static libstdc++ may depend on glibc/Linux symbols and is **not** a valid LunaOS runtime until a full freestanding static link passes.
-2. litehtml v0.10 uses standard-library headers, exceptions and RTTI. C++ runtime must provide all referenced ABI and unwinder functions; inspect `ld` output for Linux dependencies.
-3. Replace/bridge the real `web_layout` and `web_paint` call paths, not just provide a demo renderer. Current WebNode and live QuickJS tree are independent of litehtml's DOM; mutations must invalidate and resync the view.
-4. Implement resource resolution and non-placeholder image drawing, font metrics, gradients, clips and link hit-testing; verify scroll offsets and relative URLs.
-5. Build ISO and verify actual guest rendering, smoke sites, firmware/driver regressions and OTA package creation.
+O litehtml aplica o CSS embutido e as folhas vinculadas que o navegador baixa.
+O desenho de imagens usa o cache de imagens decodificadas do Luna. A integração
+ainda depende dos limites de recursos do navegador e de sua implementação de
+JavaScript e formulários. Gradientes e carregamento de novos recursos por
+`@import` ainda não estão implementados.
 
-**Do not claim litehtml is enabled in the release based only on the host smoke test.**
-The default ISO continues using the prior Luna CSS/layout until those gates pass.
+O navegador mostra o documento enquanto baixa os recursos externos. Folhas de
+estilo grandes são processadas em grupos de regras completas, e o layout de
+elementos flutuantes tem um limite de tentativas por caixa. Se o litehtml atingir
+o limite de recursos, o Luna mantém o documento aberto com o renderizador legado.
+
+O kernel liga a biblioteca litehtml, seu Gumbo e o runtime estático do G++.
+Os submódulos preservam as licenças do litehtml (BSD-3-Clause) e do Gumbo
+(Apache-2.0). As imagens incluem esses avisos e a exceção de runtime do GCC.

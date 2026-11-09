@@ -166,9 +166,9 @@ try:
     click(g, x + 70, y + 62 + 4 * 47 + 18)
     click(g, x + 235, y + 108)
     wait_until(lambda: pref(g, 11) == 1)
-    click(g, x + 198 + 24 + 2 * 51, y + 204)
+    click(g, x + 198 + 24 + 2 * 51, y + 250)
     wait_until(lambda: pref(g, 12) == 2)
-    click(g, x + 198 + 180, y + 303)
+    click(g, x + 198 + 180, y + 338)
     wait_until(lambda: pref(g, 10) == 1)
     g.screenshot("settings-appearance")
     # Sound volume slider writes a real preference consumed by the AC97 mixer.

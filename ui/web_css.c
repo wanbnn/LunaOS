@@ -661,9 +661,14 @@ bool css_media_matches(const char *query) {
     return any;
 }
 
-static bool parse_stylesheet(const char *text, WebRule **rules, int *count, int *order) {
+/* The legacy matcher stores fixed-size compounds for every selector. Bound
+ * that storage and the recursion before applying a downloaded stylesheet. */
+#define CSS_SELECTOR_LIMIT 384
+#define CSS_MEDIA_DEPTH_LIMIT 16
+static void parse_stylesheet(const char *text, WebRule **rules, int *count,
+                             int *remaining, int media_depth) {
     const char *p = text;
-    while (*p) {
+    while (*p && *remaining > 0) {
         while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == ';') {
             p++;
             continue;
@@ -698,9 +703,10 @@ static bool parse_stylesheet(const char *text, WebRule **rules, int *count, int 
                     q++;
                 }
                 const char *block_end = q > block_start ? q - 1 : block_start;
-                if (!web_strcasecmp(name, "media") && css_media_matches(query)) {
+                if (media_depth < CSS_MEDIA_DEPTH_LIMIT &&
+                    !web_strcasecmp(name, "media") && css_media_matches(query)) {
                     char *inner = web_strndup(block_start, (size_t)(block_end - block_start));
-                    parse_stylesheet(inner, rules, count, order);
+                    parse_stylesheet(inner, rules, count, remaining, media_depth + 1);
                     web_free(inner);
                 }
                 p = q;
@@ -736,9 +742,10 @@ static bool parse_stylesheet(const char *text, WebRule **rules, int *count, int 
         if (*prelude && decls) {
             /* Split the selector list on top level commas. */
             int selector_total = 1;
-            for (char *c = prelude; *c; c++)
+            for (char *c = prelude; *c && selector_total < *remaining; c++)
                 if (*c == ',')
                     selector_total++;
+            *remaining -= selector_total;
             WebComplex *complexes = web_malloc(sizeof(WebComplex) * (size_t)selector_total);
             memset(complexes, 0, sizeof(WebComplex) * (size_t)selector_total);
             int found = 0;
@@ -760,7 +767,7 @@ static bool parse_stylesheet(const char *text, WebRule **rules, int *count, int 
                 rule->complexes = complexes;
                 rule->complex_count = found;
                 rule->decls = decls;
-                rule->order = (*order)++;
+                rule->order = *count;
                 WebRule *grown = web_malloc(sizeof(WebRule) * (size_t)(*count + 1));
                 if (*count)
                     memcpy(grown, *rules, sizeof(WebRule) * (size_t)*count);
@@ -778,12 +785,11 @@ static bool parse_stylesheet(const char *text, WebRule **rules, int *count, int 
         web_free(prelude);
         p = q;
     }
-    return true;
 }
 bool css_parse_sheet(const char *text, WebRule **rules, int *count) {
     *rules = 0;
     *count = 0;
-    int order = 0;
+    int remaining = CSS_SELECTOR_LIMIT;
     if (!text)
         return true;
     char *clean = web_strdup(text);
@@ -807,9 +813,9 @@ bool css_parse_sheet(const char *text, WebRule **rules, int *count) {
             }
         }
     }
-    bool ok = parse_stylesheet(clean, rules, count, &order);
+    parse_stylesheet(clean, rules, count, &remaining, 0);
     web_free(clean);
-    return ok;
+    return true;
 }
 void css_free_sheet(WebRule *rules, int count) {
     for (int i = 0; i < count; i++) {

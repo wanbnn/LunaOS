@@ -224,6 +224,10 @@ bool task_post(uint32_t pid, AppEvent e) {
     t->write_event = next;
     if (t->state == TASK_WAITING)
         t->state = TASK_READY;
+    else if (t->state != TASK_READY && t->state != TASK_RUNNING) {
+        serial_write("POST lost: task not waiting\n");
+        return true;
+    }
     return true;
 }
 static void finish(Task *t, unsigned code) {

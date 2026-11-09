@@ -13,6 +13,14 @@
 #include "luna.h"
 #include "settings.h"
 #include "task.h"
+
+typedef void (*KernelConstructor)(void);
+extern KernelConstructor __init_array_start[], __init_array_end[];
+#ifdef LUNA_USE_LITEHTML
+extern const char __eh_frame_start[];
+void __register_frame(const void *frame);
+#endif
+
 void kmain(void) {
     serial_init();
     serial_write("\nLunaOS " VERSION " / native boot\n");
@@ -21,6 +29,11 @@ void kmain(void) {
     platform_init();
     __asm__ volatile("clts; fninit");
     memory_init();
+#ifdef LUNA_USE_LITEHTML
+    __register_frame(__eh_frame_start);
+#endif
+    for (KernelConstructor *init = __init_array_start; init != __init_array_end; init++)
+        (*init)();
     serial_write("CPU: protected mode / timer 1000 Hz / E820 memory map\n");
     disk_init();
     /* Claim PCI/DMA early so a SATA/NVMe-installed LunaFS can be opened
@@ -49,11 +62,13 @@ void kmain(void) {
         if (input_pending()) {
             PerfArea previous = perf_enter(PERF_INPUT);
             input_poll();
-            int c, x, y, buttons;
+            int c, x, y, buttons, wheel;
             while ((c = input_key()) >= 0)
                 gui_key(c);
-            while (input_pointer(&x, &y, &buttons)) {
+            while (input_pointer(&x, &y, &buttons, &wheel)) {
                 gui_pointer(x, y, buttons);
+                if (wheel)
+                    gui_scroll(x, y, wheel);
                 cursor_pending = true;
             }
             perf_leave(previous);

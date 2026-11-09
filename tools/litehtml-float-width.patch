@@ -1,0 +1,58 @@
+--- a/include/litehtml/line_box.h
++++ b/include/litehtml/line_box.h
+@@ -140,6 +140,7 @@
+ 		rendered_width			m_rendered_width;
+ 
+ 		std::list< std::unique_ptr<line_box_item> > m_items;
++		pixel_t					m_float_width = 0;
+     public:
+ 		line_box(pixel_t top, pixel_t left, pixel_t right, const css_line_height_t& line_height, const font_metrics& fm,
+ 				 text_align align) :
+@@ -163,6 +164,7 @@
+ 		pixel_t		   width() const { return m_width; }
+ 		pixel_t		   line_right() const { return m_right; }
+ 		rendered_width get_rendered_width() const { return m_rendered_width; }
++		void add_float_width(pixel_t width) { m_float_width += width; }
+ 
+ 		void	add_item(std::unique_ptr<line_box_item> item);
+ 		bool	can_hold(const std::unique_ptr<line_box_item>& item, white_space ws) const;
+--- a/include/litehtml/render_item.h
++++ b/include/litehtml/render_item.h
+@@ -6,7 +6,7 @@
+ #include <tuple>
+ #include "html.h"
+ #include "types.h"
+-#include "line_box.h"
++#include "litehtml/line_box.h"
+ #include "table.h"
+ #include "formatting_context.h"
+ #include "element.h"
+--- a/src/line_box.cpp
++++ b/src/line_box.cpp
+@@ -621,6 +621,10 @@
+ 	current_context.start_lbi = nullptr;
+ 	//int va_top_bottom = 0;
+ 
++	// A float shares the line with the content before it, so the line is
++	// as wide as the content and the float together.
++	m_rendered_width.natural_width += m_float_width;
++
+ 	// Second pass:
+ 	// 1. Vertical align top/bottom
+ 	// 2. Apply relative shift
+--- a/src/render_inline_context.cpp
++++ b/src/render_inline_context.cpp
+@@ -244,6 +244,13 @@
+             line_top = m_line_boxes.back()->top();
+         }
+ 		auto rw = place_float(item->get_el(), line_top, self_size, fmt_ctx);
++		if(!m_line_boxes.empty())
++		{
++			// The float takes room on the line it shares with the content
++			// before it. The line keeps the width of the content alone, so
++			// the float has to be added to it.
++			m_line_boxes.back()->add_float_width(rw.min_width);
++		}
+ 		m_rendered_width.merge(rw);
+ 		return;
+ 	}

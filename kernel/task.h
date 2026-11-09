@@ -18,6 +18,7 @@
 #define EVENT_DRAG 5
 #define EVENT_FILE_PREVIEW 6
 #define EVENT_SERVICE 7
+#define EVENT_SCROLL 8
 #define CAP_UI 1u
 #define CAP_TASK_CONTROL 2u
 #define CAP_SYSTEM 4u
@@ -102,6 +103,7 @@ void app_close(int);
 void gui_task_closed(int);
 void gui_serial(int);
 void gui_pointer(int, int, int);
+void gui_scroll(int, int, int);
 void gui_focus_home(void);
 void net_cancel_owner(uint32_t);
 #endif

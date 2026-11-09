@@ -931,7 +931,7 @@ void setup_poll(void) {
         p[1] = p[5] = 0xfe;
         p[2] = p[3] = p[6] = p[7] = 0xff;
         p[4] = 0xda;
-        uint32_t start = 8192, count = LUNA_ESP_SECTOR - start;
+        uint32_t start = LUNA_VOLUME_START, count = LUNA_ESP_SECTOR - start;
         memcpy(p + 8, &start, 4);
         memcpy(p + 12, &count, 4);
         p += 16;

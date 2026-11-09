@@ -88,7 +88,7 @@ def main():
         # Verify durable file contents after QEMU has closed the target. The
         # installer legitimately changes MBR and LunaFS snapshots at 4..8 MiB.
         with SOURCE.open("rb") as orig, target.open("rb") as installed:
-            for start,end in [(512,8192*512),(16384*512,SOURCE.stat().st_size)]:
+            for start,end in [(512,16384*512),(24576*512,SOURCE.stat().st_size)]:
                 orig.seek(start);installed.seek(start)
                 while start<end:
                     count=min(1024*1024,end-start)

@@ -7,6 +7,12 @@ from pathlib import Path
 from firmwarepack import build_archive, SECTOR
 from efifat import make_esp, CORE_BYTES, ESP_BYTES, IMAGE_BYTES, ESP_SECTOR
 
+# Layout shared with the kernel: the payload comes first, the image header
+# follows it and the file system starts right after that.
+LUNA_KERNEL_SECTORS = 16383
+LUNA_IMAGE_INFO_SECTOR = 16383
+VOLUME_START = 16384
+
 build = Path("build")
 out = Path("dist")
 out.mkdir(exist_ok=True)
@@ -47,7 +53,7 @@ kernel = (build / "kernel.bin").read_bytes()
 assert len(stage2) <= 32768, "stage 2 exceeds reserved space"
 payload = stage2.ljust(32768, b"\0") + kernel
 payload = payload.ljust((len(payload) + 511) // 512 * 512, b"\0")
-assert len(payload) < 7168 * 512 - 512, "Kernel overlaps LunaFS slots"
+assert len(payload) < LUNA_KERNEL_SECTORS * 512, "Kernel overlaps the image header"
 sectors = len(payload) // 512
 subprocess.run(
     [
@@ -97,7 +103,7 @@ with image.open("wb") as f:
     f.write(boot)
     f.write(payload)
     f.truncate(CORE_BYTES)
-    f.seek(7168 * 512)
+    f.seek(LUNA_IMAGE_INFO_SECTOR * 512)
     f.write(image_info)
     f.seek(32768 * 512)
     f.write(source_header)
@@ -108,7 +114,7 @@ with image.open("wb") as f:
 # MBR holds the native data partition plus a standard FAT32 EFI system partition.
 with image.open("r+b") as f:
     f.seek(446)
-    f.write(struct.pack("<BBBBBBBBII",0x80,0,1,4,0xda,63,32,31,8192,ESP_SECTOR-8192))
+    f.write(struct.pack("<BBBBBBBBII",0x80,0,1,4,0xda,63,32,31,VOLUME_START,ESP_SECTOR-VOLUME_START))
     f.write(struct.pack("<BBBBBBBBII",0,0,1,32,0xef,63,32,65,ESP_SECTOR,ESP_BYTES//512))
 core = image.read_bytes()
 efi_loader = Path("build/BOOTX64.EFI").read_bytes()
@@ -127,7 +133,7 @@ manifest = {
     "payload_sectors": sectors,
     "sha256": hashlib.sha256(image.read_bytes()).hexdigest(),
     "boot": "native BIOS / UEFI x64 bridge to i386 kernel",
-    "font": "Inter Tight / SIL OFL 1.1",
+    "font": "Inter Tight, Noto Sans, Montserrat + Noto Sans Symbols 2 / SIL OFL 1.1",
     "minimum_ram_mib": 64,
     "uefi_minimum_ram_mib": 256,
     "uefi_x64": True,

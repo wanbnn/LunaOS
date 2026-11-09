@@ -1,6 +1,6 @@
 #include "fs_volume.h"
 
-#define LEGACY_START 8192u
+#define LEGACY_START LUNA_VOLUME_START
 #define LEGACY_SLOT 4096u
 #define SYSTEM_END (LUNA_IMAGE_BYTES / 512u)
 

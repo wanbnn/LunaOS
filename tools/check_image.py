@@ -37,6 +37,6 @@ source = data[source_offset + 512:source_offset + 512 + length]
 assert hashlib.sha256(source).digest() == digest
 assert digest.hex() == m["wireless_sources"]["sha256"]
 assert commit.decode() == m["wireless_sources"]["commit"]
-assert data[7168 * 512:7168 * 512 + 8] == b"LUNAIMG1"
-assert struct.unpack_from("<I", data, 7168 * 512 + 12)[0] == len(data)
+assert data[16383 * 512:16383 * 512 + 8] == b"LUNAIMG1"
+assert struct.unpack_from("<I", data, 16383 * 512 + 12)[0] == len(data)
 print("PASS: installer metadata / complete wireless source archive hash")

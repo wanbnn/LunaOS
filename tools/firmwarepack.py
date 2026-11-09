@@ -5,7 +5,7 @@ from pathlib import Path
 import re
 import struct
 
-SECTOR = 16384
+SECTOR = 24576
 LIMIT = 2 * 1024 * 1024
 MAX_FILE = 2 * 1024 * 1024
 MAX_ENTRIES = 16

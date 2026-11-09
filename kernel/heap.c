@@ -8,7 +8,7 @@ typedef struct Block { uint32_t bytes,available; struct Block *next; uint32_t ma
 typedef struct Arena {
     PmmAllocation allocation;
     struct Arena *next;
-    Block *first;
+    Block *first, *first_free;
     uint32_t owner,live_bytes,allocations;
 } Arena;
 #define ROUND16(n) (((n)+15u)&~(size_t)15u)
@@ -21,6 +21,11 @@ static void *claim(Arena *arena,Block *b,uint32_t n) {
         *split=(Block){b->bytes-n-BLOCK_BYTES,1,b->next,MAGIC};
         b->next=split; b->bytes=n;
     }
+    if (arena->first_free == b) {
+        arena->first_free = b->next;
+        while (arena->first_free && !arena->first_free->available)
+            arena->first_free = arena->first_free->next;
+    }
     arena->live_bytes+=b->bytes; arena->allocations++;
     b->available=0; return (uint8_t *)b+BLOCK_BYTES;
 }
@@ -32,7 +37,7 @@ void *heap_allocate_owned(size_t bytes,uint32_t pid) {
     uint32_t wanted=ROUND16(bytes);
     uint32_t flags=drv_irq_save();
     for (Arena *a=arenas; a; a=a->next) if (a->owner==pid)
-        for (Block *b=a->first; b; b=b->next) if (b->available && b->bytes>=wanted) {
+        for (Block *b=a->first_free; b; b=b->next) if (b->available && b->bytes>=wanted) {
             void *p=claim(a,b,wanted); drv_irq_restore(flags); return p;
         }
     drv_irq_restore(flags);
@@ -45,17 +50,19 @@ void *heap_allocate_owned(size_t bytes,uint32_t pid) {
     Block *block=(void *)((uint8_t *)arena+ARENA_BYTES);
     *block=(Block){size-ARENA_BYTES-BLOCK_BYTES,1,0,MAGIC};
     flags=drv_irq_save();
-    *arena=(Arena){.allocation=allocation,.next=arenas,.first=block,.owner=pid}; arenas=arena;
+    *arena=(Arena){.allocation=allocation,.next=arenas,.first=block,.first_free=block,.owner=pid}; arenas=arena;
     void *p=claim(arena,block,wanted); drv_irq_restore(flags); return p;
 }
-static Block *find(const void *p,Arena **owner) {
+static Block *find(const void *p,Arena **owner,Block **previous) {
     uintptr_t address=(uintptr_t)p;
     for (Arena *a=arenas; a; a=a->next) {
         uintptr_t start=(uintptr_t)a;
         if (address<start+ARENA_BYTES+BLOCK_BYTES || address-start>=a->allocation.bytes) continue;
-        for (Block *b=a->first; b; b=b->next)
+        Block *prev=0;
+        for (Block *b=a->first; b; prev=b,b=b->next)
             if ((const uint8_t *)b+BLOCK_BYTES==p && b->magic==MAGIC && !b->available) {
                 if (owner) *owner=a;
+                if (previous) *previous=prev;
                 return b;
             }
         return 0;
@@ -64,20 +71,26 @@ static Block *find(const void *p,Arena **owner) {
 }
 size_t heap_usable_size(const void *p) {
     if (!p) return 0;
-    uint32_t flags=drv_irq_save(); Block *b=find(p,0); size_t n=b ? b->bytes : 0;
+    uint32_t flags=drv_irq_save(); Block *b=find(p,0,0); size_t n=b ? b->bytes : 0;
     drv_irq_restore(flags); return n;
 }
 int heap_release(void *p) {
     if (!p) return 0;
-    uint32_t flags=drv_irq_save(); Arena *arena=0; Block *b=find(p,&arena);
+    uint32_t flags=drv_irq_save(); Arena *arena=0; Block *prev=0; Block *b=find(p,&arena,&prev);
     if (!b) { drv_irq_restore(flags); return -22; }
     arena->live_bytes-=b->bytes; arena->allocations--;
     b->available=1;
-    for (Block *a=arena->first; a && a->next;)
-        if (a->available && a->next->available &&
-            (uint8_t *)a+BLOCK_BYTES+a->bytes==(uint8_t *)a->next) {
-            a->bytes+=BLOCK_BYTES+a->next->bytes; a->next=a->next->next;
-        } else a=a->next;
+    if (b->next && b->next->available) {
+        b->bytes+=BLOCK_BYTES+b->next->bytes;
+        b->next=b->next->next;
+    }
+    if (prev && prev->available) {
+        prev->bytes+=BLOCK_BYTES+b->bytes;
+        prev->next=b->next;
+        b=prev;
+    }
+    if (!arena->first_free || (uintptr_t)b<(uintptr_t)arena->first_free)
+        arena->first_free=b;
     if (arena->first->available && !arena->first->next) {
         Arena **link=&arenas;
         while (*link!=arena) link=&(*link)->next;
@@ -91,7 +104,7 @@ int heap_release(void *p) {
 void *heap_resize(void *p,size_t bytes) {
     if (!p) return heap_allocate(bytes);
     if (!bytes) { heap_release(p); return 0; }
-    uint32_t flags=drv_irq_save(); Arena *arena=0; Block *b=find(p,&arena);
+    uint32_t flags=drv_irq_save(); Arena *arena=0; Block *b=find(p,&arena,0);
     size_t old=b ? b->bytes : 0; uint32_t owner=arena ? arena->owner : 0;
     drv_irq_restore(flags);
     if (!b) return 0;

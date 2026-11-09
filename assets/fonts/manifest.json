@@ -1,10 +1,37 @@
 {
-  "family": "Inter Tight",
-  "upstream": "https://github.com/google/fonts/tree/main/ofl/intertight",
-  "source": "https://raw.githubusercontent.com/google/fonts/main/ofl/intertight/InterTight%5Bwght%5D.ttf",
   "license": "SIL Open Font License 1.1",
-  "files": {
-    "InterTight.ttf": "b81b73dcb64df3c230cabade7df6c5773bf863233f24c9ee51087519f1f88b6f",
-    "OFL.txt": "50240ab035cf1b6b3307940235481d515c4b6de3ab1fa843dbe59e7892cb9d58"
+  "families": {
+    "Inter Tight": {
+      "upstream": "https://github.com/google/fonts/tree/main/ofl/intertight",
+      "source": "https://raw.githubusercontent.com/google/fonts/main/ofl/intertight/InterTight%5Bwght%5D.ttf",
+      "files": {
+        "InterTight.ttf": "b81b73dcb64df3c230cabade7df6c5773bf863233f24c9ee51087519f1f88b6f",
+        "OFL.txt": "50240ab035cf1b6b3307940235481d515c4b6de3ab1fa843dbe59e7892cb9d58"
+      }
+    },
+    "Noto Sans": {
+      "upstream": "https://github.com/google/fonts/tree/main/ofl/notosans",
+      "source": "https://raw.githubusercontent.com/google/fonts/main/ofl/notosans/NotoSans%5Bwdth,wght%5D.ttf",
+      "files": {
+        "NotoSans.ttf": "bfb7bb691513f12e734dc346c03a03f784912432d7e3fa8e56efcf906fe86b3d",
+        "NotoSans-OFL.txt": "cee9892f9f0cc8fe882c9e9537ee6a89621d86ee7ceaf70b02e2b2b1c25c061a"
+      }
+    },
+    "Montserrat": {
+      "upstream": "https://github.com/google/fonts/tree/main/ofl/montserrat",
+      "source": "https://raw.githubusercontent.com/google/fonts/main/ofl/montserrat/Montserrat%5Bwght%5D.ttf",
+      "files": {
+        "Montserrat.ttf": "0f7b311b2f3279e4eef9b2f968bcdbab6e28f4daeb1f049f4f278a902bcd82f7",
+        "Montserrat-OFL.txt": "8b7141c03fa4f8d44e6345d5d4931709290f0f67875e452e95ac1fd3a027802e"
+      }
+    },
+    "Noto Sans Symbols 2": {
+      "upstream": "https://github.com/google/fonts/tree/main/ofl/notosanssymbols2",
+      "source": "https://raw.githubusercontent.com/google/fonts/main/ofl/notosanssymbols2/NotoSansSymbols2-Regular.ttf",
+      "files": {
+        "NotoSansSymbols2.ttf": "7d5fb73b7ca67a6798101741f5d280a3d016a56a197afcd4199dbb57b4b82a21",
+        "NotoSansSymbols2-OFL.txt": "b118dd41337806a5d4797052c77caf3bd096aed783e5eb21b4d11154351e1ac0"
+      }
+    }
   }
 }

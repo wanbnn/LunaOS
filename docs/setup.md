@@ -1,6 +1,6 @@
 # Primeiro boot e instalação LunaOS
 
-A imagem de distribuição abre o assistente nativo. A interface usa Inter Tight,
+A imagem de distribuição abre o assistente nativo. A interface usa Inter Tight, Noto Sans ou Montserrat, escolhidas em Configurações,
 ícones Lucide e os mesmos recursos gráficos do desktop. Não é um instalador Linux.
 
 ## Fluxo implementado

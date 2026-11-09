@@ -148,7 +148,7 @@ File *fs_find(const char *path) {
 }
 /* Snapshot records retain the LunaFS2 layout. Directory storage and the
  * data volume grow independently of the historical 64-entry/2 MiB defaults. */
-#define FS_SLOT_START 8192u
+#define FS_SLOT_START LUNA_VOLUME_START
 #define FS_SLOT_SECTORS 4096u
 #define LEGACY_FILES 64u
 #define FS_V1_FILE_BYTES (PATH_CAP+12u+8192u)

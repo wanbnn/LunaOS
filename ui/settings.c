@@ -61,6 +61,7 @@ static void row(int x, int y, int w, const char *name, const char *value) {
                                "Output device",
                                "Mute",
                                "Dark glass",
+                               "Typeface",
                                "Language / Idioma",
                                0};
     static const char *pt[] = {"Resolução",
@@ -75,6 +76,7 @@ static void row(int x, int y, int w, const char *name, const char *value) {
                                "Dispositivo de saída",
                                "Silenciar",
                                "Vidro escuro",
+                               "Tipografia",
                                "Idioma"};
     if (prefs.language)
         for (int i = 0; en[i]; i++)
@@ -251,26 +253,27 @@ void settings_draw(int x, int y, int w, int h) {
     } else if (page == 4) {
         row(a, b + 83, width, "Dark glass", "");
         toggle(a + width - 67, b + 98, prefs.dark);
-        text(a + 12, b + 156, "Accent color", 16, WHITE);
+        row(a, b + 140, width, "Typeface", graphics_font_family_name(prefs.font_family));
+        text(a + 12, b + 206, "Accent color", 16, WHITE);
         for (int i = 0; i < 6; i++) {
             int xx = a + 24 + i * 51;
-            circle(xx, b + 204, 15, accents[i]);
+            circle(xx, b + 250, 15, accents[i]);
             if (i == prefs.accent)
-                icon(xx - 8, b + 196, ICON_CHEVRON_RIGHT, 16, WHITE);
+                icon(xx - 8, b + 242, ICON_CHEVRON_RIGHT, 16, WHITE);
         }
-        text(a + 12, b + 239, "Wallpaper", 16, WHITE);
+        text(a + 12, b + 280, "Wallpaper", 16, WHITE);
         int tw = (width - 36) / 4;
         for (int i = 0; i < 4; i++) {
             int xx = a + 8 + i * (tw + 6);
-            gfx_draw_wall_preview(xx, b + 277, tw, 76, i);
+            gfx_draw_wall_preview(xx, b + 310, tw, 56, i);
             if (prefs.wallpaper == i)
-                round_rect(xx, b + 354, tw, 4, 2, settings_accent(), 255);
+                round_rect(xx, b + 368, tw, 4, 2, settings_accent(), 255);
         }
-        button(a + 10, b + 376, 170, "Load PPM from file");
-        round_rect(a + 192, b + 375, width - 200, 35, 12, 0x102238, 80);
-        text(a + 204, b + 384, *prefs.wallpaper_path ? prefs.wallpaper_path : "/home/luna/wall.ppm",
+        button(a + 10, b + 388, 170, "Load PPM from file");
+        round_rect(a + 192, b + 387, width - 200, 35, 12, 0x102238, 80);
+        text(a + 204, b + 396, *prefs.wallpaper_path ? prefs.wallpaper_path : "/home/luna/wall.ppm",
              13, MUTED);
-        label(a + 12, b + 426, "PPM P3 wallpaper: max 64 x 64 pixels.");
+        label(a + 12, b + 436, "PPM P3 wallpaper: max 64 x 64 pixels.");
     } else if (page == 6) {
         row(a, b + 83, width, "Language / Idioma",
             prefs.language ? "Português (Brasil)" : "English");
@@ -447,9 +450,13 @@ void settings_click(int x, int y, int width, int height) {
     if (page == 4) {
         if (y >= 83 && y < 138)
             prefs.dark = !prefs.dark;
-        if (y >= 184 && y < 224 && a >= 0 && a < 320)
+        if (y >= 140 && y < 195) {
+            prefs.font_family = (prefs.font_family + 1) % graphics_font_family_count();
+            settings_changed();
+        }
+        if (y >= 230 && y < 270 && a >= 0 && a < 320)
             prefs.accent = (a + 1) / 51 % 6;
-        if (y >= 277 && y < 359) {
+        if (y >= 310 && y < 372) {
             int tw = (w - 36) / 4;
             int choice = (a - 8) / (tw + 6);
             if (choice >= 0 && choice < 4) {
@@ -457,7 +464,7 @@ void settings_click(int x, int y, int width, int height) {
                 gfx_rebuild_wallpaper();
             }
         }
-        if (y >= 375 && y < 412) {
+        if (y >= 387 && y < 424) {
             if (a < 184) {
                 bool ok = gfx_load_wallpaper(prefs.wallpaper_path);
                 strcpy(status,

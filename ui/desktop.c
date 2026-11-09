@@ -10,11 +10,9 @@
 #define WHITE 0xf2f7ff
 #define MUTED 0xb5cbdf
 extern int display_brightness;
-char browser_url[256] = "luna://welcome", browser_body[131072];
+char browser_url[256] = "luna://welcome";
 /* Linked stylesheets are much larger than a document, so they get their own
  * download buffer. */
-#define CSS_CAP 524288
-static char css_body[CSS_CAP];
 static char pending_url[256], files_dir[PATH_CAP] = "/home/luna";
 static bool browser_edit, browser_loading;
 static int selected_file, *file_indices, file_count, file_capacity;
@@ -194,6 +192,7 @@ static void browser_error_page(const char *message) {    char escaped[512];
 /* Downloads the stylesheets that the document links to and hands them over to
  * the engine, so that real pages keep their visual design. */
 static void browser_load_stylesheets(const char *base) {
+    gui_invalidate_app(APP_BROWSER);
     char href[512];
     for (int i = 0; i < 6; i++) {
         if (!web_stylesheet_link(i, href, sizeof(href)))
@@ -204,11 +203,15 @@ static void browser_load_stylesheets(const char *base) {
             continue;
         char error[192];
         error[0] = 0;
-        int length = net_http(target, css_body, sizeof(css_body), error, sizeof(error));
-        if (length > 0)
-            web_add_stylesheet(css_body, (size_t)length);
+        char *body = 0;
+        size_t length = 0;
+        if (net_http_alloc(target, &body, &length, error, sizeof(error)) > 0 && body)
+            web_add_stylesheet(href, body, length);
+        if (body)
+            heap_release(body);
     }
     web_finish_resources();
+    gui_invalidate_app(APP_BROWSER);
     /* Bound both transfers and decoded memory for this small native engine. */
     for (int i = 0; i < 8; i++) {
         if (!web_image_link(i, href, sizeof(href)))
@@ -217,9 +220,12 @@ static void browser_load_stylesheets(const char *base) {
         resolve_link(base, href, target, sizeof(target));
         if (strncmp(target, "http://", 7) && strncmp(target, "https://", 8))
             continue;
-        int length = net_http(target, css_body, sizeof(css_body), error, sizeof(error));
-        if (length > 0)
-            web_set_image(i, (const unsigned char *)css_body, (size_t)length);
+        char *body = 0;
+        size_t length = 0;
+        if (net_http_alloc(target, &body, &length, error, sizeof(error)) > 0 && body)
+            web_set_image(i, (const unsigned char *)body, length);
+        if (body)
+            heap_release(body);
     }
     web_finish_resources();
 }
@@ -232,13 +238,13 @@ static void browser_load(const char *url) {
     strcpy(browser_url, target);
     browser_edit = false;
     browser_loading = true;
+    web_reset();
     gui_invalidate_app(APP_BROWSER);
     PerfArea previous = perf_enter(PERF_WEB_LOAD);
     Window *window = &windows[APP_BROWSER];
     web_set_viewport(window->w - 40, window->h - 120);
     if (!strcmp(target, "luna://welcome")) {
-        web_reset();
-        browser_body[0] = 0;
+        /* The welcome page is drawn by the desktop, not by the web view. */
     } else if (!strncmp(target, "file://", 7)) {
         File *f = fs_find(target + 7);
         if (!f || f->dir || f->size >= WEB_CAP || !fs_materialize(f)) {
@@ -262,31 +268,35 @@ static void browser_load(const char *url) {
         }
         char error[256];
         error[0] = 0;
-        int length = net_http(request, browser_body, sizeof(browser_body), error, sizeof(error));
-        if (length < 0 && !explicit_scheme) {
+        char *body = 0;
+        size_t length = 0;
+        int fetched = net_http_alloc(request, &body, &length, error, sizeof(error));
+        if (fetched < 0 && !explicit_scheme) {
             /* Plain HTTP is only tried when the secure request failed. */
             strcpy(request, "http://");
             strcat(request, target);
-            length = net_http(request, browser_body, sizeof(browser_body), error, sizeof(error));
+            fetched = net_http_alloc(request, &body, &length, error, sizeof(error));
         }
-        if (length < 0) {
+        if (fetched < 0) {
             browser_error_page(error);
         } else {
             if(!net_http_final_url(browser_url,sizeof(browser_url))) strcpy(browser_url,request);
             char page_error[256];
             page_error[0] = 0;
-            web_load_document(browser_url, browser_body, (size_t)length, page_error, sizeof(page_error));
+            web_load_document(browser_url, body, length, page_error, sizeof(page_error));
             if (page_error[0])
                 browser_error_page(page_error);
             browser_load_stylesheets(browser_url);
         }
+        if (body)
+            heap_release(body);
     }
     perf_leave(previous);
     browser_loading = false;
     gui_invalidate_app(APP_BROWSER);
 }
 bool browser_is_loading(void) {
-    return browser_loading;
+    return browser_loading && !web_has_document();
 }
 void browser_open(const char *url) {
     if (strlen(url) >= sizeof(pending_url))
@@ -304,7 +314,6 @@ void app_reset(int app) {
         file_preview.pending = file_preview.ready = false;
     } else if (app == APP_BROWSER) {
         strcpy(browser_url, "luna://welcome");
-        browser_body[0] = 0;
         browser_edit = browser_loading = false;
         web_reset();
     } else if (app == APP_TASKS) {
@@ -316,7 +325,6 @@ void app_reset(int app) {
 void app_close(int app) {
     if (app==APP_BROWSER) {
         web_close();
-        browser_body[0]=0;
         browser_loading=false;
     }
 }
@@ -349,6 +357,19 @@ static void kill_selected(void) {
     Task *t = task_by_pid(selected_pid);
     if (t && !t->system && (task_current()->capabilities & CAP_TASK_CONTROL))
         task_kill(t->pid);
+}
+/* The wheel scrolls the document itself. It works even while the address bar
+ * is being edited, so a page can be read without losing the typed text. */
+void browser_scroll(int delta) {
+    if (browser_loading || !web_has_document() || !delta)
+        return;
+    int detents = delta > 0 ? delta : -delta;
+    if (detents > 4)
+        detents = 4;
+    /* A positive wheel delta moves the content up, like the down arrow. */
+    int step = (delta > 0 ? 96 : -96) * detents;
+    if (web_scroll_by(step))
+        gui_invalidate_browser_viewport();
 }
 void app_key(int app, int key) {
     if (app == APP_NOTES) {
@@ -559,8 +580,11 @@ void app_event(int app, AppEvent e) {
         app_key(app, e.a);
     else if (e.type == EVENT_CLICK)
         app_click(app, e.a, e.b);
-    else if (e.type == EVENT_NAVIGATE && app == APP_BROWSER)
+    else if (e.type == EVENT_SCROLL && app == APP_BROWSER)
+        browser_scroll(e.a);
+    else if (e.type == EVENT_NAVIGATE && app == APP_BROWSER) {
         browser_load(pending_url);
+    }
     else if (e.type == EVENT_FILE_PREVIEW && app == APP_FILES)
         load_file_preview();
 }
@@ -662,7 +686,7 @@ static void file_view(int x, int y, int w, int h) {
 }
 static void browser(int x, int y, int w, int h) {
     bool welcome = !strcmp(browser_url, "luna://welcome");
-    if (!welcome && !browser_loading)
+    if (!welcome && web_has_document())
         web_render(x, y + 54, w, h - 54);
     round_rect(x, y, w, 42, 19, 0x1e3550, 70);
     icon(x + 12, y + 9, ICON_GLOBE, 24, WHITE);
@@ -675,7 +699,7 @@ static void browser(int x, int y, int w, int h) {
         text(x + w - 12 - text_width(scheme, 13), y + 14, scheme, 13,
              secure ? 0x86e3ab : 0xffcf8f);
     }
-    if (browser_loading) {
+    if (browser_is_loading()) {
         /* Eight tiny primitives instead of frames, textures or trigonometry. */
         static const int8_t sx[8] = {0, 7, 10, 7, 0, -7, -10, -7};
         static const int8_t sy[8] = {-10, -7, 0, 7, 10, 7, 0, -7};

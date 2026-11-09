@@ -5,9 +5,11 @@
 #ifdef LUNA_USE_LITEHTML
 #include "litehtml_bridge.h"
 static LunaLiteDocument *litehtml_document;
+static bool litehtml_failed;
 static LunaLiteSurface litehtml_surface;
 static LunaLiteGraphics litehtml_graphics;
 #endif
+
 
 static WebNode *document_root;
 static WebRule *style_rules;
@@ -24,6 +26,40 @@ static size_t decoded_image_bytes;
  * stylesheets can be appended after the document was loaded. */
 static char *sheet_text;
 static size_t sheet_length, sheet_capacity;
+static void relayout(bool rebuild_renderer);
+
+typedef struct WebStylesheet {
+    struct WebStylesheet *next;
+    char *href, *text;
+} WebStylesheet;
+static WebStylesheet *linked_styles;
+static WebStylesheet **linked_styles_tail = &linked_styles;
+
+#ifdef LUNA_USE_LITEHTML
+static const char *litehtml_stylesheet(void *context, const char *href) {
+    (void)context;
+    for (WebStylesheet *sheet = linked_styles; sheet; sheet = sheet->next)
+        if (!strcmp(sheet->href, href))
+            return sheet->text;
+    return 0;
+}
+
+static void litehtml_disable(void) {
+    luna_lite_destroy(litehtml_document);
+    litehtml_document = 0;
+    litehtml_failed = true;
+}
+
+static void litehtml_rebuild(void) {
+    luna_lite_destroy(litehtml_document);
+    web_litehtml_graphics(&litehtml_graphics, &litehtml_surface, document_root);
+    litehtml_graphics.stylesheet = litehtml_stylesheet;
+    litehtml_document = luna_lite_create(document_root, &litehtml_graphics,
+                                         layout_width, viewport_height);
+    if (!litehtml_document)
+        litehtml_failed = true;
+}
+#endif
 
 static void sheet_append(const char *text, size_t len) {
     if (!len)
@@ -56,29 +92,37 @@ static void collect_style_elements(WebNode *node) {
         collect_style_elements(c);
 }
 /* Parses the collected stylesheet and applies it to the document again. */
-static void styles_rebuild(void) {
+static void styles_rebuild(bool rebuild_renderer) {
+    sheet_length = 0;
+    if (sheet_text)
+        sheet_text[0] = 0;
+    collect_style_elements(document_root);
+    for (WebStylesheet *sheet = linked_styles; sheet; sheet = sheet->next) {
+        sheet_append(sheet->text, strlen(sheet->text));
+        sheet_append("\n", 1);
+    }
     css_free_sheet(style_rules, style_rule_count);
     style_rules = 0;
     style_rule_count = 0;
     css_parse_sheet(sheet_text ? sheet_text : "", &style_rules, &style_rule_count);
-#ifdef LUNA_USE_LITEHTML
-    if (litehtml_document && sheet_text)
-        luna_lite_add_css(litehtml_document, sheet_text);
-#endif
-    web_relayout();
+    relayout(rebuild_renderer);
 }
-void web_add_stylesheet(const char *css, size_t len) {
-    if (!css || !len)
+void web_add_stylesheet(const char *href, const char *css, size_t len) {
+    if (!href || !css || !len)
         return;
-    sheet_append(css, len);
-    sheet_append("\n", 1);
+    WebStylesheet *sheet = web_malloc(sizeof(*sheet));
+    sheet->href = web_strdup(href);
+    sheet->text = web_strndup(css, len);
+    sheet->next = 0;
+    *linked_styles_tail = sheet;
+    linked_styles_tail = &sheet->next;
     styles_pending = true;
 }
 void web_finish_resources(void) {
     if (styles_pending)
-        styles_rebuild();
+        styles_rebuild(true);
     else if (images_pending)
-        web_relayout();
+        relayout(false);
     styles_pending = images_pending = false;
 }
 /* True when the media attribute of a link element selects a screen. */
@@ -198,7 +242,16 @@ void web_reset(void) {
         luna_lite_destroy(litehtml_document);
         litehtml_document = 0;
     }
+    litehtml_failed = false;
 #endif
+    while (linked_styles) {
+        WebStylesheet *sheet = linked_styles;
+        linked_styles = sheet->next;
+        web_free(sheet->href);
+        web_free(sheet->text);
+        web_free(sheet);
+    }
+    linked_styles_tail = &linked_styles;
     web_js_release();
     web_js_clear_dirty();
     if (document_root)
@@ -222,15 +275,21 @@ void web_close(void) {
     sheet_text=0; sheet_capacity=sheet_length=0;
     document_url[0]=0;
 }
-void web_relayout(void) {
+static void relayout(bool rebuild_renderer) {
     if (!document_root)
         return;
     PerfArea previous = perf_enter(PERF_WEB_LAYOUT);
     css_apply(document_root, style_rules, style_rule_count);
     web_layout(document_root, layout_width, viewport_height);
 #ifdef LUNA_USE_LITEHTML
-    if (litehtml_document)
-        luna_lite_layout(litehtml_document, layout_width, viewport_height);
+    if (!litehtml_failed && layout_width > 0 && viewport_height > 0) {
+        if (rebuild_renderer || !litehtml_document)
+            litehtml_rebuild();
+        else if (luna_lite_layout(litehtml_document, layout_width, viewport_height) < 0)
+            litehtml_disable();
+    }
+#else
+    (void)rebuild_renderer;
 #endif
     perf_leave(previous);
 }
@@ -239,6 +298,68 @@ void web_set_viewport(int width, int height) {
     viewport_height = height;
     css_set_viewport(width);
 }
+/* The parser only reads UTF-8. A document whose bytes are not valid UTF-8 is
+ * read as windows-1252, the way a browser treats such a page before parsing
+ * it, so accented text survives instead of turning into a question mark. */
+static const unsigned short cp1252_high[32] = {
+    0x20AC, 0x0081, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021,
+    0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0x008D, 0x017D, 0x008F,
+    0x0090, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
+    0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x009D, 0x017E, 0x0178
+};
+static bool utf8_valid(const char *text, size_t len) {
+    const unsigned char *p = (const unsigned char *)text;
+    size_t i = 0;
+    while (i < len) {
+        unsigned c = p[i];
+        int extra;
+        if (c < 0x80) {
+            i++;
+            continue;
+        } else if ((c & 0xe0) == 0xc0) {
+            extra = 1;
+            if (c < 0xc2)
+                return false;
+        } else if ((c & 0xf0) == 0xe0) {
+            extra = 2;
+            if (c == 0xe0 && p[i + 1] < 0xa0)
+                return false;
+        } else if ((c & 0xf8) == 0xf0) {
+            extra = 3;
+            if (c > 0xf4 || (c == 0xf0 && p[i + 1] < 0x90))
+                return false;
+        } else {
+            return false;
+        }
+        if (i + (size_t)extra >= len)
+            return false;
+        for (int k = 1; k <= extra; k++)
+            if ((p[i + k] & 0xc0) != 0x80)
+                return false;
+        i += (size_t)extra + 1;
+    }
+    return true;
+}
+static size_t windows1252_to_utf8(const char *text, size_t len, char *out) {
+    const unsigned char *p = (const unsigned char *)text;
+    size_t n = 0;
+    for (size_t i = 0; i < len; i++) {
+        unsigned c = p[i];
+        unsigned cp = (c >= 0x80 && c < 0xa0) ? cp1252_high[c - 0x80] : c;
+        if (cp < 0x80) {
+            out[n++] = (char)cp;
+        } else if (cp < 0x800) {
+            out[n++] = (char)(0xc0 | (cp >> 6));
+            out[n++] = (char)(0x80 | (cp & 63));
+        } else {
+            out[n++] = (char)(0xe0 | (cp >> 12));
+            out[n++] = (char)(0x80 | ((cp >> 6) & 63));
+            out[n++] = (char)(0x80 | (cp & 63));
+        }
+    }
+    out[n] = 0;
+    return n;
+}
 bool web_load_document(const char *url, const char *html, size_t len, char *error, size_t ecap) {
     web_reset();
     if (url)
@@ -246,23 +367,25 @@ bool web_load_document(const char *url, const char *html, size_t len, char *erro
     WebNode *root = 0;
     char parse_error[128];
     parse_error[0] = 0;
-    if (!web_parse(html ? html : "", len, &root, parse_error, sizeof(parse_error)) || !root) {
+    const char *text = html ? html : "";
+    size_t size = len;
+    char *converted = 0;
+    if (size && !utf8_valid(text, size)) {
+        converted = web_malloc(size * 3 + 1);
+        if (converted)
+            size = windows1252_to_utf8(text, size, converted);
+    }
+    if (converted)
+        text = converted;
+    bool parsed = web_parse(text, size, &root, parse_error, sizeof(parse_error)) && root;
+    if (converted)
+        web_free(converted);
+    if (!parsed) {
         if (error)
             append(error, parse_error[0] ? parse_error : "The document could not be parsed.", ecap);
         return false;
     }
     document_root = root;
-#ifdef LUNA_USE_LITEHTML
-    /* Opt-in renderer: keep Lexbor's live DOM for QuickJS while litehtml
-     * independently computes CSS layout from the original document source. */
-    if (html && len && layout_width > 0 && viewport_height > 0) {
-        char *copy = web_strndup(html, len);
-        web_litehtml_graphics(&litehtml_graphics, &litehtml_surface);
-        litehtml_document = luna_lite_create(copy, &litehtml_graphics,
-                                               layout_width, viewport_height);
-        web_free(copy);
-    }
-#endif
     sheet_length = 0;
     if (sheet_text)
         sheet_text[0] = 0;
@@ -278,13 +401,8 @@ bool web_load_document(const char *url, const char *html, size_t len, char *erro
         /* A script error is reported but the document stays on screen. */
         strcpy(document_error, js_error);
     }
-    PerfArea previous = perf_enter(PERF_WEB_LAYOUT);
-    if (web_js_dirty()) {
-        web_js_clear_dirty();
-        css_apply(document_root, style_rules, style_rule_count);
-    }
-    web_layout(document_root, layout_width, viewport_height);
-    perf_leave(previous);
+    web_js_clear_dirty();
+    styles_rebuild(true);
     return true;
 }
 const char *web_document_url(void) { return document_url; }
@@ -315,14 +433,13 @@ bool web_scroll_by(int delta) {
 void web_render(int x, int y, int w, int h) {
     if (!document_root)
         return;
-    viewport_height = h;
-    if (w != layout_width) {
+    if (w != layout_width || h != viewport_height) {
         web_set_viewport(w, h);
-        styles_rebuild();
+        styles_rebuild(false);
     }
     if (web_js_dirty()) {
         web_js_clear_dirty();
-        web_relayout();
+        styles_rebuild(true);
     }
     PerfArea previous = perf_enter(PERF_WEB_PAINT);
     int saved[4];
@@ -334,9 +451,14 @@ void web_render(int x, int y, int w, int h) {
     rect(x, y, w, h, 0xffffff);
 #ifdef LUNA_USE_LITEHTML
     if (litehtml_document) {
-        web_litehtml_offset(&litehtml_surface, x, y - scroll_offset);
-        luna_lite_draw(litehtml_document, 0, 0);
-    } else
+        web_litehtml_offset(&litehtml_surface, x, y);
+        if (!luna_lite_draw(litehtml_document, 0, -scroll_offset)) {
+            litehtml_disable();
+            gfx_clip(left, top, right > left ? right - left : 0, bottom > top ? bottom - top : 0);
+            rect(x, y, w, h, 0xffffff);
+        }
+    }
+    if (!litehtml_document)
 #endif
         web_paint(document_root, x, y - scroll_offset);
     gfx_clip(saved[0], saved[1], saved[2], saved[3]);
@@ -379,12 +501,22 @@ bool web_click(int x, int y, char *href, size_t cap) {
     if (!document_root || !href || !cap)
         return false;
     href[0] = 0;
-    WebNode *node = hit_link(document_root, x, y);
+    if (web_js_dirty()) {
+        web_js_clear_dirty();
+        styles_rebuild(true);
+    }
+    WebNode *node;
+#ifdef LUNA_USE_LITEHTML
+    if (litehtml_document)
+        node = luna_lite_hit_link(litehtml_document, x, y, scroll_offset);
+    else
+#endif
+        node = hit_link(document_root, x, y);
     if (!node)
         return false;
     web_js_dispatch(node, "click", document_root);
     const char *target = web_attr(node, "href");
-    if (!target || !*target)
+    if (!target || !*target || strlen(target) >= cap)
         return false;
     strcpy(href, target);
     return true;

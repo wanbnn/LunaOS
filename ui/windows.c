@@ -1,6 +1,7 @@
 #include "wifi.h"
 #include "acpi.h"
 #include "calendar.h"
+#include "heap.h"
 #include "install.h"
 #include "settings.h"
 #include "web.h"
@@ -10,7 +11,7 @@ Window windows[APP_COUNT];
 bool ui_dirty = true, controls_open;
 int active_app = -1;
 static int zorder[APP_COUNT], zcount, drag = -1, drag_dx, drag_dy, previous_buttons;
-static uint32_t surfaces[APP_COUNT][GFX_CACHE_W * GFX_CACHE_H];
+static uint32_t *surfaces[APP_COUNT];
 /* One cached window background. Repainting the glass costs a full per-pixel
  * pass over the window; keeping the last one turns a content update into a
  * memcpy plus the client drawing. */
@@ -235,6 +236,8 @@ void gui_task_closed(int app) {
     if (app < 0 || app >= APP_COUNT)
         return;
     damage_window(app);
+    heap_release(surfaces[app]);
+    surfaces[app] = 0;
     motion_cancel(app);
     motion_y[app] = 0;
     windows[app].open = false;
@@ -739,6 +742,12 @@ static void paint_region(int rx, int ry, int rw, int rh, int first) {
         if (!damage_overlap(region, (Damage){w->x, visible_y, w->w, w->h}))
             continue;
         bool large = window_large(w);
+        if (!large && !surfaces[w->app]) {
+            surfaces[w->app] = heap_allocate_owned(GFX_CACHE_W * GFX_CACHE_H * sizeof(uint32_t), 1);
+            large = !surfaces[w->app];
+            if (!large)
+                surface_valid[w->app] = false;
+        }
         uint32_t *surface = large ? large_surface : surfaces[w->app];
         int stride = large ? GFX_MAX_W : GFX_CACHE_W;
         if (update_surface(w, large, surface, stride)) {
@@ -859,11 +868,23 @@ void gui_init(void) {
     setup_init();
     if (!setup_active)
         gui_open(APP_HOME);
-    serial_write("GUI: floating windows / native ring-3 clients / Inter Tight + Lucide\n");
+    serial_write("GUI: floating windows / native ring-3 clients / 3 text families + Lucide\n");
 }
 void gui_click(int x, int y) {
     gui_pointer(x, y, 1);
     gui_pointer(x, y, 0);
+}
+void gui_scroll(int x, int y, int delta) {
+    if (setup_active || !delta)
+        return;
+    for (int z = zcount - 1; z >= 0; z--) {
+        int app = zorder[z];
+        Window *w = &windows[app];
+        if (!w->open || w->minimized || !hit(x, y, w->x, w->y, w->w, w->h))
+            continue;
+        task_post(w->pid, (AppEvent){EVENT_SCROLL, delta, 0});
+        return;
+    }
 }
 void gui_pointer(int x, int y, int buttons) {
     if (setup_active) {

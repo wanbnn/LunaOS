@@ -79,7 +79,7 @@ void input_init(void);
 int input_key(void);
 void input_poll(void);
 bool input_pending(void);
-bool input_pointer(int *, int *, int *);
+bool input_pointer(int *, int *, int *, int *);
 extern int mouse_x, mouse_y, mouse_buttons;
 bool input_interrupt(void);
 bool input_uses_irq(void);
@@ -160,6 +160,9 @@ bool net_ping(const char *, char *, size_t);
 bool net_download_file(const char *, const char *, uint64_t *, char *, size_t);
 int net_http(const char *, char *, size_t, char *, size_t);
 int net_https(const char *, char *, size_t, char *, size_t);
+/* Bodies that grow with the document. The caller releases *out. */
+int net_http_alloc(const char *, char **, size_t *, char *, size_t);
+int net_https_alloc(const char *, char **, size_t *, char *, size_t);
 typedef bool (*NetHttpsSink)(void *, const void *, size_t);
 bool net_https_stream(const char *, NetHttpsSink, void *, uint64_t *, char *, size_t);
 extern bool net_ready;
@@ -186,7 +189,6 @@ void browser_open(const char *);
 extern int active_app;
 extern bool controls_open;
 extern char browser_url[256];
-extern char browser_body[131072];
 typedef enum {
     ICON_MOON,
     ICON_TERMINAL,
@@ -242,6 +244,11 @@ void line(int, int, int, int, uint32_t);
 void circle(int, int, int, uint32_t);
 void text(int, int, const char *, int, uint32_t);
 int text_width(const char *, int);
+/* Text families the user can pick; the symbol family backs them up. */
+void graphics_set_font_family(int);
+int graphics_font_family(void);
+int graphics_font_family_count(void);
+const char *graphics_font_family_name(int);
 void icon(int, int, int, int, uint32_t);
 void cursor(void);
 #endif

@@ -103,7 +103,11 @@ static int tokenize(const char *line, char tok[96][512]) {
                 return -2;
             continue;
         }
-        if (!quote && (c == '|' || c == '>' || c == '<' || c == ';' || c == '&')) {
+        /* A single & belongs to the word: an address carries a query string.
+         * Only the doubled one is the operator that joins two commands. */
+        bool separator = !quote && (c == '|' || c == '>' || c == '<' || c == ';');
+        bool conjunction = !quote && c == '&' && line[i + 1] == '&';
+        if (separator || conjunction) {
             if (have) {
                 n++;
                 k = 0;

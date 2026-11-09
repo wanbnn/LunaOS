@@ -13,8 +13,8 @@ HEADER = struct.Struct('<8sIIII40s')
 RECORD = struct.Struct('<II32s')
 DELTA_MAGIC = b'LUNADLT2'
 DELTA_BITMAP_BYTES = 32
-EXCLUDED_START = 4 * 1024 * 1024
-EXCLUDED_END = 8 * 1024 * 1024
+EXCLUDED_START = 8 * 1024 * 1024
+EXCLUDED_END = 12 * 1024 * 1024
 
 
 def check_commit(commit):
@@ -26,7 +26,7 @@ def read_image(path, commit=None):
     raw = Path(path).read_bytes()
     if len(raw) != IMAGE_BYTES or raw[510:512] != b'\x55\xaa':
         raise ValueError('expected a 66 MiB LunaOS BIOS/UEFI image')
-    if raw[7168 * 512:7168 * 512 + 8] != b'LUNAIMG1':
+    if raw[16383 * 512:16383 * 512 + 8] != b'LUNAIMG1':
         raise ValueError('missing LunaOS image metadata')
     if commit is not None and commit.encode() not in raw[:4 * 1024 * 1024]:
         raise ValueError('image does not contain the requested compiled commit')

@@ -10,6 +10,7 @@ static bool absolute_pending;
 static uint32_t fallback_at;
 static struct {
     int x, y, buttons;
+    int wheel;
     bool edge;
 } pointers[64];
 static unsigned pointer_read, pointer_write;
@@ -31,18 +32,21 @@ static void vmcall(uint32_t command, uint32_t argument, uint32_t result[4]) {
     __asm__ volatile("inl %%dx, %%eax" : "+a"(a), "+b"(b), "+c"(c), "+d"(d) :: "memory");
     result[0] = a; result[1] = b; result[2] = c; result[3] = d;
 }
-static void queue_pointer(void) {
+static void queue_pointer(int wheel) {
     static int previous_buttons;
     bool edge = previous_buttons != mouse_buttons;
     previous_buttons = mouse_buttons;
     unsigned last = (pointer_write + 63) % 64;
-    if (!edge && pointer_write != pointer_read && !pointers[last].edge) {
+    /* A wheel turn is its own event: merging it into a motion entry would
+     * drop the scroll before the window layer sees it. */
+    if (!edge && !wheel && pointer_write != pointer_read && !pointers[last].edge) {
         pointers[last].x = mouse_x; pointers[last].y = mouse_y;
     } else {
         unsigned next = (pointer_write + 1) % 64;
         if (next == pointer_read) pointer_read = (pointer_read + 1) % 64;
         pointers[pointer_write].x = mouse_x; pointers[pointer_write].y = mouse_y;
         pointers[pointer_write].buttons = mouse_buttons;
+        pointers[pointer_write].wheel = wheel;
         pointers[pointer_write].edge = edge;
         pointer_write = next;
     }
@@ -58,8 +62,13 @@ static void absolute_poll(void) {
         mouse_x = (r[1] & 65535) * (W - 1) / 65535;
         mouse_y = (r[2] & 65535) * (H - 1) / 65535;
         mouse_buttons = ((r[0] & 0x20) ? 1 : 0) | ((r[0] & 0x10) ? 2 : 0) | ((r[0] & 8) ? 4 : 0);
+        /* The fourth word of the VMMouse packet carries the vertical wheel as
+         * the movement of that one detent: a positive value is a turn down and
+         * a negative one a turn up. A packet without a wheel turn reports
+         * zero, so the value is used as it arrives and never accumulated. */
+        int wheel = (int)(int32_t)r[3];
         if (prefs.left_handed) mouse_buttons = (mouse_buttons & 4) | ((mouse_buttons & 1) << 1) | ((mouse_buttons & 2) >> 1);
-        queue_pointer();
+        queue_pointer(wheel);
     }
 }
 static uint8_t packet[3];
@@ -196,7 +205,7 @@ void input_poll(void) {
             queue_key(KEY_ALT_RELEASE);
         if (mouse_buttons) {
             mouse_buttons = 0;
-            queue_pointer();
+            queue_pointer(0);
         }
     }
     for (int n = 0; n < 1024 && raw_read != raw_write; n++) {
@@ -247,7 +256,7 @@ void input_poll(void) {
                 if (prefs.left_handed)
                     mouse_buttons = (mouse_buttons & 4) | ((mouse_buttons & 1) << 1) |
                                     ((mouse_buttons & 2) >> 1);
-                queue_pointer();
+                queue_pointer(0);
             }
             continue;
         }
@@ -346,12 +355,13 @@ int input_key(void) {
     return key;
 }
 
-bool input_pointer(int *x, int *y, int *buttons) {
+bool input_pointer(int *x, int *y, int *buttons, int *wheel) {
     if (pointer_read == pointer_write)
         return false;
     *x = pointers[pointer_read].x;
     *y = pointers[pointer_read].y;
     *buttons = pointers[pointer_read].buttons;
+    *wheel = pointers[pointer_read].wheel;
     pointer_read = (pointer_read + 1) % 64;
     return true;
 }

@@ -1,7 +1,5 @@
 /* LunaOS native graphics callback implementation for litehtml.
  * No host window system or desktop toolkit is required.
- * The image callback is deliberately non-rendering until resource IDs
- * are wired to the existing Luna Browser resource cache.
  */
 #include "webengine.h"
 #include "litehtml_bridge.h"
@@ -20,14 +18,38 @@ static void lr(void *p, int x, int y, int w, int h, uint32_t color) {
     if (w > 0 && h > 0)
         rect(surface->offset_x + x, surface->offset_y + y, w, h, color);
 }
+static const WebNode *find_image(const WebNode *node, const char *url) {
+    const char *src = node->image ? web_attr(node, "src") : 0;
+    if (src && !strcmp(src, url))
+        return node;
+    for (const WebNode *child = node->first_child; child; child = child->next) {
+        const WebNode *image = find_image(child, url);
+        if (image)
+            return image;
+    }
+    return 0;
+}
+static void ls(void *p, const char *url, int *w, int *h) {
+    LunaLiteSurface *surface = p;
+    const WebNode *image = find_image(surface->root, url);
+    if (image) {
+        *w = image->image_w;
+        *h = image->image_h;
+    }
+}
 static void li(void *p, int x, int y, int w, int h, const char *url) {
-    (void)p; (void)x; (void)y; (void)w; (void)h; (void)url;
-    /* Integrate with Luna's image cache before enabling image painting. */
+    LunaLiteSurface *surface = p;
+    const WebNode *image = find_image(surface->root, url);
+    if (image && w > 0 && h > 0)
+        gfx_rgba_image(surface->offset_x + x, surface->offset_y + y, w, h,
+                       image->image, image->image_w, image->image_h);
 }
 static void lc(void *p, int x, int y, int w, int h) {
     LunaLiteSurface *s = p;
-    if (s->clip_depth >= 16)
+    if (s->clip_depth >= 16) {
+        s->clip_depth++;
         return;
+    }
     int *saved = s->clips[s->clip_depth++];
     gfx_get_clip(saved);
     int left = s->offset_x + x, top = s->offset_y + y;
@@ -43,19 +65,23 @@ static void lu(void *p) {
     LunaLiteSurface *s = p;
     if (!s->clip_depth)
         return;
-    int *saved = s->clips[--s->clip_depth];
+    if (--s->clip_depth >= 16)
+        return;
+    int *saved = s->clips[s->clip_depth];
     gfx_clip(saved[0], saved[1], saved[2], saved[3]);
 }
-void web_litehtml_graphics(LunaLiteGraphics *g, LunaLiteSurface *s) {
+void web_litehtml_graphics(LunaLiteGraphics *g, LunaLiteSurface *s, const WebNode *root) {
     memset(g, 0, sizeof(*g));
     memset(s, 0, sizeof(*s));
     g->context = s;
     g->text_width = lw;
     g->draw_text = lt;
     g->fill_rect = lr;
+    g->image_size = ls;
     g->draw_image = li;
     g->push_clip = lc;
     g->pop_clip = lu;
+    s->root = root;
 }
 void web_litehtml_offset(LunaLiteSurface *s, int x, int y) {
     s->offset_x = x;

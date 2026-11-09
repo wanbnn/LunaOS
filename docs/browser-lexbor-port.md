@@ -12,8 +12,9 @@
   layout e QuickJS). Não é ainda um DOM Lexbor vivo.
 - **Build:** `make LUNA_LEXBOR=1 lexbor-native` compila a biblioteca
   estática freestanding x86 de 32 bits; `make LUNA_LEXBOR=1 all` seleciona
-  Lexbor no navegador ao compilar a ISO. `LUNA_LEXBOR=0` mantém o legado.
-  A opção permanece **desligada por padrão** até o teste da ISO/guest.
+  Lexbor no navegador ao compilar a ISO. A build padrão usa Lexbor com
+  [litehtml](litehtml-port.md) para layout e pintura. `LUNA_LEXBOR=0`
+  seleciona o parser e o renderizador legados.
 - **CI:** `.github/workflows/browser-dom.yml` compila Lexbor em host
   e freestanding, testa árvore DOM e sanitizadores, e tenta linkar o kernel.
 

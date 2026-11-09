@@ -1,0 +1,68 @@
+--- formatting_context.cpp
++++ formatting_context.cpp
+@@ -321,8 +321,12 @@
+ 	bool left_side	   = false; // true if floating block at the left side
+ 	bool right_side	   = false; // true if floating block at the right side
+ 
+-	while(true)
+-	{
++	// Each retry must move past a float. A coincident or invalid edge
++	// can otherwise keep the search on the same line indefinitely.
++	auto retries = m_floats_left.size() + m_floats_right.size() + 1;
++	while(retries--)
++	{
++		const auto previous_top = pos_el.y;
+ 		std::optional<position> max_left_pos;
+ 		bool					found	 = false;
+ 		pixel_t					max_left = m_current_left;
+@@ -403,11 +407,12 @@
+ 				return pos;
+ 			}
+ 		}
+-	}
+-	// position not found
+-	new_position pos;
+-	pos.found = false;
+-	return pos;
++		if(!(pos_el.y > previous_top))
++			break;
++	}
++	// Place below the floats when their edges do not give a usable next line.
++	return {true, true, std::max(el_pos.el_pos.y, get_floats_height()),
++			0, el_pos.container_width};
+ }
+ 
+ litehtml::formatting_context::new_position litehtml::formatting_context::place_to_right(const el_position& el_pos) const
+@@ -422,8 +427,12 @@
+ 	bool left_side	   = false; // true if floating block at the left side
+ 	bool right_side	   = false; // true if floating block at the right side
+ 
+-	while(true)
+-	{
++	// Each retry must move past a float. A coincident or invalid edge
++	// can otherwise keep the search on the same line indefinitely.
++	auto retries = m_floats_left.size() + m_floats_right.size() + 1;
++	while(retries--)
++	{
++		const auto previous_top = pos_el.y;
+ 		std::optional<position> min_right_pos;
+ 		bool					found	  = false;
+ 		pixel_t					min_right = max_right;
+@@ -505,11 +514,12 @@
+ 				return pos;
+ 			}
+ 		}
+-	}
+-	// position not found
+-	new_position pos;
+-	pos.found = false;
+-	return pos;
++		if(!(pos_el.y > previous_top))
++			break;
++	}
++	// Place below the floats when their edges do not give a usable next line.
++	return {true, true, std::max(el_pos.el_pos.y, get_floats_height()),
++			el_pos.container_width - el_pos.el_pos.width, el_pos.container_width};
+ }
+ 
+ void litehtml::formatting_context::update_floats(pixel_t dy, const std::shared_ptr<render_item> &parent)

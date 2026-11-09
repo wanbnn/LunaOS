@@ -31,7 +31,7 @@ jobs:
       - name: Install LunaOS build toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-multilib libc6-dev-i386 clang lld python3-pip
+          sudo apt-get install -y gcc-multilib g++-multilib libc6-dev-i386 clang lld python3-pip
           mkdir -p .tools/python build dist
           python3 -m pip install --target .tools/python -r requirements-dev.txt
       - name: Compile full LunaOS (BIOS and UEFI images)

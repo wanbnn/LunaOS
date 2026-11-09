@@ -5,6 +5,7 @@ typedef struct {
     int mouse_speed, left_handed, keyboard_layout, repeat_delay, repeat_rate;
     int brightness, night_light, volume, balance, muted;
     int wallpaper, dark, accent, frame_hz;
+    int font_family; /* Index of the text family used by default. */
     char wallpaper_path[PATH_CAP];
     int language, developer, output_mode;
     char dns_server[16]; /* Empty means automatic DHCP DNS. */

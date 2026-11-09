@@ -14,13 +14,16 @@ LIBGCC32 := $(firstword $(wildcard .tools/usr/lib/gcc/*/*/32/libgcc.a /usr/lib/g
 # Lexbor is the default HTML5 backend in LunaOS images; set LUNA_LEXBOR=0
 # explicitly for emergency legacy fallback builds.
 LUNA_LEXBOR ?= 1
-# Optional experimental CSS renderer; never silently claim kernel support.
-# GCC's host libstdc++.a must pass freestanding link checks before enabling.
-LUNA_LITEHTML ?= 0
+# litehtml provides layout and painting. The legacy renderer remains available.
+LUNA_LITEHTML ?= $(LUNA_LEXBOR)
 LITEHTML_CXX ?= g++
-LITEHTML_CXXFLAGS := -m32 -std=c++17 -Os -fexceptions -frtti -fno-pie -fno-pic -fno-stack-protector -fno-threadsafe-statics -ffunction-sections -fdata-sections -mno-sse -mno-mmx -mfpmath=387 -Iui -Ithird_party/litehtml/include -Ithird_party/litehtml/src
-LITEHTML_LIBSTDCXX := $(shell $(LITEHTML_CXX) -m32 -print-file-name=libstdc++.a)
-LITEHTML_LIBSUPCXX := $(shell $(LITEHTML_CXX) -m32 -print-file-name=libsupc++.a)
+LITEHTML_CXX_ARCH := $(shell $(LITEHTML_CXX) -dumpmachine)
+LITEHTML_CXX_VERSION := $(shell $(LITEHTML_CXX) -dumpversion)
+LITEHTML_LOCAL_LIB := .tools/usr/lib/gcc/$(LITEHTML_CXX_ARCH)/$(LITEHTML_CXX_VERSION)/32
+LITEHTML_LOCAL_INCLUDE := $(wildcard .tools/usr/include/$(LITEHTML_CXX_ARCH)/c++/$(LITEHTML_CXX_VERSION)/32)
+LITEHTML_CXXFLAGS := -m32 -std=c++17 -Oz -fexceptions -fno-asynchronous-unwind-tables -frtti -fno-pie -fno-pic -fno-stack-protector -fno-threadsafe-statics -ffunction-sections -fdata-sections -mno-sse -mno-mmx -mfpmath=387 -DLITEHTML_NO_THREADS $(addprefix -isystem ,$(abspath $(LITEHTML_LOCAL_INCLUDE)))
+LITEHTML_LIBSTDCXX := $(or $(wildcard $(LITEHTML_LOCAL_LIB)/libstdc++.a),$(shell $(LITEHTML_CXX) -m32 -print-file-name=libstdc++.a))
+LITEHTML_LIBSUPCXX := $(or $(wildcard $(LITEHTML_LOCAL_LIB)/libsupc++.a),$(shell $(LITEHTML_CXX) -m32 -print-file-name=libsupc++.a))
 LITEHTML_LIBGCC_EH := $(shell $(LITEHTML_CXX) -m32 -print-file-name=libgcc_eh.a)
 ifeq ($(LUNA_LEXBOR),1)
 CFLAGS += -DLUNA_USE_LEXBOR
@@ -38,9 +41,12 @@ $(OBJECTS) $(BEAR_OBJECTS): Makefile
 $(patsubst %.c,build/%.o,$(SOURCES)): $(wildcard kernel/*.h ui/*.h drivers/*.h include/net/*.h)
 .PHONY: test-rtw8822be-rx-dma test-wifi-scan all clean run run-iso iso test test-iso-install check test-wifi-port test-wireless-frames test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
 all: dist/LunaOS.img dist/LunaOS.iso
-build/font.h: tools/fontgen.py assets/fonts/InterTight.ttf
+build/font.h: tools/fontgen.py assets/fonts/InterTight.ttf assets/fonts/NotoSans.ttf \
+             assets/fonts/Montserrat.ttf assets/fonts/NotoSansSymbols2.ttf
 	$(PYTHON) tools/fontgen.py
-build/notices.h: tools/notices.py assets/fonts/OFL.txt assets/icons/lucide/LICENSE $(wildcard assets/licenses/*) third_party/quickjs/LICENSE third_party/musl/COPYRIGHT third_party/bearssl/LICENSE.txt third_party/stb/LICENSE third_party/uacpi/LICENSE $(wildcard third_party/lexbor/LICENSE)
+build/notices.h: tools/notices.py assets/fonts/OFL.txt assets/fonts/NotoSans-OFL.txt \
+             assets/fonts/Montserrat-OFL.txt assets/fonts/NotoSansSymbols2-OFL.txt \
+             assets/icons/lucide/LICENSE $(wildcard assets/licenses/*) third_party/quickjs/LICENSE third_party/musl/COPYRIGHT third_party/bearssl/LICENSE.txt third_party/stb/LICENSE third_party/uacpi/LICENSE $(wildcard third_party/lexbor/LICENSE third_party/litehtml/LICENSE third_party/litehtml/src/gumbo/LICENSE)
 	$(PYTHON) tools/notices.py
 build/uacpi/%.o: third_party/uacpi/source/%.c $(shell find third_party/uacpi/include -name '*.h')
 	@mkdir -p $(dir $@)
@@ -56,6 +62,12 @@ build/ui/windows.o build/ui/desktop.o: ui/window.h
 # left untouched so an incremental build does not unnecessarily relink.
 .PHONY: FORCE
 FORCE:
+build/web-engine-config: FORCE
+	@mkdir -p build
+	@printf '%s\n' 'Lexbor=$(LUNA_LEXBOR) litehtml=$(LUNA_LITEHTML)' > $@.tmp
+	@cmp -s $@.tmp $@ || mv $@.tmp $@
+	@rm -f $@.tmp
+build/kernel/main.o build/ui/web_dom.o build/ui/web_lexbor.o build/ui/web_view.o: build/web-engine-config
 build/luna_build_version.h: FORCE
 	@mkdir -p build
 	$(PYTHON) tools/build-version.py
@@ -117,23 +129,44 @@ build/kernel/entry.o: kernel/entry.S
 # -ffreestanding mode. The resulting objects still use no Linux dynamic
 # linker; unresolved host ABI dependencies must fail the kernel link.
 .PHONY: litehtml-native
-litehtml-native: build/litehtml-native/liblitehtml.a build/ui/litehtml_bridge.o build/lib/cxx_runtime.o
-build/litehtml-native/liblitehtml.a:
+litehtml-native: build/litehtml-native/liblitehtml.a build/ui/litehtml_bridge.o build/lib/cxx_runtime.o build/litehtml-float-progress.o build/litehtml-patch/line_box.o build/litehtml-patch/render_inline_context.o
+build/litehtml-native/liblitehtml.a build/litehtml-native/src/gumbo/libgumbo.a &: Makefile
 	@test -f third_party/litehtml/CMakeLists.txt || (echo "Run git submodule update --init --recursive" && exit 1)
-	cmake -S third_party/litehtml -B build/litehtml-native -D CMAKE_C_FLAGS="-m32 -Os -ffreestanding -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -mfpmath=387" -DCMAKE_CXX_FLAGS="$(LITEHTML_CXXFLAGS)" -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY -DLITEHTML_BUILD_TESTING=OFF -DLITEHTML_ENABLE_LINT=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=OFF
+	cmake -S third_party/litehtml -B build/litehtml-native -DCMAKE_CXX_COMPILER="$(LITEHTML_CXX)" -DCMAKE_C_FLAGS="-m32 -Oz -ffreestanding -fno-pie -fno-pic -fno-stack-protector -ffunction-sections -fdata-sections -mno-sse -mno-mmx -mfpmath=387" -DCMAKE_CXX_FLAGS="$(LITEHTML_CXXFLAGS)" -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY -DLITEHTML_BUILD_TESTING=OFF -DLITEHTML_ENABLE_LINT=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=OFF
 	cmake --build build/litehtml-native --target litehtml --parallel 2
-build/ui/litehtml_bridge.o: ui/litehtml_bridge.cpp ui/litehtml_bridge.h
+build/ui/litehtml_bridge.o: ui/litehtml_bridge.cpp ui/litehtml_bridge.h ui/web_dom_types.h Makefile
 	@mkdir -p build/ui
-	$(LITEHTML_CXX) $(LITEHTML_CXXFLAGS) -c $< -o $@
+	$(LITEHTML_CXX) $(LITEHTML_CXXFLAGS) -DLUNA_KERNEL_LITEHTML -Iui -Ikernel -Ithird_party/litehtml/include -Ithird_party/litehtml/src -c $< -o $@
+build/litehtml-float-progress.cpp: third_party/litehtml/src/formatting_context.cpp tools/litehtml-float-progress.patch
+	@mkdir -p build
+	patch -s -o $@ $< tools/litehtml-float-progress.patch
+build/litehtml-float-progress.o: build/litehtml-float-progress.cpp Makefile
+	$(LITEHTML_CXX) $(LITEHTML_CXXFLAGS) -Ithird_party/litehtml/include/litehtml -Ithird_party/litehtml/src -c $< -o $@
+# The width of a float container has to fit the content and the float that
+# share its line. litehtml takes the larger of the two, so the float lands
+# on top of the content. The fix touches the line box, so the patched header
+# and the two sources that use it are built outside the third-party tree.
+LITEHTML_PATCH_DIR := build/litehtml-patch
+LITEHTML_PATCH_INC := -I$(LITEHTML_PATCH_DIR)/include/litehtml -I$(LITEHTML_PATCH_DIR)/include -Ithird_party/litehtml/include/litehtml -Ithird_party/litehtml/include -Ithird_party/litehtml/src
+$(LITEHTML_PATCH_DIR)/.patched: tools/litehtml-float-width.patch third_party/litehtml/src/line_box.cpp third_party/litehtml/src/render_inline_context.cpp third_party/litehtml/include/litehtml/line_box.h third_party/litehtml/include/litehtml/render_item.h
+	@mkdir -p $(LITEHTML_PATCH_DIR)/src $(LITEHTML_PATCH_DIR)/include
+	cp -r third_party/litehtml/include/litehtml $(LITEHTML_PATCH_DIR)/include/
+	cp third_party/litehtml/src/line_box.cpp third_party/litehtml/src/render_inline_context.cpp $(LITEHTML_PATCH_DIR)/src/
+	patch -s -p1 -d $(LITEHTML_PATCH_DIR) < $<
+	@touch $@
+build/litehtml-patch/line_box.o: $(LITEHTML_PATCH_DIR)/.patched Makefile
+	$(LITEHTML_CXX) $(LITEHTML_CXXFLAGS) $(LITEHTML_PATCH_INC) -c $(LITEHTML_PATCH_DIR)/src/line_box.cpp -o $@
+build/litehtml-patch/render_inline_context.o: $(LITEHTML_PATCH_DIR)/.patched Makefile
+	$(LITEHTML_CXX) $(LITEHTML_CXXFLAGS) $(LITEHTML_PATCH_INC) -c $(LITEHTML_PATCH_DIR)/src/render_inline_context.cpp -o $@
 build/lib/cxx_glibc_compat.o: lib/cxx_glibc_compat.c
 	@mkdir -p build/lib
 	$(CC) $(CFLAGS) $(MUSLINC) -c $< -o $@
-build/lib/cxx_runtime.o: lib/cxx_runtime.cpp
+build/lib/cxx_runtime.o: lib/cxx_runtime.cpp Makefile
 	@mkdir -p build/lib
 	$(LITEHTML_CXX) $(LITEHTML_CXXFLAGS) -c $< -o $@
 ifeq ($(LUNA_LITEHTML),1)
 CFLAGS += -DLUNA_USE_LITEHTML
-OBJECTS += build/ui/litehtml_bridge.o build/lib/cxx_runtime.o build/lib/cxx_glibc_compat.o
+OBJECTS += build/ui/litehtml_bridge.o build/lib/cxx_runtime.o build/lib/cxx_glibc_compat.o build/litehtml-float-progress.o build/litehtml-patch/line_box.o build/litehtml-patch/render_inline_context.o
 LITEHTML_LIBS := build/litehtml-native/liblitehtml.a build/litehtml-native/src/gumbo/libgumbo.a $(LITEHTML_LIBSTDCXX) $(LITEHTML_LIBSUPCXX) $(LITEHTML_LIBGCC_EH)
 build/kernel.elf: $(LITEHTML_LIBS)
 endif

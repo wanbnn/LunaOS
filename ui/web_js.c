@@ -84,6 +84,8 @@ static WebJsState *state_of(WebNode *node) {
     return (WebJsState *)node->js;
 }
 
+static void install_element(JSContext *ctx, JSValue object);
+
 static JSValue make_element(JSContext *ctx, WebNode *node) {
     WebJsState *state = state_of(node);
     if (state && !JS_IsUndefined(state->object))
@@ -93,6 +95,7 @@ static JSValue make_element(JSContext *ctx, WebNode *node) {
         return object;
     JS_DefinePropertyValueStr(ctx, object, "__node",
                                JS_NewInt64(ctx, (int64_t)(uintptr_t)node), JS_PROP_CONFIGURABLE);
+    install_element(ctx, object);
     if (!state) {
         state = web_malloc(sizeof(WebJsState));
         memset(state, 0, sizeof(*state));
@@ -427,30 +430,29 @@ static JSValue element_setter(JSContext *ctx, JSValueConst this_val, JSValueCons
     switch (magic) {
         case PROP_ID:
             web_set_attr(node, "id", buffer);
+            mark_dirty();
             break;
         case PROP_CLASS_NAME:
             web_set_attr(node, "class", buffer);
+            mark_dirty();
             break;
         case PROP_HREF:
             web_set_attr(node, "href", buffer);
+            mark_dirty();
             break;
         case PROP_TITLE:
             web_set_attr(node, "title", buffer);
+            mark_dirty();
             break;
         case PROP_VALUE:
             web_set_attr(node, "value", buffer);
+            mark_dirty();
             break;
         case PROP_TEXT_CONTENT: {
             while (node->first_child) {
                 WebNode *child = node->first_child;
-                node->first_child = child->next;
-                if (node->first_child)
-                    node->first_child->prev = 0;
-                else
-                    node->last_child = 0;
-                child->parent = 0;
-                child->next = child->prev = 0;
-                web_free_tree(child);
+                web_node_detach(child);
+                track_detached(child);
             }
             if (buffer[0]) {
                 WebNode *text = web_node_new(WEB_TEXT);
@@ -463,14 +465,8 @@ static JSValue element_setter(JSContext *ctx, JSValueConst this_val, JSValueCons
         case PROP_INNER_HTML: {
             while (node->first_child) {
                 WebNode *child = node->first_child;
-                node->first_child = child->next;
-                if (node->first_child)
-                    node->first_child->prev = 0;
-                else
-                    node->last_child = 0;
-                child->parent = 0;
-                child->next = child->prev = 0;
-                web_free_tree(child);
+                web_node_detach(child);
+                track_detached(child);
             }
             WebNode *parsed = 0;
             char error[128];

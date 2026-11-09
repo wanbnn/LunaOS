@@ -140,8 +140,8 @@ int main(void) {
     sector[510] = 0x55;
     sector[511] = 0xaa;
     sector[450] = 0xda;
-    store32(sector + 454, 8192);
-    store32(sector + 458, 65536 - 8192);
+    store32(sector + 454, LUNA_VOLUME_START);
+    store32(sector + 458, 65536 - LUNA_VOLUME_START);
     sector[466] = 0xef;
     store32(sector + 470, 65536);
     store32(sector + 474, 69632);

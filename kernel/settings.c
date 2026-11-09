@@ -19,11 +19,12 @@ static void assign(const char *k, int v) {
         OPT(keyboard_layout, 0, 1) OPT(repeat_delay, 250, 1000) OPT(repeat_rate, 15, 30)
             OPT(brightness, 30, 100) OPT(night_light, 0, 1) OPT(volume, 0, 100)
                 OPT(balance, -100, 100) OPT(muted, 0, 1) OPT(wallpaper, 0, 4) OPT(dark, 0, 1)
-                    OPT(accent, 0, 5)
+                    OPT(accent, 0, 5) OPT(font_family, 0, 2)
 #undef OPT
 }
 void settings_init(void) {
     net_set_dns(prefs.dns_server);
+    graphics_set_font_family(prefs.font_family);
     File *f = fs_find("/etc/luna-settings");
     if (!f)
         return;
@@ -73,6 +74,7 @@ bool settings_write(void) {
     STORE(developer) STORE(output_mode) STORE(mouse_speed) STORE(left_handed) STORE(keyboard_layout)
         STORE(repeat_delay) STORE(repeat_rate) STORE(brightness) STORE(night_light) STORE(volume)
             STORE(balance) STORE(muted) STORE(wallpaper) STORE(dark) STORE(accent)
+                STORE(font_family)
 #undef STORE
     append(out, "dns_server=", sizeof(out));
     append(out, prefs.dns_server, sizeof(out));
@@ -85,6 +87,12 @@ bool settings_write(void) {
 void settings_changed(void) {
     net_set_dns(*prefs.dns_server ? prefs.dns_server : "auto");
     static int dark = -1, accent = -1, wallpaper = -1;
+    static int family = -1;
+    if (family != prefs.font_family) {
+        family = prefs.font_family;
+        graphics_set_font_family(family);
+        gui_invalidate_all();
+    }
     static int brightness = 100, night_light;
     input_apply_settings();
     audio_apply_settings();

@@ -45,7 +45,8 @@ try:
     print('PASS: dropdown changes actual scanout to 1280x720 and back',flush=True)
     click(x+65,y+62+6*47+18)
     click(x+250,y+175)
-    assert int.from_bytes(memory(g,symbol_address('prefs')+188,4),'little')==1
+    # Offset of Preferences.developer (see the struct in kernel/settings.h).
+    assert int.from_bytes(memory(g,symbol_address('prefs')+192,4),'little')==1
     click(x+250,y+105)
     click(x+85,y+w[4]-66-30)
     g.screenshot('settings-system')
@@ -59,8 +60,9 @@ try:
     g.command('cat /etc/luna-settings','developer=1')
     g.close()
     g=Guest(TEST/'next.img')
-    assert int.from_bytes(memory(g,symbol_address('prefs')+184,4),'little')==1
+    # Offsets of Preferences.language and Preferences.developer.
     assert int.from_bytes(memory(g,symbol_address('prefs')+188,4),'little')==1
+    assert int.from_bytes(memory(g,symbol_address('prefs')+192,4),'little')==1
     g.command('cat /home/luna/note.md','hello')
     print('PASS: System language, developer preference and note persist after reboot',flush=True)
     (ROOT/'dist/desktop-next-report.json').write_text(json.dumps({

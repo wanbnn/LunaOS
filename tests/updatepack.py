@@ -25,7 +25,7 @@ position = len(manifest)
 record_data = list(chunks(image))
 for i in range(count):
     sector, packed_bytes, digest = RECORD.unpack_from(manifest, HEADER.size + i * RECORD.size)
-    assert not 8192 <= sector < 16384
+    assert not 16384 <= sector < 24576
     packed = package[position:position + packed_bytes]
     position += packed_bytes
     raw = zlib.decompress(packed) if packed_bytes else bytes(CHUNK)

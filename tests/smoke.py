@@ -10,7 +10,14 @@ import threading
 import time
 import wave
 
+import re
+import sys
 from guest import ROOT, TEST, Guest
+
+# The live file system starts right after the kernel payload; keep this in
+# step with the layout the kernel uses.
+VOLUME_START = int(re.search(r"#define LUNA_VOLUME_START (\d+)u",
+                             (ROOT / "kernel" / "install.h").read_text()).group(1))
 
 
 class Fixture(http.server.BaseHTTPRequestHandler):
@@ -98,7 +105,7 @@ try:
     g = None
     # Damage the newest snapshot header; the previous completed generation must survive.
     with (TEST / "disk.img").open("r+b") as f:
-        f.seek(8192 * 512)
+        f.seek(VOLUME_START * 512)
         f.write(b"INVALID!")
     g = Guest(TEST / "disk.img", network=False, ram=64)
     g.command("net", "no supported RTL8139")

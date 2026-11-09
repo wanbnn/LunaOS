@@ -59,7 +59,8 @@ static bool compatible_disk(unsigned disk, uint8_t *mbr) {
         info->sectors < LUNA_IMAGE_BYTES / 512 || !disk_read_on(disk, 0, mbr)) return false;
     uint32_t id = word(mbr + 440);
     return id && id != 0x4c554e41 && mbr[510] == 0x55 && mbr[511] == 0xaa &&
-        mbr[450] == 0xda && word(mbr + 454) == 8192 && word(mbr + 458) == LUNA_ESP_SECTOR - 8192 &&
+        mbr[450] == 0xda && word(mbr + 454) == LUNA_VOLUME_START &&
+        word(mbr + 458) == LUNA_ESP_SECTOR - LUNA_VOLUME_START &&
         mbr[466] == 0xef && word(mbr + 470) == LUNA_ESP_SECTOR && word(mbr + 474) == LUNA_ESP_BYTES / 512;
 }
 static bool decode(unsigned i, uint8_t *raw) {

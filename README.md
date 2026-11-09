@@ -24,7 +24,7 @@ O LunaOS tem **bootloader próprio**, **kernel próprio em C**, **interface grá
 **O que existe hoje:**
 
 - Boot BIOS x86 e caminho **UEFI x64 experimental** que transfere o controle ao kernel i386.
-- Desktop com dock, pesquisa, janelas, compositor 32 bits, **transições suaves nativas**, fontes **Inter Tight** e ícones **Lucide**.
+- Desktop com dock, pesquisa, janelas, compositor 32 bits, **transições suaves nativas**, fontes **Inter Tight**, **Noto Sans** e **Montserrat** (com reserva de símbolos) e ícones **Lucide**.
 - Assistente de primeiro boot, modo live, instalação em IDE e backends **SATA/AHCI, NVMe, USB EHCI/BOT, SDHCI/eMMC e MegaRAID MFI experimentais** (512B LBA; validação em hardware físico pendente), login.
 - Terminal **lunaSH**, Files, Notes, Settings, navegador e Gerenciador de Tarefas.
 - **LunaSDK v2**: aplicativos JavaScript `.ljs`, Python limitado `.py` (prévia), API de descoberta **PCI real** e endpoints de hardware implementados por drivers C nativos; projetos C/CMake ainda são compilados no host.
@@ -102,18 +102,18 @@ Saiba mais: [Memória física](docs/physical-memory.md), [RAM por processo](docs
 
 ### Requisitos de desenvolvimento
 
-Host Linux x86 com ferramentas GCC/binutils e **suporte de compilação de 32 bits**, Make, Python 3, Clang/LLD (loader UEFI) e QEMU x86. Os utilitários Python para a **build**, como Pillow e CairoSVG, estão em `requirements-dev.txt`. O script `tools/bootstrap.sh` pode instalá-los localmente em `.tools/python`; ele verifica as bibliotecas e os cabeçalhos de compilação 32 bits sem precisar de `ripgrep`.
+Host Linux x86 com ferramentas GCC/G++/binutils com **suporte de compilação de 32 bits**, CMake, Make, Python 3, Clang/LLD (loader UEFI) e QEMU x86. Os utilitários Python para a **build**, como Pillow e CairoSVG, estão em `requirements-dev.txt`. O script `tools/bootstrap.sh` pode instalá-los localmente em `.tools/python`; ele verifica as bibliotecas e os cabeçalhos de compilação 32 bits sem precisar de `ripgrep`.
 
 Exemplo no Ubuntu (nomes de pacotes sujeitos à versão da distribuição):
 
 ```bash
 sudo apt update
-sudo apt install -y build-essential gcc-multilib libc6-dev-i386 binutils clang lld \
-  make python3 python3-pip qemu-system-x86 ovmf
+sudo apt install -y build-essential gcc-multilib g++-multilib libc6-dev-i386 binutils clang lld cmake \
+  make patch python3 python3-pip qemu-system-x86 ovmf
 ```
 
 ```bash
-git clone https://github.com/wanbnn/LunaOS.git
+git clone --recurse-submodules https://github.com/wanbnn/LunaOS.git
 cd LunaOS
 bash tools/bootstrap.sh
 make -j2 all

@@ -9,6 +9,57 @@
 #include "task.h"
 #include "web.h"
 #include "wifi.h"
+/* A response body that grows as the document demands. A fixed destination
+ * is used by callers that own a buffer; an owned one is allocated here and
+ * released by the caller. */
+#define NET_BODY_MAX (4u * 1024u * 1024u)
+typedef struct {
+    char *data;
+    size_t len;
+    size_t cap;
+    bool owned;
+} net_body;
+
+/* Makes room for `needed` bytes plus the terminator. */
+static bool net_body_reserve(net_body *b, size_t needed) {
+    if (needed + 1 <= b->cap)
+        return true;
+    if (!b->owned) {
+        /* The destination belongs to the caller and cannot grow. */
+        return false;
+    }
+    size_t cap = b->cap ? b->cap : 8192;
+    while (cap < needed + 1) {
+        if (cap >= NET_BODY_MAX)
+            return false;
+        cap *= 2;
+    }
+    if (cap > NET_BODY_MAX + 1)
+        cap = NET_BODY_MAX + 1;
+    char *data = heap_allocate(cap);
+    if (!data)
+        return false;
+    if (b->data && b->len)
+        memcpy(data, b->data, b->len);
+    if (b->data)
+        heap_release(b->data);
+    b->data = data;
+    b->cap = cap;
+    return true;
+}
+
+/* Copies a run of bytes into the body, growing it when it owns the memory. */
+static bool net_body_append(net_body *b, const char *src, size_t size) {
+    if (!size)
+        return true;
+    if (!net_body_reserve(b, b->len + size))
+        return false;
+    memcpy(b->data + b->len, src, size);
+    b->len += size;
+    b->data[b->len] = 0;
+    return true;
+}
+
 bool net_ready;
 static uint16_t io;
 static uint8_t mac[6], gateway_mac[6];
@@ -122,10 +173,12 @@ static void http_begin(uint32_t limit) {
     http_operation.start = frame_clock;
     http_operation.limit = limit;
 }
-static int http_end(int result, char *out, char *error, size_t capacity) {
+static int http_end(int result, net_body *out, char *error, size_t capacity) {
     if (http_expired()) {
         http_timeouts++;
-        out[0] = error[0] = 0;
+        if (out->data)
+            out->data[0] = 0;
+        error[0] = 0;
         append(error, transport_error, capacity);
         result = -1;
     }
@@ -1494,7 +1547,7 @@ static bool equals_ci(const char *a, const char *b, size_t n) {
     }
     return true;
 }
-static int http_response(char *response, unsigned used, char *out, size_t cap,
+static int http_response(char *response, unsigned used, net_body *out,
                          char *error, size_t ecap, int *status_out, char *location,
                          size_t locap, bool secure, unsigned secure_error, int n) {
     char *body = 0;
@@ -1536,11 +1589,11 @@ static int http_response(char *response, unsigned used, char *out, size_t cap,
         }
         /* The body of a redirect is not the document. */
         unsigned redirect_body = used - (unsigned)(body - response);
-        if (redirect_body >= cap)
-            redirect_body = cap - 1;
-        memmove(out, body, redirect_body);
-        out[redirect_body] = 0;
-        return (int)redirect_body;
+        if (!net_body_append(out, body, redirect_body)) {
+            append(error, "The redirect response is larger than the browser accepts.", ecap);
+            return -1;
+        }
+        return (int)out->len;
     }
     if (code < 200 || code >= 300) {
         append(error, "HTTP status ", ecap);
@@ -1588,8 +1641,18 @@ static int http_response(char *response, unsigned used, char *out, size_t cap,
         append(error, ").", ecap);
         return -1;
     }
+    if (!chunked && content_length < 0) {
+        /* The answer carries no length at all: the body ends with the close.
+         * Naming it in the log separates this case from a truncated reply. */
+        serial_write("HTTP: no length header; body delimited by the connection close\n");
+    }
     if ((secure && secure_error == 31) || (!secure && n < 0)) {
-        if (!chunked && (content_length < 0 || (unsigned)content_length > available)) {
+        /* RFC 7230 section 3.3.3: a response with neither Content-Length nor
+         * chunked framing is delimited by the connection close, so the bytes
+         * already read are the whole answer. Rejecting them only hides a legal
+         * HTTP/1.0 reply. A declared length the peer never delivered is still
+         * a truncated response and stays rejected. */
+        if (!chunked && content_length >= 0 && (unsigned)content_length > available) {
             append(error, "Transport interrupted; incomplete response rejected.", ecap);
             append(error," ",ecap);append(error,transport_error,ecap);
             return -1;
@@ -1647,11 +1710,13 @@ static int http_response(char *response, unsigned used, char *out, size_t cap,
                 append(error, "Incomplete chunked response.", ecap);
                 return -1;
             }
-            if (size >= cap - written) {
-                append(error, "Chunked document exceeds the destination size limit.", ecap);
+            if (!net_body_append(out, body + pos, size)) {
+                append(error, out->owned
+                               ? "The document is larger than the browser accepts."
+                               : "Chunked document exceeds the destination size limit.",
+                       ecap);
                 return -1;
             }
-            memmove(out + written, body + pos, size);
             written += size;
             pos += size;
             if (pos + 1 >= available) {
@@ -1670,14 +1735,21 @@ static int http_response(char *response, unsigned used, char *out, size_t cap,
             return -1;
         }
         written = content_length >= 0 ? (unsigned)content_length : available;
-        if (written >= cap) {
-            append(error, "Document exceeds the destination size limit.", ecap);
+        if (!net_body_append(out, body, written)) {
+            append(error, out->owned
+                               ? "The document is larger than the browser accepts."
+                               : "Document exceeds the destination size limit.",
+                       ecap);
             return -1;
         }
-        memmove(out, body, written);
     }
-    out[written] = 0;
-    return written;
+    if (!net_body_reserve(out, written)) {
+        append(error, "The document could not be stored.", ecap);
+        return -1;
+    }
+    out->data[written] = 0;
+    out->len = written;
+    return (int)written;
 }
 
 static int http_open(const char *url, bool *secured, char *error, size_t ecap) {
@@ -1745,7 +1817,9 @@ static int http_open(const char *url, bool *secured, char *error, size_t ecap) {
     }
     char request[4608] = "GET ";
     append(request, path, sizeof(request));
-    append(request, " HTTP/1.0\r\nHost: ", sizeof(request));
+    /* HTTP/1.1 is required by several front ends; HTTP/1.0 invites a close
+     * delimited body that leaves the response without a length. */
+    append(request, " HTTP/1.1\r\nHost: ", sizeof(request));
     append(request, host, sizeof(request));
     if (port != (secure ? 443u : 80u)) {
         char p[16];
@@ -1755,7 +1829,11 @@ static int http_open(const char *url, bool *secured, char *error, size_t ecap) {
     }
     append(
         request,
-        "\r\nUser-Agent: LunaBrowser/0.3\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
+        "\r\nUser-Agent: LunaBrowser/0.3\r\n"
+        "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n"
+        "Accept-Language: pt-BR,pt;q=0.9,en;q=0.8\r\n"
+        "Accept-Encoding: identity\r\n"
+        "Connection: close\r\n\r\n",
         sizeof(request));
     if ((secure ? tls_write(request, strlen(request)) : stream_write(request, strlen(request))) <
         0) {
@@ -1768,15 +1846,18 @@ static int http_open(const char *url, bool *secured, char *error, size_t ecap) {
     return 0;
 }
 
-static int http_once(const char *url, char *out, size_t cap, char *error, size_t ecap,
+static int http_once(const char *url, net_body *out, char *error, size_t ecap,
                      int *status_out, char *location, size_t locap) {
-    out[0] = 0;
+    out->len = 0;
+    if (out->data)
+        out->data[0] = 0;
     *status_out = 0;
     location[0] = 0;
     bool secure;
     if (http_open(url, &secure, error, ecap) < 0)
         return -1;
     size_t capacity = WEB_CAP + 8192u;
+    size_t ceiling = NET_BODY_MAX + 65536u;
     char *response = heap_allocate(capacity);
     if (!response) {
         stream_close();
@@ -1785,7 +1866,30 @@ static int http_once(const char *url, char *out, size_t cap, char *error, size_t
     }
     unsigned used = 0;
     int n = 0;
-    while (used + 1u < capacity) {
+    bool truncated = false;
+    for (;;) {
+        if (used + 1u >= capacity) {
+            /* The response is larger than the first buffer: grow it instead
+             * of rejecting the document for being big. */
+            size_t grown = capacity * 2;
+            if (grown > ceiling)
+                grown = ceiling;
+            if (grown <= capacity) {
+                truncated = true;
+                break;
+            }
+            char *bigger = heap_allocate(grown);
+            if (!bigger) {
+                heap_release(response);
+                stream_close();
+                append(error, "Insufficient memory for HTTP response.", ecap);
+                return -1;
+            }
+            memcpy(bigger, response, used);
+            heap_release(response);
+            response = bigger;
+            capacity = grown;
+        }
         n = secure ? tls_read(response + used, capacity - used - 1u)
                    : stream_read(response + used, capacity - used - 1u);
         if (n <= 0)
@@ -1796,10 +1900,10 @@ static int http_once(const char *url, char *out, size_t cap, char *error, size_t
     unsigned secure_error = secure ? tls_error() : 0;
     stream_close();
     int result = -1;
-    if (used + 1u >= capacity)
-        append(error, "Response exceeds the destination size limit.", ecap);
+    if (truncated)
+        append(error, "The response is larger than the browser accepts.", ecap);
     else
-        result = http_response(response, used, out, cap, error, ecap, status_out, location, locap,
+        result = http_response(response, used, out, error, ecap, status_out, location, locap,
                                secure, secure_error, n);
     heap_release(response);
     return result;
@@ -1811,13 +1915,14 @@ static bool url_resolve(const char *base, const char *reference, char *out, size
     return net_url_resolve(base,reference,out,cap);
 }
 
-static int http_impl(const char *url, char *out, size_t cap, char *error, size_t ecap,
+static int http_impl(const char *url, net_body *out, char *error, size_t ecap,
                      bool https_only) {
     final_http_url[0]=0;
     char current[4096];
     size_t n = strlen(url);
     if (n >= sizeof(current)) {
-        out[0] = 0;
+        if (out->data)
+            out->data[0] = 0;
         error[0] = 0;
         append(error, "The address is too long.", ecap);
         return -1;
@@ -1831,7 +1936,7 @@ static int http_impl(const char *url, char *out, size_t cap, char *error, size_t
         int status = 0;
         char location[4096];
         location[0] = 0;
-        int result = http_once(current, out, cap, error, ecap, &status, location, sizeof(location));
+        int result = http_once(current, out, error, ecap, &status, location, sizeof(location));
         if (result < 0)
             return -1;
         if (status < 300 || status >= 400) {
@@ -1883,7 +1988,8 @@ int net_http(const char *url, char *out, size_t cap, char *error, size_t ecap) {
     }
     network_owner = task_current()->pid;
     http_begin(HTTP_OPERATION_TIMEOUT_MS);
-    int result = http_end(http_impl(url, out, cap, error, ecap, false), out, error, ecap);
+    net_body body = {out, 0, cap, false};
+    int result = http_end(http_impl(url, &body, error, ecap, false), &body, error, ecap);
     if(result<0) {
         failed_http_url[0]=failed_http_error[0]=0;
         append(failed_http_url,url,sizeof(failed_http_url));
@@ -1900,8 +2006,57 @@ int net_https(const char *url, char *out, size_t cap, char *error, size_t ecap) 
     if (network_owner) { append(error, "Network service busy.", ecap); return -1; }
     network_owner = task_current()->pid;
     http_begin(HTTP_OPERATION_TIMEOUT_MS);
-    int result = http_end(http_impl(url, out, cap, error, ecap, true), out, error, ecap);
+    net_body body = {out, 0, cap, false};
+    int result = http_end(http_impl(url, &body, error, ecap, true), &body, error, ecap);
     network_owner = 0;
+    return result;
+}
+
+/* Fetches a document into a buffer that grows with it. On success *out owns
+ * the bytes and the caller releases them with heap_release. */
+int net_http_alloc(const char *url, char **out, size_t *out_len, char *error, size_t ecap) {
+    if (!out || !out_len) return -1;
+    *out = 0;
+    *out_len = 0;
+    if (network_owner) {
+        error[0] = 0;
+        append(error, "Network service busy; try again shortly.", ecap);
+        return -1;
+    }
+    network_owner = task_current()->pid;
+    http_begin(HTTP_OPERATION_TIMEOUT_MS);
+    net_body body = {0, 0, 0, true};
+    int result = http_end(http_impl(url, &body, error, ecap, false), &body, error, ecap);
+    network_owner = 0;
+    if (result < 0) {
+        if (body.data)
+            heap_release(body.data);
+        return -1;
+    }
+    *out = body.data;
+    *out_len = body.len;
+    return result;
+}
+
+int net_https_alloc(const char *url, char **out, size_t *out_len, char *error, size_t ecap) {
+    if (!out || !out_len) return -1;
+    *out = 0;
+    *out_len = 0;
+    if (!ecap) return -1;
+    error[0] = 0;
+    if (network_owner) { append(error, "Network service busy.", ecap); return -1; }
+    network_owner = task_current()->pid;
+    http_begin(HTTP_OPERATION_TIMEOUT_MS);
+    net_body body = {0, 0, 0, true};
+    int result = http_end(http_impl(url, &body, error, ecap, true), &body, error, ecap);
+    network_owner = 0;
+    if (result < 0) {
+        if (body.data)
+            heap_release(body.data);
+        return -1;
+    }
+    *out = body.data;
+    *out_len = body.len;
     return result;
 }
 

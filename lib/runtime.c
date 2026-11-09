@@ -10,11 +10,9 @@
 #include "dtoa.h"
 #include "heap.h"
 static int native_errno;
-/* A fully linked C++ STL can pull musl's __errno_location from libc.a.
- * Keep Luna's bootstrap errno accessor as a weak fallback, avoiding an
- * ABI-level multiple definition. Runtime TLS compatibility must still be
- * validated before enabling C++ in the guest. */
-__attribute__((weak)) int *__errno_location(void) { return &native_errno; }
+/* Both public and libc-internal callers use the kernel's errno storage. */
+int *__errno_location(void) { return &native_errno; }
+int *___errno_location(void) __attribute__((alias("__errno_location")));
 void *malloc(size_t n) { return heap_allocate(n); }
 size_t malloc_usable_size(void *p) { return heap_usable_size(p); }
 void free(void *p) { if (heap_release(p)) kernel_fault(); }

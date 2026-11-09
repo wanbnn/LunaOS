@@ -48,7 +48,7 @@ jobs:
       - name: Install LunaOS build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-multilib clang lld python3-pip
+          sudo apt-get install -y gcc-multilib g++-multilib clang lld python3-pip
           mkdir -p .tools/python build dist
           python3 -m pip install --target .tools/python -r requirements-dev.txt
       - name: Build LunaOS experimental image and ISO
