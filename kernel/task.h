@@ -1,6 +1,8 @@
 #ifndef LUNA_TASK_H
 #define LUNA_TASK_H
 #include "perf.h"
+#include "elf32.h"
+#include "pmm.h"
 #define TASK_MAX 20
 #define TASK_EVENTS 64
 #define APP_COUNT 7
@@ -70,6 +72,10 @@ typedef struct {
     uint32_t read_event, write_event;
     AppEvent delivered;
     bool event_pending, system, exec_image;
+    uint8_t exec_permissions[LUNA_ELF_PAGES];
+    PmmAllocation exec_allocation;
+    uint32_t parent_pid;
+    char exec_cwd[128];
     struct { char path[128]; uint32_t offset; bool open; } exec_fds[EXEC_FD_MAX];
     void (*service)(void);
     PerfArea perf_area;
@@ -88,6 +94,8 @@ extern int current_task;
 void task_init(void);
 uint32_t task_spawn(int, const char *, unsigned, unsigned);
 uint32_t task_spawn_elf(const char *path);
+uint32_t task_spawn_elf_args(const char *path, int argc, const char *const argv[],
+                             int envc, const char *const envp[]);
 uint32_t task_spawn_service(const char *, void (*service)(void));
 Task *task_by_pid(uint32_t);
 Task *task_for_app(int);
