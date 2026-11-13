@@ -496,3 +496,10 @@ git-upstream-host-build:
 
 git-upstream-host-test: git-upstream-host-build
 	$(PYTHON) tests/git_upstream_host.py --git third_party/git/git
+
+# ELF32 validation test; host-only parser and guest freestanding i386 object.
+.PHONY: test-elf32
+test-elf32:
+	@mkdir -p build
+	$(CC) -std=gnu11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -Ikernel kernel/elf32.c tests/elf32.c -o build/elf32-test
+	./build/elf32-test
