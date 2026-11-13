@@ -331,7 +331,8 @@ uint32_t task_spawn_elf_args(const char *path, int argc, const char *const argv[
     }
     uint32_t parent_pid = task_current()->pid;
     char parent_cwd[PATH_CAP];
-    strcpy(parent_cwd, cwd);
+    Task *parent = task_current();
+    strcpy(parent_cwd, parent->exec_image ? parent->exec_cwd : cwd);
     uint32_t pid = spawn(-1, "ELF32 native user process", 3, 0, NULL);
     if (!pid)
         goto fail_load;
@@ -595,6 +596,29 @@ static bool exec_path(Task *t, const char *path, char out[PATH_CAP]) {
     strcat(joined, "/");
     strcat(joined, path);
     return fs_path(joined, out);
+}
+/* Copy guest argv/envp arrays before creating another task. Reject
+ * pointers outside mapped pages and non-terminated/oversized vectors. */
+static bool exec_guest_vector(Task *t, uint32_t offsets, char strings[][256],
+                              const char **out, unsigned limit, int *argc) {
+    if (!offsets) {
+        *argc = 0;
+        return true;
+    }
+    for (unsigned i = 0; i <= limit; i++) {
+        uint32_t at = offsets + i * 4u, ptr;
+        if (at < offsets || !exec_user_range(t, at, 4u, false))
+            return false;
+        memcpy(&ptr, (const void *)(uintptr_t)(USER_CODE + at), 4u);
+        if (!ptr) {
+            *argc = (int)i;
+            return true;
+        }
+        if (i == limit || !exec_string(t, ptr, strings[i], 256u))
+            return false;
+        out[i] = strings[i];
+    }
+    return false;
 }
 static TrapFrame *syscall(TrapFrame *f) {
     Task *t = task_current();
@@ -911,6 +935,48 @@ static TrapFrame *syscall(TrapFrame *f) {
         /* LunaFS2 persists the entire generation atomically, not just a
          * single inode. Surface snapshot/flush errors to the caller. */
         f->eax = fs_save() ? 0u : (uint32_t)-1;
+        break;
+    }
+    case SYS_EXEC_SPAWN: {
+        char raw[PATH_CAP], path[PATH_CAP];
+        if (!exec_string(t, f->ebx, raw, sizeof(raw)) ||
+            !exec_path(t, raw, path)) {
+            f->eax = (uint32_t)-1; break;
+        }
+        char arg_storage[24][256], env_storage[16][256];
+        const char *arg_vector[24], *env_vector[16];
+        int argc = 0, envc = 0;
+        if (!exec_guest_vector(t, f->ecx, arg_storage, arg_vector, 24, &argc) ||
+            !argc ||
+            !exec_guest_vector(t, f->edx, env_storage, env_vector, 16, &envc)) {
+            f->eax = (uint32_t)-1; break;
+        }
+        uint32_t pid = task_spawn_elf_args(path, argc, arg_vector, envc, env_vector);
+        f->eax = pid ? pid : (uint32_t)-1;
+        break;
+    }
+    case SYS_EXEC_WAITPID: {
+        uint32_t pid = f->ebx, status = f->ecx, opts = f->edx;
+        if (!t->exec_image || opts > 1u ||
+            (status && !exec_user_range(t, status, 4u, true))) {
+            f->eax = (uint32_t)-1; break;
+        }
+        Task *child = task_by_pid(pid);
+        if (!child || !child->exec_image || child->parent_pid != t->pid) {
+            f->eax = (uint32_t)-1; break;
+        }
+        if (opts == 1u && child->state != TASK_EXITED) {
+            f->eax = 0; break; /* Limited WNOHANG support. */
+        }
+        unsigned code;
+        if (!task_wait_elf(pid, 60000u, &code)) {
+            f->eax = (uint32_t)-1; break;
+        }
+        if (status) {
+            uint32_t encoded = (code & 255u) << 8;
+            memcpy((void *)(uintptr_t)(USER_CODE + status), &encoded, 4u);
+        }
+        f->eax = pid;
         break;
     }
     case SYS_SYSTEM:
