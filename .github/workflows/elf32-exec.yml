@@ -7,6 +7,7 @@ on:
       - 'apps/shell.c'
       - 'tests/elf32.c'
       - 'tests/elf32_guest.py'
+      - 'sdk/guest/**'
       - 'Makefile'
       - '.github/workflows/elf32-exec.yml'
   push:
@@ -49,6 +50,8 @@ jobs:
           python3 -m pip install --target .tools/python -r requirements-dev.txt
       - name: Build actual LunaOS ISO with loader and shell changes
         run: make -j2 all
+      - name: Cross-build native C guest using LunaOS syscall shim
+        run: make luna-guest-hello
       - name: Verify boot images exist
         run: |
           test -s dist/LunaOS.iso
