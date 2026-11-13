@@ -3,9 +3,13 @@
 #include "notices.h"
 #include "heap.h"
 #include "fs_volume.h"
-/* Clock is supplied by the LunaOS runtime. Host filesystem fixtures use 0. */
-extern uint32_t rtc_epoch_seconds(void) __attribute__((weak));
-static uint32_t fs_epoch(void) { return rtc_epoch_seconds ? rtc_epoch_seconds() : 0u; }
+/* In the real kernel use the synchronized UTC clock. Host tests that
+ * compile fs.c alone do not link clock.c and correctly fall back to zero. */
+extern uint64_t clock_utc_ms(void) __attribute__((weak));
+static uint32_t fs_epoch(void) {
+    uint64_t sec = clock_utc_ms ? clock_utc_ms() / 1000u : 0u;
+    return sec > UINT32_MAX ? UINT32_MAX : (uint32_t)sec;
+}
 File *files;
 int fs_file_capacity;
 char cwd[PATH_CAP] = "/home/luna";
