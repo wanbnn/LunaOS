@@ -98,3 +98,46 @@ native syscalls to manipulate LunaFS2 without any Linux host relay.
   fixed 64 KiB cap, with VM-aware heap, true POSIX VFS and libc before
   compiling/running Git official. The PR remains draft until all full
   guest Git acceptance tests in `tests/git-full-acceptance.md` pass.
+
+## Milestone 4 — expanded VM, native processes, pipes and compression (WIP)
+
+- **8 MiB sparse virtual program image** in two 4 MiB PDEs. App stack is
+  isolated in a third PDE at segment offset `0x810000`; ring-3 GDT descriptor
+  now uses 4 KiB granularity. Existing ring-1/2 probe stack stays unchanged.
+  Application pages come from the physical allocator per ELF load segment,
+  and are released at exit. These allocations are NOT a virtual malloc/mmap.
+- ELF header and PHDRs are inspected from the first 4096 bytes; file body is
+  streamed from LunaFS2 directly into mapped physical pages. Up to 16 MiB
+  ELF file size, 16 segments, no dynamic linking/interpreter or ET_DYN load
+  bias. Some valid Linux ELF layouts still won't be accepted.
+- ELF user-pointer validation checks actual page permissions and a guarded
+  user stack; invalid holes cause syscalls to fail rather than read supervisor
+  memory. W+X pages are rejected. i386 non-PAE does **not** implement NX:
+  executable-memory policy remains incomplete at hardware level.
+- `pipe(int fd[2])`: 4096-byte kernel buffer, local process descriptors.
+  On empty/full buffers with an open peer it currently returns -1; it
+  **does not block like POSIX pipes**, and cannot yet connect two separate
+  child processes through inherited descriptors.
+- `fsync(fd)`: commits a LunaFS2 generation snapshot (whole filesystem)
+  with existing filesystem flush/rollback semantics. Guest CI checks a
+  renamed file after reboot. POSIX durability/mode/timestamp behavior is
+  still incomplete.
+- `luna_spawn(path,argv,envp)` and `luna_waitpid(pid,status,flags)`
+  create an actual child ELF and collect its exit status. `execve`,
+  `fork`, FD inheritance, signals, waitpid reaping and pipes across
+  processes are **not implemented**.
+- Upstream **zlib v1.4** source pinned to
+  `99623ef7097352da7993ba614161fd6a311e046e` as a Git submodule.
+  `make luna-zlib-guest` produces a freestanding i386 static archive;
+  `make luna-guest-zlib-smoke` links it with a test-only guest allocator.
+  CI runs compress2/uncompress on the actual guest. This is not yet a
+  production Git runtime allocator.
+- Network stack remains the current kernel-wide TCP stream and verified
+  BearSSL TLS client; **no BSD-socket-per-process ABI, Git Smart HTTP POST,
+  libcurl port or SSH client has been implemented**. Never disable TLS
+  certificate validation to simulate support.
+
+The combined zlib/process/persistence smoke must pass in CI before claiming
+these additions validated. The upstream Git executable has not been loaded
+or run inside LunaOS. The PR remains draft and is not mergeable for release
+until the full acceptance contract passes.

@@ -73,3 +73,26 @@ Nao habilitar login automatico, armazenar PAT em plaintext, desabilitar TLS, ign
 - Documentados o ambiente e as etapas em `tools/git-port/README.md`.
 
 **Ainda não há no LunaOS um processo user-mode do Git, loader, ABI POSIX, VFS completo ou SSH/HTTPS para Git.** Uma compilacao no host, mesmo aprovada, nao e demonstracao de Git funcional no guest. A branch parcial anterior `feat/lunash-native-git-foundation` continua isolada e nao deve ser mesclada.
+
+## Milestone 4 — estado da infraestrutura (13/11/2026)
+
+Implementado na branch de integração: espaço de código/dados ELF32 esparso
+de até 8 MiB; carregamento dos segmentos do arquivo diretamente na memória
+física sem staging integral; stack separada; syscalls `pipe` com buffers
+limitados, `fsync` vinculado a snapshots LunaFS2, criação real de processos
+filhos por `luna_spawn` e espera por `luna_waitpid`. O SDK C foi
+ampliado para testar estes recursos.
+
+O código upstream zlib v1.4 foi fixado em `third_party/zlib`, SHA
+`99623ef7097352da7993ba614161fd6a311e046e`. O build agora dispõe de
+uma biblioteca `build/libz-luna.a` para i386 e teste de
+compressão/descompressão executado no guest. A versão exata é fixada
+por commit; a tag não foi atestada como criptograficamente assinada.
+
+**Ainda bloqueados para Git oficial:** loader estático para executável
+de grande porte com endereçamento geral/relocações; heap POSIX escalável;
+`execve` verdadeiro, pipes bloqueantes interprocesso, sinais;
+metadados POSIX persistentes, symlinks, locks, timestamps e `rename`
+com todas as garantias Unix; BSD sockets múltiplos, smart Git HTTP(S)
+POST e SSH com host-key verification. Não anunciar Git nativo
+nem fazer merge apenas por testes de infraestrutura aprovados.
