@@ -47,6 +47,8 @@
 #define SYS_EXEC_UNLINK 15
 #define SYS_EXEC_RENAME 16
 #define SYS_EXEC_GETPID 17
+#define SYS_EXEC_PIPE 18 /* Bounded pipe: immediate EAGAIN-like failure when empty/full. */
+#define SYS_EXEC_FSYNC 19 /* Commits LunaFS2 snapshot for durable writes. */
 #define EXEC_FD_MAX 8
 /* Saved by the common interrupt entry; useresp/ss exist only on privilege transitions. */
 typedef struct {
@@ -86,7 +88,7 @@ typedef struct {
     uint32_t exec_segments, exec_physical_bytes;
     uint32_t parent_pid;
     char exec_cwd[128];
-    struct { char path[128]; uint32_t offset, flags; bool open; } exec_fds[EXEC_FD_MAX];
+    struct { char path[128]; uint32_t offset, flags; uint8_t kind, pipe_id; bool open; } exec_fds[EXEC_FD_MAX];
     void (*service)(void);
     PerfArea perf_area;
     unsigned storage_depth;
