@@ -33,6 +33,10 @@
 #define SYS_SYSTEM 4
 #define SYS_PROBE_FAIL 5
 #define SYS_EXEC_WRITE 6 /* ELF32 ring-3 stdout only, not POSIX write(2). */
+#define SYS_EXEC_OPEN 7  /* Read-only, LunaOS-specific ABI. */
+#define SYS_EXEC_READ 8
+#define SYS_EXEC_CLOSE 9
+#define EXEC_FD_MAX 8
 /* Saved by the common interrupt entry; useresp/ss exist only on privilege transitions. */
 typedef struct {
     uint32_t gs, fs, es, ds, edi, esi, ebp, esp_dummy, ebx, edx, ecx, eax;
@@ -66,6 +70,7 @@ typedef struct {
     uint32_t read_event, write_event;
     AppEvent delivered;
     bool event_pending, system, exec_image;
+    struct { char path[128]; uint32_t offset; bool open; } exec_fds[EXEC_FD_MAX];
     void (*service)(void);
     PerfArea perf_area;
     unsigned storage_depth;
