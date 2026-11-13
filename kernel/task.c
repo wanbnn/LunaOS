@@ -5,6 +5,7 @@
 #include "heap.h"
 #include "memory.h"
 #include "boot.h"
+#include "web.h" /* Existing verified BearSSL/TCP transport, still singleton. */
 #define KSTACK_BYTES (128 * 1024)
 #define SHELL_STACK_BYTES (1024 * 1024)
 #define STACK_MAGIC 0x51ac7a5bu
@@ -31,11 +32,19 @@ typedef struct {
     bool used;
 } ExecPipe;
 static ExecPipe exec_pipes[EXEC_PIPE_COUNT];
+/* The transport backend is global: at most one guest stream can own it. */
+static uint32_t exec_net_owner;
 static void exec_close_fd(Task *t, unsigned fd) {
     if (fd >= EXEC_FD_MAX || !t->exec_fds[fd].open)
         return;
     unsigned kind = t->exec_fds[fd].kind, id = t->exec_fds[fd].pipe_id;
-    if (kind && id < EXEC_PIPE_COUNT) {
+    if (kind == 3u || kind == 4u) {
+        if (exec_net_owner == t->pid) {
+            if (kind == 4u) tls_close();
+            else stream_close();
+            exec_net_owner = 0;
+        }
+    } else if (kind && id < EXEC_PIPE_COUNT) {
         ExecPipe *p = &exec_pipes[id];
         if (p->used) {
             if (kind == 1u && p->readers) p->readers--;
@@ -807,6 +816,15 @@ static TrapFrame *syscall(TrapFrame *f) {
         if (t->exec_fds[fd - 3].kind) {
             unsigned kind = t->exec_fds[fd - 3].kind;
             unsigned id = t->exec_fds[fd - 3].pipe_id;
+            if (kind == 3u || kind == 4u) {
+                int wrote = exec_net_owner == t->pid ?
+                    (kind == 4u ?
+                     tls_write((const void *)(uintptr_t)(USER_CODE + pos), length) :
+                     stream_write((const void *)(uintptr_t)(USER_CODE + pos), length))
+                    : -1;
+                f->eax = wrote < 0 ? (uint32_t)-1 : (uint32_t)wrote;
+                break;
+            }
             if (kind != 2u || id >= EXEC_PIPE_COUNT || !exec_pipes[id].used ||
                 !exec_pipes[id].readers) {
                 f->eax = (uint32_t)-1;
@@ -891,6 +909,15 @@ static TrapFrame *syscall(TrapFrame *f) {
         if (t->exec_fds[fd - 3].kind) {
             unsigned kind = t->exec_fds[fd - 3].kind;
             unsigned id = t->exec_fds[fd - 3].pipe_id;
+            if (kind == 3u || kind == 4u) {
+                int n = exec_net_owner == t->pid ?
+                    (kind == 4u ?
+                     tls_read((void *)(uintptr_t)(USER_CODE + addr), length) :
+                     stream_read((void *)(uintptr_t)(USER_CODE + addr), length))
+                    : -1;
+                f->eax = n < 0 ? (uint32_t)-1 : (uint32_t)n;
+                break;
+            }
             if (kind != 1u || id >= EXEC_PIPE_COUNT || !exec_pipes[id].used) {
                 f->eax = (uint32_t)-1;
                 break;
@@ -1068,6 +1095,46 @@ static TrapFrame *syscall(TrapFrame *f) {
         }
         uint32_t pid = task_spawn_elf_args(path, argc, arg_vector, envc, env_vector);
         f->eax = pid ? pid : (uint32_t)-1;
+        break;
+    }
+    case SYS_EXEC_TCP_CONNECT: {
+        char host[128];
+        uint32_t port = f->ecx, secure = f->edx;
+        if (!t->exec_image || !exec_string(t, f->ebx, host, sizeof(host)) ||
+            !port || port > 65535u || secure > 1u) {
+            f->eax = (uint32_t)-1; break;
+        }
+        unsigned slot = 0;
+        for (; slot < EXEC_FD_MAX; slot++)
+            if (!t->exec_fds[slot].open) break;
+        if (slot == EXEC_FD_MAX) {
+            f->eax = (uint32_t)-1; break;
+        }
+        uint32_t irq = drv_irq_save();
+        if (exec_net_owner) {
+            drv_irq_restore(irq);
+            f->eax = (uint32_t)-1;
+            break;
+        }
+        exec_net_owner = t->pid;
+        drv_irq_restore(irq);
+        if (stream_connect(host, port) < 0) {
+            exec_net_owner = 0;
+            f->eax = (uint32_t)-1; break;
+        }
+        if (secure) {
+            char error[128] = {0};
+            if (!tls_connect(host, error, sizeof(error))) {
+                stream_close();
+                exec_net_owner = 0;
+                f->eax = (uint32_t)-1;
+                break;
+            }
+        }
+        t->exec_fds[slot].open = true;
+        t->exec_fds[slot].flags = 3u; /* bidirectional stream */
+        t->exec_fds[slot].kind = secure ? 4u : 3u;
+        f->eax = slot + 3u;
         break;
     }
     case SYS_EXEC_CHMOD:
