@@ -102,6 +102,7 @@ extern int current_task;
 void task_init(void);
 uint32_t task_spawn(int, const char *, unsigned, unsigned);
 uint32_t task_spawn_elf(const char *path);
+bool task_wait_elf(uint32_t pid, uint32_t timeout_ms, unsigned *exit_code);
 uint32_t task_spawn_elf_args(const char *path, int argc, const char *const argv[],
                              int envc, const char *const envp[]);
 uint32_t task_spawn_service(const char *, void (*service)(void));
