@@ -30,6 +30,8 @@ int rename(const char *from, const char *to);
 int getpid(void);
 int pipe(int fds[2]); /* bounded 4096 B; returns -1 instead of blocking */
 int fsync(int fd); /* persists a LunaFS2 snapshot */
+int luna_spawn(const char *path, const char *const argv[], const char *const envp[]);
+int luna_waitpid(int pid, int *status, int options); /* options 1 = WNOHANG */
 int luna_stat(const char *path, LunaGuestStat *info);
 __attribute__((noreturn)) void _exit(int code);
 #endif
