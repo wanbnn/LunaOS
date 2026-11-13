@@ -597,14 +597,16 @@ static TrapFrame *syscall(TrapFrame *f) {
         }
         const char *path = t->exec_fds[fd - 3].path;
         File *file = fs_find(path);
+        uint32_t before = file ? file->size : 0u;
         if (!file || file->dir ||
             (!(t->exec_fds[fd - 3].flags & 1024u) &&
-             t->exec_fds[fd - 3].offset != file->size) ||
+             t->exec_fds[fd - 3].offset != before) ||
             fs_write_bytes(path, (const void *)(uintptr_t)(USER_CODE + pos), length, true)) {
             f->eax = (uint32_t)-1;
             break;
         }
-        t->exec_fds[fd - 3].offset = file->size + length;
+        /* fs_write_bytes can replace directory storage: do not dereference file. */
+        t->exec_fds[fd - 3].offset = before + length;
         f->eax = length;
         break;
     }
