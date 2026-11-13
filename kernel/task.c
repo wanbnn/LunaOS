@@ -22,6 +22,31 @@ static uint8_t user_code[4096] __attribute__((aligned(4096)));
 static uint8_t user_stacks[TASK_MAX][USER_STACK_BYTES] __attribute__((aligned(4096)));
 static uint8_t kernel_stacks[TASK_MAX][KSTACK_BYTES] __attribute__((aligned(4096), section(".bss.stacks")));
 static uint8_t shell_stack[SHELL_STACK_BYTES] __attribute__((aligned(4096)));
+#define EXEC_PIPE_COUNT 16u
+#define EXEC_PIPE_CAP 4096u
+typedef struct {
+    uint8_t buffer[EXEC_PIPE_CAP];
+    uint32_t length;
+    uint16_t readers, writers;
+    bool used;
+} ExecPipe;
+static ExecPipe exec_pipes[EXEC_PIPE_COUNT];
+static void exec_close_fd(Task *t, unsigned fd) {
+    if (fd >= EXEC_FD_MAX || !t->exec_fds[fd].open)
+        return;
+    unsigned kind = t->exec_fds[fd].kind, id = t->exec_fds[fd].pipe_id;
+    if (kind && id < EXEC_PIPE_COUNT) {
+        ExecPipe *p = &exec_pipes[id];
+        if (p->used) {
+            if (kind == 1u && p->readers) p->readers--;
+            if (kind == 2u && p->writers) p->writers--;
+            if (!p->readers && !p->writers)
+                memset(p, 0, sizeof(*p));
+        }
+    }
+    memset(&t->exec_fds[fd], 0, sizeof(t->exec_fds[fd]));
+}
+
 #define MMIO_BASE 0x3c000000u
 #define MMIO_PAGES 4096u
 static uint32_t mmio_tables[4][1024] __attribute__((aligned(4096)));
@@ -394,6 +419,9 @@ static void finish(Task *t, unsigned code) {
     t->exit_code = code;
     t->state = TASK_EXITED;
     net_cancel_owner(t->pid);
+    if (t->exec_image)
+        for (unsigned fd = 0; fd < EXEC_FD_MAX; fd++)
+            exec_close_fd(t, fd);
     for (unsigned i = 0; i < t->exec_segments; i++) {
         if (t->exec_allocation[i].cookie &&
             memory_release(&t->exec_allocation[i]))
@@ -639,6 +667,28 @@ static TrapFrame *syscall(TrapFrame *f) {
             f->eax = (uint32_t)-1;
             break;
         }
+        if (t->exec_fds[fd - 3].kind) {
+            unsigned kind = t->exec_fds[fd - 3].kind;
+            unsigned id = t->exec_fds[fd - 3].pipe_id;
+            if (kind != 2u || id >= EXEC_PIPE_COUNT || !exec_pipes[id].used ||
+                !exec_pipes[id].readers) {
+                f->eax = (uint32_t)-1;
+                break;
+            }
+            /* A bounded, in-kernel ring buffer; no blocking semantics yet. */
+            uint32_t irq = drv_irq_save();
+            ExecPipe *p = &exec_pipes[id];
+            if (length > EXEC_PIPE_CAP - p->length) {
+                f->eax = (uint32_t)-1;
+            } else {
+                memcpy(p->buffer + p->length,
+                       (const void *)(uintptr_t)(USER_CODE + pos), length);
+                p->length += length;
+                f->eax = length;
+            }
+            drv_irq_restore(irq);
+            break;
+        }
         const char *path = t->exec_fds[fd - 3].path;
         File *file = fs_find(path);
         uint32_t before = file ? file->size : 0u;
@@ -701,6 +751,27 @@ static TrapFrame *syscall(TrapFrame *f) {
             f->eax = (uint32_t)-1;
             break;
         }
+        if (t->exec_fds[fd - 3].kind) {
+            unsigned kind = t->exec_fds[fd - 3].kind;
+            unsigned id = t->exec_fds[fd - 3].pipe_id;
+            if (kind != 1u || id >= EXEC_PIPE_COUNT || !exec_pipes[id].used) {
+                f->eax = (uint32_t)-1;
+                break;
+            }
+            uint32_t irq = drv_irq_save();
+            ExecPipe *p = &exec_pipes[id];
+            if (!p->length && p->writers) {
+                f->eax = (uint32_t)-1; /* Would block; no errno yet. */
+            } else {
+                size_t n = p->length < length ? p->length : length;
+                memcpy((void *)(uintptr_t)(USER_CODE + addr), p->buffer, n);
+                memmove(p->buffer, p->buffer + n, p->length - n);
+                p->length -= (uint32_t)n;
+                f->eax = (uint32_t)n;
+            }
+            drv_irq_restore(irq);
+            break;
+        }
         File *file = fs_find(t->exec_fds[fd - 3].path);
         if (!file || file->dir) { f->eax = (uint32_t)-1; break; }
         uint32_t offset = t->exec_fds[fd - 3].offset;
@@ -720,7 +791,7 @@ static TrapFrame *syscall(TrapFrame *f) {
             !t->exec_fds[fd - 3].open) {
             f->eax = (uint32_t)-1; break;
         }
-        memset(&t->exec_fds[fd - 3], 0, sizeof(t->exec_fds[0]));
+        exec_close_fd(t, fd - 3);
         f->eax = 0;
         break;
     }
@@ -802,6 +873,46 @@ static TrapFrame *syscall(TrapFrame *f) {
     case SYS_EXEC_GETPID:
         f->eax = t->exec_image ? t->pid : (uint32_t)-1;
         break;
+    case SYS_EXEC_PIPE: {
+        uint32_t user_array = f->ebx;
+        if (!exec_user_range(t, user_array, sizeof(uint32_t) * 2u, true)) {
+            f->eax = (uint32_t)-1; break;
+        }
+        unsigned rd = EXEC_FD_MAX, wr = EXEC_FD_MAX, pipe = EXEC_PIPE_COUNT;
+        for (unsigned i = 0; i < EXEC_FD_MAX; i++)
+            if (!t->exec_fds[i].open) {
+                if (rd == EXEC_FD_MAX) rd = i;
+                else { wr = i; break; }
+            }
+        for (unsigned i = 0; i < EXEC_PIPE_COUNT; i++)
+            if (!exec_pipes[i].used) { pipe = i; break; }
+        if (wr == EXEC_FD_MAX || pipe == EXEC_PIPE_COUNT) {
+            f->eax = (uint32_t)-1; break;
+        }
+        ExecPipe *p = &exec_pipes[pipe];
+        memset(p, 0, sizeof(*p));
+        p->used = true; p->readers = 1; p->writers = 1;
+        t->exec_fds[rd].open = true;
+        t->exec_fds[rd].kind = 1; t->exec_fds[rd].pipe_id = (uint8_t)pipe;
+        t->exec_fds[wr].open = true;
+        t->exec_fds[wr].kind = 2; t->exec_fds[wr].pipe_id = (uint8_t)pipe;
+        t->exec_fds[wr].flags = 1;
+        uint32_t result[2] = {rd + 3u, wr + 3u};
+        memcpy((void *)(uintptr_t)(USER_CODE + user_array), result, sizeof(result));
+        f->eax = 0;
+        break;
+    }
+    case SYS_EXEC_FSYNC: {
+        uint32_t fd = f->ebx;
+        if (!t->exec_image || fd < 3u || fd >= 3u + EXEC_FD_MAX ||
+            !t->exec_fds[fd - 3u].open || t->exec_fds[fd - 3u].kind) {
+            f->eax = (uint32_t)-1; break;
+        }
+        /* LunaFS2 persists the entire generation atomically, not just a
+         * single inode. Surface snapshot/flush errors to the caller. */
+        f->eax = fs_save() ? 0u : (uint32_t)-1;
+        break;
+    }
     case SYS_SYSTEM:
         f->eax = (uint32_t)-1;
         break;
