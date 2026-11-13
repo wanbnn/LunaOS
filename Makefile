@@ -51,6 +51,7 @@ build/apps/cpython/%.o: apps/cpython/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(WASM3_FLAGS) -Wall -Wextra -Wno-unused-parameter -c $< -o $@
 
+build/apps/git.o: CFLAGS += -Ithird_party/bearssl/inc
 $(OBJECTS) $(BEAR_OBJECTS): Makefile
 $(patsubst %.c,build/%.o,$(SOURCES)): $(wildcard kernel/*.h ui/*.h drivers/*.h include/net/*.h)
 .PHONY: test-rtw8822be-rx-dma test-wifi-scan all clean run run-iso iso test test-iso-install check test-wifi-port test-wireless-frames test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
@@ -228,7 +229,7 @@ run-iso: all
 	LUNA_IMAGE=dist/LunaOS.iso tools/run-qemu.sh
 run: all
 	tools/run-qemu.sh
-test: all test-rtw8822be-coex test-rtw8822be-fifo test-storage test-storage-sdhci test-lunafs2 test-lunasdk-hardware test-devkit test-motion test-pmm test-heap test-wpa2 test-wifi-ccmp test-wifi-client test-rtw8822be-tx-dma test-dhcp test-wifi-station test-iwl-firmware test-iwl-pcie test-wifi-intel test-wifi-scan test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
+test: test-git all test-rtw8822be-coex test-rtw8822be-fifo test-storage test-storage-sdhci test-lunafs2 test-lunasdk-hardware test-devkit test-motion test-pmm test-heap test-wpa2 test-wifi-ccmp test-wifi-client test-rtw8822be-tx-dma test-dhcp test-wifi-station test-iwl-firmware test-iwl-pcie test-wifi-intel test-wifi-scan test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
 	$(PYTHON) tests/smoke.py
 	$(PYTHON) tests/multitask.py
 	$(PYTHON) tests/desktop.py
@@ -243,7 +244,7 @@ test: all test-rtw8822be-coex test-rtw8822be-fifo test-storage test-storage-sdhc
 	$(PYTHON) tests/iso.py
 test-iso-install: all
 	LUNA_SETUP_ISO=1 LUNA_TEST_DIR=build/test-iso-install $(PYTHON) tests/setup.py
-check: all test-rtw8822be-coex test-rtw8822be-fifo test-storage test-storage-sdhci test-lunafs2 test-lunasdk-hardware test-devkit test-motion test-pmm test-heap test-wpa2 test-dhcp test-wifi-station test-iwl-firmware test-iwl-pcie test-wifi-intel test-wifi-scan test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
+check: test-git all test-rtw8822be-coex test-rtw8822be-fifo test-storage test-storage-sdhci test-lunafs2 test-lunasdk-hardware test-devkit test-motion test-pmm test-heap test-wpa2 test-dhcp test-wifi-station test-iwl-firmware test-iwl-pcie test-wifi-intel test-wifi-scan test-wireless-frames test-wifi-port test-wifi-runtime test-rtw8822be-diag test-rtw8822b-native test-rtw8822b-firmware
 	$(PYTHON) tools/check_image.py
 	$(PYTHON) tools/check_iso.py
 clean:
@@ -320,6 +321,13 @@ test-devkit:
 	@mkdir -p build
 	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=address,undefined -Ikernel kernel/devkit.c tests/devkit.c -o build/devkit-test
 	./build/devkit-test
+
+# Host test validates Git-compatible metadata, status and SHA-1 without a POSIX guest.
+.PHONY: test-git
+test-git:
+	@mkdir -p build
+	$(CC) -std=c11 -O2 -g -Wall -Wextra -Werror -fsanitize=address,undefined -Ikernel -Ithird_party/bearssl/inc -Ithird_party/bearssl/src apps/git.c third_party/bearssl/src/hash/sha1.c tests/git.c -o build/git-test
+	./build/git-test
 
 .PHONY: test-motion
 test-motion:
