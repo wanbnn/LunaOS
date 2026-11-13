@@ -25,10 +25,8 @@ int main(int argc, char **argv, char **envp) {
     if (fd < 0)
         return 45;
     if (write(fd, payload, sizeof(payload) - 1u) != (long)(sizeof(payload) - 1u) ||
-        close(fd))
+        fsync(fd) || close(fd))
         return 46;
-    if (fsync(fd))
-        return 51;
     if (rename("/tmp/guest-c-before.txt", "/tmp/guest-c-after.txt"))
         return 47;
     LunaGuestStat st;
@@ -39,5 +37,20 @@ int main(int argc, char **argv, char **envp) {
         return 49;
     if (getpid() <= 0)
         return 50;
+    int pair[2];
+    if (pipe(pair))
+        return 52;
+    static const char text_pipe[] = "PIPE SDK OK";
+    if (write(pair[1], text_pipe, sizeof(text_pipe) - 1u) !=
+        (long)(sizeof(text_pipe) - 1u) || close(pair[1]))
+        return 53;
+    long got = read(pair[0], read_buffer, sizeof(text_pipe) - 1u);
+    if (got != (long)(sizeof(text_pipe) - 1u) || close(pair[0]))
+        return 54;
+    for (unsigned i = 0; i < sizeof(text_pipe) - 1u; i++)
+        if (read_buffer[i] != text_pipe[i])
+            return 55;
+    if (write(1, "PIPE SDK OK\n", 12) != 12)
+        return 56;
     return 0;
 }
