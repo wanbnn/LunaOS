@@ -37,6 +37,8 @@ int rename(const char *from, const char *to) {
     return (int)call3(16, (unsigned)(uintptr_t)from, (unsigned)(uintptr_t)to, 0);
 }
 int getpid(void) { return (int)call3(17, 0, 0, 0); }
+int pipe(int fds[2]) { return (int)call3(18, (unsigned)(uintptr_t)fds, 0, 0); }
+int fsync(int fd) { return (int)call3(19, (unsigned)fd, 0, 0); }
 __attribute__((noreturn)) void _exit(int code) {
     (void)call3(3, (unsigned)code, 0, 0);
     for (;;) { __asm__ volatile("pause"); }
