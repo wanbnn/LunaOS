@@ -173,6 +173,8 @@ def sample_large_multisegment_elf() -> bytes:
 
 MULTI_DATA = sample_large_multisegment_elf()
 C_DATA = (ROOT / "build/guest/hello.elf").read_bytes()
+Z_DATA = (ROOT / "build/guest/zlib-smoke.elf").read_bytes()
+assert len(Z_DATA) <= 16 * 1024 * 1024, "zlib guest ELF exceeds loader budget"
 assert len(C_DATA) <= 256 * 1024, "guest ELF exceeds loader file limit"
 
 DATA = sample_elf()
@@ -180,7 +182,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
-        data = C_DATA if self.path.endswith("/c-hello.elf") else (MULTI_DATA if self.path.endswith("/multi.elf") else DATA)
+        data = (Z_DATA if self.path.endswith("/zlib.elf") else
+                C_DATA if self.path.endswith("/c-hello.elf") else
+                MULTI_DATA if self.path.endswith("/multi.elf") else DATA)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -221,6 +225,14 @@ try:
     assert "LUNA GUEST C POSIX OK" in g.transcript, g.transcript[-3000:]
     g.command("cat /tmp/guest-c-after.txt", "C SDK FILE WRITE OK")
     print("PASS: actual freestanding C ELF32, i386 crt0, argv/envp and file syscalls in QEMU", flush=True)
+    g.command(f"wget http://10.0.2.2:{port}/zlib.elf /tmp/zlib.elf", "Saved", timeout=30)
+    launched = g.command("elfrun /tmp/zlib.elf", "started ring-3 process")
+    match = re.search(r"started ring-3 process pid=(\d+)", launched)
+    assert match, launched
+    g.command("elfwait " + match.group(1), "exit code 0", timeout=35)
+    assert "LUNA ZLIB V1.4 GUEST OK" in g.transcript, g.transcript[-4000:]
+    print("PASS: upstream zlib 1.4 native i386 compress2 and uncompress in LunaOS QEMU", flush=True)
+
 
 finally:
     if g:
