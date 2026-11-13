@@ -470,6 +470,99 @@ static TrapFrame *syscall(TrapFrame *f) {
         f->eax = length;
         break;
     }
+    case SYS_EXEC_OPEN: {
+        /* ebx: segment-relative path pointer, ecx: flags (only O_RDONLY=0).
+         * Paths and descriptors live in the requesting task, never another. */
+        uint32_t addr = f->ebx, flags = f->ecx;
+        if (!t->exec_image || t->ring != 3 || flags != 0 ||
+            !((addr < LUNA_ELF_CODE_BYTES) || (addr >= 0x10000u && addr < 0x14000u))) {
+            f->eax = (uint32_t)-1;
+            break;
+        }
+        uint32_t limit = addr < LUNA_ELF_CODE_BYTES ? LUNA_ELF_CODE_BYTES : 0x14000u;
+        char pathname[128];
+        unsigned n = 0;
+        const char *src = (const char *)(uintptr_t)(USER_CODE + addr);
+        while (addr + n < limit && n < sizeof(pathname) - 1u && src[n]) {
+            pathname[n] = src[n];
+            n++;
+        }
+        if (addr + n == limit || n == sizeof(pathname) - 1u || !n ||
+            src[n] != 0) {
+            f->eax = (uint32_t)-1;
+            break;
+        }
+        pathname[n] = 0;
+        File *file = fs_find(pathname);
+        if (!file || file->dir) {
+            f->eax = (uint32_t)-1;
+            break;
+        }
+        char canonical[PATH_CAP];
+        if (!fs_path(pathname, canonical)) {
+            f->eax = (uint32_t)-1;
+            break;
+        }
+        unsigned slot;
+        for (slot = 0; slot < EXEC_FD_MAX; slot++)
+            if (!t->exec_fds[slot].open)
+                break;
+        if (slot == EXEC_FD_MAX) {
+            f->eax = (uint32_t)-1;
+            break;
+        }
+        strcpy(t->exec_fds[slot].path, canonical);
+        t->exec_fds[slot].offset = 0;
+        t->exec_fds[slot].open = true;
+        f->eax = slot + 3;
+        break;
+    }
+    case SYS_EXEC_READ: {
+        /* ebx: fd >=3, ecx: writable stack offset, edx: count <=4096.
+         * User code page is read-only and is never a valid read destination. */
+        uint32_t fd = f->ebx, addr = f->ecx, length = f->edx;
+        if (!t->exec_image || t->ring != 3 ||
+            fd < 3 || fd >= 3 + EXEC_FD_MAX ||
+            !t->exec_fds[fd - 3].open ||
+            addr < 0x10000u || addr >= 0x14000u ||
+            length > 4096u || length > 0x14000u - addr) {
+            f->eax = (uint32_t)-1;
+            break;
+        }
+        File *file = fs_find(t->exec_fds[fd - 3].path);
+        if (!file || file->dir) {
+            f->eax = (uint32_t)-1;
+            break;
+        }
+        uint32_t offset = t->exec_fds[fd - 3].offset;
+        if (offset > file->size) {
+            f->eax = (uint32_t)-1;
+            break;
+        }
+        size_t amount = file->size - offset;
+        if (amount > length)
+            amount = length;
+        if (amount && !fs_read_bytes(file, offset, (void *)(uintptr_t)(USER_CODE + addr), amount)) {
+            f->eax = (uint32_t)-1;
+            break;
+        }
+        t->exec_fds[fd - 3].offset = offset + (uint32_t)amount;
+        f->eax = (uint32_t)amount;
+        break;
+    }
+    case SYS_EXEC_CLOSE: {
+        uint32_t fd = f->ebx;
+        if (!t->exec_image || t->ring != 3 || fd < 3 || fd >= 3 + EXEC_FD_MAX ||
+            !t->exec_fds[fd - 3].open) {
+            f->eax = (uint32_t)-1;
+            break;
+        }
+        t->exec_fds[fd - 3].open = false;
+        t->exec_fds[fd - 3].path[0] = 0;
+        t->exec_fds[fd - 3].offset = 0;
+        f->eax = 0;
+        break;
+    }
     case SYS_SYSTEM:
         f->eax = (uint32_t)-1;
         break;
