@@ -55,6 +55,8 @@
 #define SYS_EXEC_CHMOD 23 /* Persist 0777 permission bits, no enforcement yet. */
 #define SYS_EXEC_UTIME 24 /* Persist file mtime (epoch seconds). */
 #define SYS_EXEC_TCP_CONNECT 25 /* Exclusive outbound IPv4 TCP/TLS socket. */
+#define SYS_EXEC_OPENDIR 26 /* Descriptor-backed directory iterator. */
+#define SYS_EXEC_READDIR 27 /* One LunaGuestDirent record per call. */
 #define EXEC_FD_MAX 8
 /* Saved by the common interrupt entry; useresp/ss exist only on privilege transitions. */
 typedef struct {
