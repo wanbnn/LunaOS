@@ -15,8 +15,7 @@ static uint32_t next_pid = 1, stamp, sample_stamp, sample_tick;
 static uint32_t directories[TASK_MAX][1024] __attribute__((aligned(4096)));
 static uint32_t user_tables[TASK_MAX][1024] __attribute__((aligned(4096)));
 static uint8_t user_code[4096] __attribute__((aligned(4096)));
-/* One private executable code page per ring-3 program (no shared RW alias). */
-static uint8_t exec_code[TASK_MAX][LUNA_ELF_CODE_BYTES] __attribute__((aligned(4096)));
+/* ELF image pages are allocated per process through the physical allocator. */
 static uint8_t user_stacks[TASK_MAX][USER_STACK_BYTES] __attribute__((aligned(4096)));
 static uint8_t kernel_stacks[TASK_MAX][KSTACK_BYTES] __attribute__((aligned(4096), section(".bss.stacks")));
 static uint8_t shell_stack[SHELL_STACK_BYTES] __attribute__((aligned(4096)));
@@ -62,7 +61,8 @@ uint32_t task_memory_enter(uint32_t pid) {
 }
 void task_memory_leave(uint32_t previous) { task_current()->memory_owner=previous; }
 static uint32_t private_reservation(const Task *t) {
-    return t->ring ? t->stack_bytes+USER_STACK_BYTES+sizeof(directories[0])+sizeof(user_tables[0]) : 0;
+    return t->ring ? t->stack_bytes+USER_STACK_BYTES+sizeof(directories[0])+sizeof(user_tables[0])+
+           (t->exec_image ? LUNA_ELF_IMAGE_BYTES : 0u) : 0;
 }
 void task_memory_stats(const Task *t,TaskMemoryStats *out) {
     if (!out) return;
@@ -213,18 +213,56 @@ static uint32_t spawn(int app, const char *name, unsigned ring, unsigned probe,
 uint32_t task_spawn(int app, const char *name, unsigned ring, unsigned probe) {
     return spawn(app, name, ring, probe, NULL);
 }
-/* MVP ELF execution: only one RX PT_LOAD fitting in a page is accepted.
- * The file is checked before a task slot is claimed. No arbitrary user
- * syscall is exposed to this program, other than write-to-console and exit. */
-uint32_t task_spawn_elf(const char *path) {
+/* Restricted i386 user-mode loader; separate physical pages per process.
+ * A GDT base at USER_CODE makes all guest pointers segment-relative. */
+static bool setup_exec_stack(Task *t, int argc, const char *const argv[],
+                             int envc, const char *const envp[]) {
+    if (argc < 1 || argc > 24 || envc < 0 || envc > 16)
+        return false;
+    unsigned slot = (unsigned)(t - tasks), sp = USER_STACK_BYTES;
+    uint32_t args[24], env[16];
+    for (int group = 0; group < 2; group++) {
+        int count = group ? envc : argc;
+        const char *const *strings = group ? envp : argv;
+        for (int i = count - 1; i >= 0; i--) {
+            if (!strings || !strings[i])
+                return false;
+            size_t len = strlen(strings[i]) + 1u;
+            if (len < 2u || len > 256u || sp < len + 256u)
+                return false;
+            sp -= (unsigned)len;
+            memcpy(user_stacks[slot] + sp, strings[i], len);
+            (group ? env : args)[i] = USER_STACK - USER_CODE + sp;
+        }
+    }
+    sp &= ~3u;
+    unsigned words = 1u + (unsigned)argc + 1u + (unsigned)envc + 1u + 2u;
+    if (sp < words * sizeof(uint32_t) + 16u)
+        return false;
+    sp = (sp - words * sizeof(uint32_t)) & ~15u;
+    uint32_t *p = (uint32_t *)(void *)(user_stacks[slot] + sp);
+    *p++ = (uint32_t)argc;
+    for (int i = 0; i < argc; i++)
+        *p++ = args[i];
+    *p++ = 0;
+    for (int i = 0; i < envc; i++)
+        *p++ = env[i];
+    *p++ = 0;
+    *p++ = 0; /* AT_NULL */
+    *p++ = 0;
+    t->frame->useresp = USER_STACK - USER_CODE + sp;
+    return true;
+}
+uint32_t task_spawn_elf_args(const char *path, int argc, const char *const argv[],
+                             int envc, const char *const envp[]) {
     File *f = fs_find(path);
-    if (!f || f->dir || f->size < 84 || f->size > LUNA_ELF_CODE_BYTES)
+    if (!f || f->dir || f->size < 84u || f->size > LUNA_ELF_MAX_FILE_BYTES)
         return 0;
     uint8_t *bytes = heap_allocate(f->size);
     if (!bytes)
         return 0;
     bool read_ok = fs_read_bytes(f, 0, bytes, f->size);
-    LunaElfImage *image = heap_allocate(sizeof(LunaElfImage));
+    LunaElfImage *image = heap_allocate(sizeof(*image));
     if (!image) {
         heap_release(bytes);
         return 0;
@@ -235,20 +273,47 @@ uint32_t task_spawn_elf(const char *path) {
         heap_release(image);
         return 0;
     }
+    PmmAllocation allocation = {0};
+    if (memory_allocate(LUNA_ELF_IMAGE_BYTES, 4096u, UINT32_MAX, 0u,
+                        true, true, &allocation)) {
+        heap_release(image);
+        return 0;
+    }
+    uint32_t parent_pid = task_current()->pid;
+    char parent_cwd[PATH_CAP];
+    strcpy(parent_cwd, cwd);
     uint32_t pid = spawn(-1, "ELF32 native user process", 3, 0, NULL);
     if (!pid) {
+        memory_release(&allocation);
         heap_release(image);
         return 0;
     }
     Task *t = task_by_pid(pid);
     unsigned slot = (unsigned)(t - tasks);
-    memcpy(exec_code[slot], image->code, LUNA_ELF_CODE_BYTES);
-    /* Ring-3 code segment has base USER_CODE; EIP is segment relative. */
-    user_tables[slot][0] = (uint32_t)exec_code[slot] | 5;
+    if (!setup_exec_stack(t, argc, argv, envc, envp)) {
+        t->state = TASK_EXITED;
+        memory_release(&allocation);
+        heap_release(image);
+        return 0;
+    }
+    memcpy((void *)(uintptr_t)allocation.address, image->memory, LUNA_ELF_IMAGE_BYTES);
+    for (unsigned i = 0; i < LUNA_ELF_PAGES; i++) {
+        t->exec_permissions[i] = image->permissions[i];
+        if (image->permissions[i])
+            user_tables[slot][i] = (allocation.address + i * 4096u) |
+                ((image->permissions[i] & LUNA_ELF_WRITE) ? 7u : 5u);
+    }
+    t->exec_allocation = allocation;
     t->frame->eip = image->entry;
+    t->parent_pid = parent_pid;
+    strcpy(t->exec_cwd, parent_cwd);
     t->exec_image = true;
     heap_release(image);
     return pid;
+}
+uint32_t task_spawn_elf(const char *path) {
+    const char *a[1] = {path};
+    return task_spawn_elf_args(path, 1, a, 0, NULL);
 }
 uint32_t task_spawn_service(const char *name, void (*service)(void)) {
     return spawn(-1, name, 3, 0, service);
@@ -274,6 +339,11 @@ static void finish(Task *t, unsigned code) {
     t->exit_code = code;
     t->state = TASK_EXITED;
     net_cancel_owner(t->pid);
+    if (t->exec_allocation.cookie) {
+        if (memory_release(&t->exec_allocation))
+            kernel_fault();
+        t->exec_allocation = (PmmAllocation){0};
+    }
     if (t->app >= 0) {
         uint32_t previous=task_memory_enter(t->pid);
         app_close(t->app);
