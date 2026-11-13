@@ -45,7 +45,7 @@ int main(void) {
     /* Valid multisegment, >4 KiB input, RX and RW separate page mappings. */
     fixture(b, 10000);
     w16(b + 44, 2);
-    w32(b + 56, 4096); w32(b + 68, 8); w32(b + 72, 8192);
+    w32(b + 56, 4096); w32(b + 68, 8); w32(b + 72, 4096);
     w32(b + 84, 1);   /* second PT_LOAD */
     w32(b + 88, 8192); w32(b + 92, 0x4000);
     w32(b + 100, 16); w32(b + 104, 4096); w32(b + 108, 6);
