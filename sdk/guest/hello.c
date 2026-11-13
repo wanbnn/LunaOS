@@ -27,6 +27,8 @@ int main(int argc, char **argv, char **envp) {
     if (write(fd, payload, sizeof(payload) - 1u) != (long)(sizeof(payload) - 1u) ||
         close(fd))
         return 46;
+    if (fsync(fd))
+        return 51;
     if (rename("/tmp/guest-c-before.txt", "/tmp/guest-c-after.txt"))
         return 47;
     LunaGuestStat st;
