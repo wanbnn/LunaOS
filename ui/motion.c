@@ -1,5 +1,4 @@
 #include "motion.h"
-#include <limits.h>
 typedef enum { EASE_SMOOTHSTEP, EASE_OUT_CUBIC, EASE_OUT_BACK } MotionEase;
 typedef struct {
     uint32_t started;
@@ -84,10 +83,10 @@ int motion_value(int channel, uint32_t now_ms) {
         eased = (sq * (3072 - 2 * t) + 512) / 1024;
     }
     int64_t value = (int64_t)m->from + ((int64_t)m->to - m->from) * eased / 1024;
-    if (value > INT_MAX)
-        value = INT_MAX;
-    if (value < INT_MIN)
-        value = INT_MIN;
+    if (value > INT32_MAX)
+        value = INT32_MAX;
+    if (value < INT32_MIN)
+        value = INT32_MIN;
     return (int)value;
 }
 unsigned motion_spinner_phase(uint32_t now_ms) {
