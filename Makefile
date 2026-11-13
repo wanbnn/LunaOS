@@ -60,7 +60,7 @@ build/font.h: tools/fontgen.py assets/fonts/InterTight.ttf assets/fonts/NotoSans
 	$(PYTHON) tools/fontgen.py
 build/notices.h: tools/notices.py assets/fonts/OFL.txt assets/fonts/NotoSans-OFL.txt \
              assets/fonts/Montserrat-OFL.txt assets/fonts/NotoSansSymbols2-OFL.txt \
-             assets/icons/lucide/LICENSE $(wildcard assets/licenses/*) third_party/quickjs/LICENSE third_party/micropython/LICENSE third_party/wasm3/LICENSE third_party/musl/COPYRIGHT third_party/bearssl/LICENSE.txt third_party/stb/LICENSE third_party/uacpi/LICENSE $(wildcard third_party/lexbor/LICENSE third_party/litehtml/LICENSE third_party/litehtml/src/gumbo/LICENSE)
+             assets/icons/lucide/LICENSE $(wildcard assets/licenses/*) third_party/quickjs/LICENSE third_party/micropython/LICENSE third_party/wasm3/LICENSE third_party/musl/COPYRIGHT third_party/bearssl/LICENSE.txt third_party/stb/LICENSE third_party/uacpi/LICENSE $(wildcard third_party/lexbor/LICENSE third_party/zlib/LICENSE third_party/litehtml/LICENSE third_party/litehtml/src/gumbo/LICENSE)
 	$(PYTHON) tools/notices.py
 build/uacpi/%.o: third_party/uacpi/source/%.c $(shell find third_party/uacpi/include -name '*.h')
 	@mkdir -p $(dir $@)
