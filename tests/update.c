@@ -20,11 +20,16 @@ static uint8_t source_manifest[UPDATE_MANIFEST_BYTES];
 static unsigned requests, writes, reads, restarts, allocations;
 static int fail_download, corrupt_chunk, fail_write, fail_read, fail_flush, corrupt_readback, fail_alloc, bad_manifest;
 static bool save_ok = true, same_commit, enable_delta;
+static bool verified_after_transfer;
 static unsigned transient_failures;
 Task *task_current(void) { return &current; }
 const char *system_text(const char *en, const char *pt) { (void)pt; return en; }
 void gui_invalidate_app(int app) { assert(app == APP_SETTINGS); }
-void task_sleep(uint32_t ms) { (void)ms; assert(update_busy() && update_owner() == 9); }
+void task_sleep(uint32_t ms) {
+    (void)ms;
+    assert(update_busy() && update_owner() == 9);
+    if (strstr(update_status(), "Verifying downloaded update")) verified_after_transfer = true;
+}
 void reboot(void) { restarts++; }
 bool settings_write(void) { return save_ok; }
 bool fs_save(void) { return save_ok; }
@@ -113,6 +118,10 @@ bool net_https_stream(const char *url, NetHttpsSink sink, void *context, uint64_
             data[UPDATE_MANIFEST_BYTES - offset] ^= 1;
             corrupt_chunk = 0;
         }
+        /* The RX callback must not inflate/hash blocks or enter the later
+         * disk phases while the transport still owns incoming TCP packets. */
+        assert(update_progress() <= 40);
+        assert(strstr(update_status(), "Downloading update package"));
         if (!sink(context, data, n)) {
             accepted = false;
             snprintf(error, ecap, "Bundle stream rejected.");
@@ -131,6 +140,7 @@ static void reset(void) {
     transient_failures = 0;
     fail_download = corrupt_chunk = fail_write = fail_read = fail_flush = corrupt_readback = fail_alloc = bad_manifest = 0;
     net_ready = save_ok = true; same_commit = setup_active = enable_delta = false; memory_mb = 256;
+    verified_after_transfer = false;
 }
 static void unchanged(void) {
     assert(!restarts && !memcmp(disk, original, LUNA_IMAGE_BYTES));
@@ -179,6 +189,7 @@ int main(void) {
     memcpy(wanted + 432, original + 432, 78);
     memcpy(wanted + 16384 * 512, original + 16384 * 512, 4096 * 1024);
     assert(restarts == 1 && !memcmp(wanted, disk, LUNA_IMAGE_BYTES));
+    assert(verified_after_transfer);
     assert(!update_busy() && !update_owner() && update_progress() == 100);
     /* Exact-base differential: only changed blocks are in one streamed pack. */
     f = fopen("build/update-test/base.img", "rb"); assert(f);
