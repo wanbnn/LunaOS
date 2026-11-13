@@ -1,37 +1,100 @@
-# ELF32 ring-3 execution milestone
+# LunaOS native ELF32 user-mode execution — Milestone 3
 
-**Scope:** first native binary execution path for LunaOS, not yet POSIX or Git upstream.
+**State: validated in QEMU for native ELF programs; not a full POSIX ABI, and
+upstream Git 2.56.1 still does NOT execute in the LunaOS guest.**
+Implementation is in PR #8 (draft; no main merge).
 
-The `elfrun FILE` lunaSH built-in starts a restricted ELF32 program asynchronously, using CPL 3, a private read-only code page and the already isolated 16KiB user stack. Unsupported or corrupt ELF files are rejected before process creation.
+## What is implemented
 
-## ELF image format accepted today
+- ELF32 i386 little-endian, static ET_EXEC/ET_DYN subset with up to 16 program
+  headers, 64 KiB maximum guest program image and 256 KiB maximum ELF file.
+- Multiple PT_LOAD segments mapped to **private physical pages per process**;
+  permissions validated at load time. Code/data pages cannot overlap, and no
+  ELF segment may request simultaneous write+execute permissions.
+- Single GDT-relative address range 0..64 KiB for program code/data, an
+  existing 16 KiB private stack mapped at 0x10000..0x13fff.
+- Standard-style initial i386 stack layout: argc, argv pointers, NULL, envp
+  pointers, NULL and AT_NULL terminator. All pointers are segment-relative
+  offsets. Up to 24 argv strings and 16 envp strings, at most 255 characters
+  each. lunaSH exports HOME, PWD, PATH and set variables without shell secrets.
+- Process creation, private page mapping, exit code, resource release on exit,
+  bounded child wait (`elfrun FILE [ARGS...]`, `elfwait PID`).
+- Basic file descriptors (8 per process), LunaFS2 read/write, seek, metadata,
+  mkdir, rename, unlink, chdir, getcwd. Paths are resolved against each
+  process's own CWD, not the mutable shell global. Guest data pointers are
+  checked against actual page permissions before kernel copy.
+- Freestanding **real C guest SDK**: `sdk/guest/crt0.S`,
+  `sdk/guest/posix.[ch]` and `sdk/guest/luna32.ld`, with
+  `make luna-guest-hello` producing `build/guest/hello.elf`.
 
-- ELF32 little-endian i386; ET_EXEC or ET_DYN; exactly one `PT_LOAD` segment.
-- A segment with the execute bit set and no writable bit, `p_vaddr` and entry offset within one 4096-byte page.
-- Files up to 4096 bytes; non-zero `p_filesz`, `p_memsz`; `p_filesz <= p_memsz`.
-- Entry pointer must lie inside the declared segment. No relocation, shared libraries, stack arguments or dynamic linker.
-- The program's virtual pointers are *segment-relative offsets* within the GDT base `USER_CODE = 0x40000000`. It cannot access kernel memory or files through raw pointers.
+## Early LunaOS syscall ABI (int 0x80)
 
-This is deliberately **not** a loader for a standard Linux executable, and it cannot load the real Git binary yet.
+| eax | ABI operation | Arguments (EBX, ECX, EDX) |
+|---|---|---|
+| 3 | exit | exit code, 0, 0 |
+| 6 | write | fd, guest buffer, bytes <= 4096; console fd 1/2 max 256 bytes |
+| 7 | open | NUL-terminated path, flags, 0 |
+| 8 | read | fd, writable guest buffer, bytes <= 4096 |
+| 9 | close | fd, 0, 0 |
+| 10 | lseek | fd, signed delta, SEEK_SET(0)/CUR(1)/END(2) |
+| 11 | luna_stat | path, pointer to {size,mode,reserved}, 0 |
+| 12 | chdir | path, 0, 0 |
+| 13 | getcwd | buffer, capacity, 0 |
+| 14 | mkdir | path, mode ignored, 0 |
+| 15 | unlink | path, 0, 0 |
+| 16 | rename | source, destination, 0 |
+| 17 | getpid | 0, 0, 0 |
 
-## User/kernel boundary: experimental int 0x80
+Open flags use Linux i386 O_RDONLY=0, O_WRONLY=1, O_RDWR=2,
+O_CREAT=64, O_TRUNC=512, O_APPEND=1024 for compatibility.
+Writing currently supports **append-only** and truncated/new files; it is
+not a general POSIX pwrite or random-access overwrite. The descriptor API
+uses -1 on failure, does not expose `errno`, and does not guarantee the
+atomicity, permission bits, symlinks or timestamps expected by upstream Git.
+The `stat` structure is a LunaOS-specific three-field record, not POSIX
+`struct stat`. File rename uses current LunaFS2 semantics.
 
-| eax | Operation | Arguments | Result |
-| --- | --- | --- | --- |
-| 3 | `exit(code)` | ebx=exit code | Ends task |
-| 6 | `console_write(fd,offset,len)` | ebx=1 or 2; ecx=code/stack offset; edx=length <=256 | bytes or -1 |
-| 7 | `file_open(path,flags)` | ebx=NUL-terminated code/stack offset; ecx=0 (read-only) | fd >=3 or -1 |
-| 8 | `file_read(fd,offset,len)` | ebx=fd; ecx=writable user-stack offset; edx=len <=4096 | bytes or -1 |
-| 9 | `file_close(fd)` | ebx=fd | 0 or -1 |
+### Build and run a native C program
 
-Each task has 8 read-only FDs; file lookup is by canonical LunaFS2 path. A descriptor is not a raw kernel pointer. The sandbox rejects invalid user offsets, pointers crossing mapping boundaries, attempts to write to the executable page, and unsupported file modes. This does not yet implement `fork`, `execve`, `waitpid`, `pipe`, `stat`, `mmap`, write/rename/fsync/locks, symlinks, UTF-8 path semantics or secure per-process CWD.
+On an Ubuntu development workstation with GCC multilib and binutils:
 
-## Automated validation
+```sh
+make luna-guest-hello
+file build/guest/hello.elf
+readelf -l build/guest/hello.elf
+```
 
-`make test-elf32` validates the parser and malformed headers with ASan and UBSan on the host. CI compiles the loader with freestanding i386 flags and builds the complete LunaOS ISO.
+The binary is for LunaOS, not Linux. Transfer it to an installed LunaOS
+disk (e.g. with lunaSH `wget` from a local server), then:
 
-`tests/elf32_guest.py` is the **real guest smoke test**: starts QEMU from a disk image, downloads a hand-crafted ELF image to LunaFS2 over HTTP, runs `elfrun /tmp/hello.elf`, checks ring-3 stdout and reads `/home/luna/welcome.txt` through the new file syscalls. Run it only once QEMU is installed and `make all` has succeeded.
+```sh
+elfrun /tmp/hello.elf Apple Banana
+elfwait <PID printed by elfrun>
+cat /tmp/guest-c-after.txt
+```
 
-### Blocking requirements before upstream Git can execute
+The program runs in ring 3, receives the SysV-like argv/env stack and uses
+native syscalls to manipulate LunaFS2 without any Linux host relay.
 
-Increase per-process address space beyond a single RX page and static stack; implement ELF multi-segment loading, dynamic/static relocation as required, allocator and stable syscall ABI, process launch/wait, POSIX VFS semantics and a usable freestanding libc. Then compile Git upstream against a native LunaOS sysroot. Native Git cannot run through this small ELF proof-of-concept.
+## Test evidence and remaining limitations
+
+- Host parser regression with ASan+UBSan, freestanding i386 compilation,
+  full LunaOS ISO build and guest QEMU smoke are in
+  `.github/workflows/elf32-exec.yml`.
+- Guest QEMU smoke tests exercise a >12 KiB **two-PT_LOAD** ELF program, real
+  argv/envp, file writes/renames, process wait and exit status.
+- Guest C SDK smoke uses a C program compiled with gcc -m32 -nostdlib. The
+  CI must pass before considering the C SDK validated.
+- No ELF interpreter, relocations, dynamic libraries or general ET_DYN
+  runtime relocation. Maximum memory limits make **Git upstream too large**.
+- No general process spawning API, fork, execve, pipes, signals, blocking
+  device I/O, user memory allocator, full POSIX stat/mtime/chmod/locks/
+  fsync/rename, mmap, libc or sockets yet.
+- Hardware i386 without NX cannot enforce non-executable data pages;
+  the loader **rejects W+X metadata** and maps code read-only, but this is
+  not a hardware-enforced execute-never guarantee. Full isolation and
+  robustness require further security review.
+- ELF code and data need dedicated virtual memory growth rather than a
+  fixed 64 KiB cap, with VM-aware heap, true POSIX VFS and libc before
+  compiling/running Git official. The PR remains draft until all full
+  guest Git acceptance tests in `tests/git-full-acceptance.md` pass.
