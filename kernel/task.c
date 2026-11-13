@@ -1,5 +1,6 @@
 #include "update.h"
 #include "task.h"
+#include "elf32.h"
 #include "driver.h"
 #include "heap.h"
 #include "memory.h"
@@ -14,6 +15,8 @@ static uint32_t next_pid = 1, stamp, sample_stamp, sample_tick;
 static uint32_t directories[TASK_MAX][1024] __attribute__((aligned(4096)));
 static uint32_t user_tables[TASK_MAX][1024] __attribute__((aligned(4096)));
 static uint8_t user_code[4096] __attribute__((aligned(4096)));
+/* One private executable code page per ring-3 program (no shared RW alias). */
+static uint8_t exec_code[TASK_MAX][LUNA_ELF_CODE_BYTES] __attribute__((aligned(4096)));
 static uint8_t user_stacks[TASK_MAX][USER_STACK_BYTES] __attribute__((aligned(4096)));
 static uint8_t kernel_stacks[TASK_MAX][KSTACK_BYTES] __attribute__((aligned(4096), section(".bss.stacks")));
 static uint8_t shell_stack[SHELL_STACK_BYTES] __attribute__((aligned(4096)));
@@ -210,6 +213,43 @@ static uint32_t spawn(int app, const char *name, unsigned ring, unsigned probe,
 uint32_t task_spawn(int app, const char *name, unsigned ring, unsigned probe) {
     return spawn(app, name, ring, probe, NULL);
 }
+/* MVP ELF execution: only one RX PT_LOAD fitting in a page is accepted.
+ * The file is checked before a task slot is claimed. No arbitrary user
+ * syscall is exposed to this program, other than write-to-console and exit. */
+uint32_t task_spawn_elf(const char *path) {
+    File *f = fs_find(path);
+    if (!f || f->dir || f->size < 84 || f->size > LUNA_ELF_CODE_BYTES)
+        return 0;
+    uint8_t *bytes = heap_allocate(f->size);
+    if (!bytes)
+        return 0;
+    bool read_ok = fs_read_bytes(f, 0, bytes, f->size);
+    LunaElfImage *image = heap_allocate(sizeof(LunaElfImage));
+    if (!image) {
+        heap_release(bytes);
+        return 0;
+    }
+    bool accepted = read_ok && luna_elf32_load(bytes, f->size, image);
+    heap_release(bytes);
+    if (!accepted) {
+        heap_release(image);
+        return 0;
+    }
+    uint32_t pid = spawn(-1, "ELF32 native user process", 3, 0, NULL);
+    if (!pid) {
+        heap_release(image);
+        return 0;
+    }
+    Task *t = task_by_pid(pid);
+    unsigned slot = (unsigned)(t - tasks);
+    memcpy(exec_code[slot], image->code, LUNA_ELF_CODE_BYTES);
+    /* Ring-3 code segment has base USER_CODE; EIP is segment relative. */
+    user_tables[slot][0] = (uint32_t)exec_code[slot] | 5;
+    t->frame->eip = image->entry;
+    t->exec_image = true;
+    heap_release(image);
+    return pid;
+}
 uint32_t task_spawn_service(const char *name, void (*service)(void)) {
     return spawn(-1, name, 3, 0, service);
 }
@@ -405,6 +445,31 @@ static TrapFrame *syscall(TrapFrame *f) {
         }
         finish(t, f->ebx);
         break;
+    case SYS_EXEC_WRITE: {
+        /* stdout/stderr only, bounded access to the guest's code/stack.
+         * No implicit access to supervisor memory or other processes.
+         * EIP/ECX here are segment-relative user offsets. */
+        uint32_t pos = f->ecx, length = f->edx;
+        if (!t->exec_image || t->ring != 3 ||
+            (f->ebx != 1 && f->ebx != 2) || length > 256u ||
+            pos >= 0x14000u || length > 0x14000u - pos ||
+            !((pos < LUNA_ELF_CODE_BYTES && length <= LUNA_ELF_CODE_BYTES - pos) ||
+              (pos >= 0x10000u && length <= 0x14000u - pos))) {
+            f->eax = (uint32_t)-1;
+            break;
+        }
+        char buffer[257];
+        memcpy(buffer, (const void *)(uintptr_t)(USER_CODE + pos), length);
+        buffer[length] = 0;
+        /* Reject embedded NUL until stream-safe terminal output exists. */
+        if (strlen(buffer) != length) {
+            f->eax = (uint32_t)-1;
+            break;
+        }
+        shell_print(buffer);
+        f->eax = length;
+        break;
+    }
     case SYS_SYSTEM:
         f->eax = (uint32_t)-1;
         break;
