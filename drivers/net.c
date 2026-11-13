@@ -112,8 +112,11 @@ static void time_network_poll(void);
 static void time_network_input(const uint8_t [4],const uint8_t *,unsigned);
 #define TCP_MSS 1460u
 #define TCP_RECEIVE_MIN 16384u
-/* Give large HTTPS bodies headroom without reserving it for ordinary requests. */
-#define TCP_BULK_RECEIVE_TARGET (256u * 1024u)
+/* The update stream warms up at 1 MiB, then the existing delivery-rate/RTT
+ * auto-tuner grows towards 10 MiB if the peer and RAM budget permit. Do not
+ * preallocate 10 MiB on machines at the 256 MiB installer minimum. */
+#define TCP_BULK_RECEIVE_WARMUP (1u * 1024u * 1024u)
+#define TCP_BULK_RECEIVE_TARGET (10u * 1024u * 1024u)
 #define TCP_WINDOW_UPDATE_MIN (2u * TCP_MSS)
 #define TCP_WINDOW_UPDATE_MAX (16u * TCP_MSS)
 #define TCP_UNSCALED_MAX 65535u
@@ -546,13 +549,17 @@ static void send_tcp(int flags, const char *data, unsigned n) {
     put16(p + 16, sum(p, header + n, s));
     send_ip(tcp.ip, 6, p, header + n);
 }
-/* Reserve a larger TCP ring for long authenticated streams. This runs after
- * the TCP/TLS connection has been established, so window scaling is known.
- * If memory is scarce the existing receive buffer and window remain valid. */
+/* Limit UPDATE HTTPS receive-buffer memory to 10 MiB without reserving it.
+ * The SYN already advertised the system's memory-dependent window scale.
+ * Normal HTTP retains its own larger/unscaled autotuning limits. A stream
+ * starts at 1 MiB and grows to the cap only when measured delivery/RTT calls
+ * tcp_grow(). Allocation failure keeps the previous, valid credit. */
 static void tcp_prepare_bulk_receive(void) {
     if (tcp.state != 2) return;
+    if (tcp.limit > TCP_BULK_RECEIVE_TARGET)
+        tcp.limit = TCP_BULK_RECEIVE_TARGET;
     unsigned previous = tcp.capacity;
-    tcp_grow(TCP_BULK_RECEIVE_TARGET);
+    tcp_grow(TCP_BULK_RECEIVE_WARMUP);
     if (tcp.capacity > previous)
         send_tcp(0x10, NULL, 0); /* Announce additional credit to the peer. */
 }
