@@ -246,7 +246,17 @@ int main(void) {
         assert((int32_t)(tcp.right_edge - edge) >= 0);
         edge = tcp.right_edge;
     }
-    assert(tcp.capacity < TCP_UNSCALED_MAX && tcp.used == 0);
+    /* A burst that keeps arriving must not shrink the ring just because the
+     * application immediately consumes it. Previous window credit is safe. */
+    assert(tcp.capacity == TCP_UNSCALED_MAX && tcp.used == 0);
+    frame_clock += 4000u;
+    tcp_tune_receive();
+    assert(tcp.goal < TCP_UNSCALED_MAX);
+    /* Only shrink physical storage once previously advertised credit is gone. */
+    tcp.right_edge = tcp.ack;
+    frame_clock += 4000u;
+    tcp_tune_receive();
+    assert(tcp.capacity < TCP_UNSCALED_MAX);
     /* RFC 6298 estimation, Karn exclusion and capped exponential backoff. */
     setup();
     tcp.sample_active = true;
@@ -349,6 +359,72 @@ int main(void) {
     tcp.state = 1;
     segment(99, 0x12, NULL, 0);
     assert(!tcp.scaled && !tcp.timestamps && tcp.limit == TCP_UNSCALED_MAX);
+    /* The HTTPS update starts with only 1 MiB, then auto-tunes towards
+     * 10 MiB based on observed rate and RTT. Never allocate 10 MiB eagerly. */
+    setup();
+    tcp.limit = 32u * 1024u * 1024u;
+    tcp.scale_rx = 9;
+    unsigned updates_before = transmitted;
+    tcp_prepare_bulk_receive();
+    assert(tcp.limit == TCP_BULK_RECEIVE_TARGET);
+    assert(tcp.capacity >= TCP_BULK_RECEIVE_WARMUP &&
+           tcp.capacity < TCP_BULK_RECEIVE_TARGET);
+    assert(tcp.goal == tcp.capacity);
+    assert(transmitted == updates_before + 1u);
+    assert(tcp_granted() >= TCP_BULK_RECEIVE_WARMUP - (1u << tcp.scale_rx));
+    tcp_prepare_bulk_receive();
+    assert(transmitted == updates_before + 1u); /* no redundant window update */
+    tcp.measured = true;
+    tcp.srtt = 50;
+    tcp.rate_at = frame_clock = 1000u;
+    tcp.rate_bytes = 5u * 1024u * 1024u; /* 5 MiB in 50 ms -> ~10 MiB BDP budget */
+    frame_clock += 50u;
+    tcp_delivery_sample(0);
+    assert(tcp.capacity == TCP_BULK_RECEIVE_TARGET);
+    assert(tcp.goal == TCP_BULK_RECEIVE_TARGET);
+    /* Low-memory connections keep their negotiated limit, not a forced 10 MiB. */
+    setup();
+    tcp.limit = 512u * 1024u;
+    tcp.scale_rx = 4;
+    tcp_prepare_bulk_receive();
+    assert(tcp.limit == 512u * 1024u && tcp.capacity == tcp.limit);
+    setup();
+    tcp.limit = TCP_UNSCALED_MAX;
+    tcp_prepare_bulk_receive();
+    assert(tcp.limit == TCP_UNSCALED_MAX && tcp.capacity == TCP_UNSCALED_MAX);
+    /* A failed speculative 10 MiB allocation retains the smaller valid ring. */
+    setup();
+    tcp.limit = 32u * 1024u * 1024u;
+    tcp.scale_rx = 9;
+    tcp_prepare_bulk_receive();
+    unsigned retained = tcp.capacity;
+    tcp.measured = true;
+    tcp.srtt = 50;
+    tcp.rate_at = frame_clock = 2000u;
+    tcp.rate_bytes = 5u * 1024u * 1024u;
+    fail_allocate = true;
+    frame_clock += 50u;
+    tcp_delivery_sample(0);
+    assert(tcp.capacity == retained && tcp.limit == TCP_BULK_RECEIVE_TARGET);
+    assert(tcp.used == 0);
+    /* Tiny application reads coalesce window-credit update frames. */
+    setup();
+    char bulk[1200]; memset(bulk, 'b', sizeof(bulk));
+    for (unsigned i = 0; i < 12; i++)
+        segment(tcp.ack, 0x18, bulk, sizeof(bulk));
+    updates_before = transmitted;
+    char drained[9000];
+    assert(stream_read(drained, 100) == 100);
+    assert(transmitted == updates_before);
+    assert(stream_read(drained, 8500) == 8500);
+    assert(transmitted == updates_before + 1u);
+    /* A zero advertised window must reopen immediately on the first read. */
+    setup();
+    segment(tcp.ack, 0x18, bulk, sizeof(bulk));
+    tcp.right_edge = tcp.ack;
+    updates_before = transmitted;
+    assert(stream_read(drained, 1) == 1);
+    assert(transmitted == updates_before + 1u);
     /* Large buffers are allocated only on demand and survive circular wrap. */
     setup();
     tcp.limit = 8u * 1024 * 1024;

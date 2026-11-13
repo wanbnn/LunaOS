@@ -94,7 +94,6 @@ static bool write_verify(unsigned disk, unsigned i, uint8_t *raw, uint8_t *verif
  * There are no temporary files in the 4 MiB live LunaFS slots. */
 typedef struct {
     const char *expected;
-    uint8_t *scratch;
     uint8_t prelude[UPDATE_DELTA_HEADER_BYTES];
     unsigned prefix_used, prefix_length, manifest_used, record, received;
     bool delta, manifest_ok, malformed;
@@ -120,7 +119,7 @@ static void update_show_download(UpdateStream *p) {
     }
     if (p->drawn_at && now - p->drawn_at < 250u && p->downloaded < p->total) return;
     p->drawn_at = now ? now : 1u;
-    progress = 1u + (unsigned)(p->downloaded * 49u / p->total);
+    progress = 1u + (unsigned)(p->downloaded * 39u / p->total);
     detail[0] = 0;
     char b[24];
     append(detail, "Download: ", sizeof(detail));
@@ -132,19 +131,13 @@ static void update_show_download(UpdateStream *p) {
     append(detail, " KiB/s", sizeof(detail));
     gui_invalidate_app(APP_SETTINGS);
 }
-static bool update_skip_empty(UpdateStream *p) {
-    while (p->record < UPDATE_RECORDS) {
-        unsigned i = p->record;
-        if (!p->selected[i]) {
-            p->record++;
-            continue;
-        }
-        if (word(manifest + 64 + i * 40 + 4)) break;
-        if (!decode(i, p->scratch))
-            return package_error(p, "Invalid SHA-256 for empty update block.");
+/* The network callback only assembles the compressed bytes. Even zero-filled
+ * records are verified later, outside the HTTPS receive path. */
+static void update_skip_empty(UpdateStream *p) {
+    while (p->record < UPDATE_RECORDS &&
+           (!p->selected[p->record] ||
+            !word(manifest + 64 + p->record * 40 + 4)))
         p->record++;
-    }
-    return true;
 }
 static bool update_receive(void *context, const void *input, size_t length) {
     UpdateStream *p = context;
@@ -197,7 +190,7 @@ static bool update_receive(void *context, const void *input, size_t length) {
             p->manifest_ok = true;
             p->rate_at = frame_clock;
             p->rate_bytes = p->downloaded;
-            if (!update_skip_empty(p)) return false;
+            update_skip_empty(p);
             update_show_download(p);
             continue;
         }
@@ -217,14 +210,36 @@ static bool update_receive(void *context, const void *input, size_t length) {
         p->downloaded += take;
         data += take; length -= take;
         if (p->received == size) {
-            if (!decode(i, p->scratch))
-                return package_error(p, "Downloaded chunk failed SHA-256 validation.");
             p->received = 0;
             p->record++;
-            if (!update_skip_empty(p)) return false;
+            update_skip_empty(p);
         }
         update_show_download(p);
     }
+    return true;
+}
+/* Verify all included blocks before any disk write, but never inside the
+ * socket callback: inflating and hashing there delays Wi-Fi RX/TCP polling.
+ * Delta records omitted from the download are checked against disk later. */
+static bool verify_downloaded_package(UpdateStream *p, uint8_t *scratch) {
+    state("Verifying downloaded update...", "Verificando atualização baixada...", 40);
+    for (unsigned i = 0; i < UPDATE_RECORDS; ++i) {
+        if (!p->selected[i]) continue;
+        if (!decode(i, scratch))
+            return package_error(p, "Downloaded chunk failed SHA-256 validation.");
+        if ((i & 7u) == 7u || i + 1u == UPDATE_RECORDS) {
+            progress = 40u + (i + 1u) * 10u / UPDATE_RECORDS;
+            detail[0] = 0;
+            append(detail, "SHA-256: ", sizeof(detail));
+            char b[24];
+            number(b, i + 1u);
+            append(detail, b, sizeof(detail));
+            append(detail, " / 248 blocks", sizeof(detail));
+            gui_invalidate_app(APP_SETTINGS);
+            task_sleep(1);
+        }
+    }
+    progress = 50;
     return true;
 }
 static bool download_package(const char *url, const char *target, bool expect_delta,
@@ -232,16 +247,17 @@ static bool download_package(const char *url, const char *target, bool expect_de
     for (unsigned attempt = 0; attempt < 3; attempt++) {
         cleanup();
         memset(manifest, 0, sizeof(manifest));
-        UpdateStream p = {.expected = target, .scratch = scratch};
+        UpdateStream p = {.expected = target};
         uint64_t body_bytes = 0;
         detail[0] = 0;
-        state("Downloading and verifying the update...",
-              "Baixando e verificando a atualização...", 1);
+        state("Downloading update package...",
+              "Baixando pacote de atualização...", 1);
         bool ok = net_https_stream(url, update_receive, &p, &body_bytes,
                                    detail, sizeof(detail));
         if (ok && p.manifest_ok && p.delta == expect_delta &&
             p.record == UPDATE_RECORDS && p.received == 0 &&
             body_bytes == p.total && p.downloaded == p.total) {
+            if (!verify_downloaded_package(&p, scratch)) return false;
             memcpy(included, p.selected, sizeof(included));
             progress = 50;
             serial_write("LunaUpdate v2: bundle downloaded, all included SHA-256 checks passed.\n");
