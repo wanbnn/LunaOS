@@ -27,7 +27,7 @@ static const char *commands[] = {
     "uname",  "free",  "uptime",  "date",     "pci",     "net",     "ifconfig", "dns", "ping",  "wget",
     "browse", "audio", "beep",    "sync",     "history", "source",  "set",      "env",   "true",
     "false",  "sleep", "reboot",  "poweroff", "about",   "ps",      "tasks",    "kill",  "ringtest",
-    "js",     "python", "python3", "python3.13", "micropython", "pip", "venv",  "deactivate", "dev",   "bench", "perf", "drvinfo", "whoami",   "setup",   "drvtest", "fwinfo",   "wifidiag", "wifi", "memtest", "elfrun", 0};
+    "js",     "python", "python3", "python3.13", "micropython", "pip", "venv",  "deactivate", "dev",   "bench", "perf", "drvinfo", "whoami",   "setup",   "drvtest", "fwinfo",   "wifidiag", "wifi", "memtest", "elfrun", "elfwait", 0};
 #define CAP 8192
 static void emit(char *out, const char *s) {
     append(out, s, CAP);
@@ -318,19 +318,56 @@ static int execute(int argc, char **a, const char *input, char *out) {
         emit(out, "\nSyntax: quotes, variables, |, >, >>, <, ;, &&, ||\nSuper: app search | "
                   "Alt+Tab: switch | Alt+F4: close | Tab: complete\n");
     } else if (!strcmp(c, "elfrun")) {
-        if (argc != 2) {
-            emit(out, "usage: elfrun FILE (restricted static i386 ELF32)\n");
+        if (argc < 2 || argc > 25) {
+            emit(out, "usage: elfrun ELF32 [ARG ...] (max 24 argv)\n");
             return 2;
         }
-        uint32_t pid = task_spawn_elf(a[1]);
+        /* Linux-like startup stack: argc, argv[], envp[], AT_NULL.
+         * Preserve local shell variables, without exporting OS secrets. */
+        char envbuf[16][280];
+        const char *env[16];
+        int count = 0;
+        strcpy(envbuf[count], "HOME=");
+        append(envbuf[count], account_home(), sizeof(envbuf[0]));
+        env[count] = envbuf[count]; count++;
+        strcpy(envbuf[count], "PWD=");
+        append(envbuf[count], cwd, sizeof(envbuf[0]));
+        env[count] = envbuf[count]; count++;
+        strcpy(envbuf[count], "PATH=/bin:/usr/bin");
+        env[count] = envbuf[count]; count++;
+        for (int i = 0; i < 16 && count < 16; i++) {
+            if (!vars[i].name[0] || strlen(vars[i].name) + strlen(vars[i].value) + 2u > 256u)
+                continue;
+            strcpy(envbuf[count], vars[i].name);
+            append(envbuf[count], "=", sizeof(envbuf[0]));
+            append(envbuf[count], vars[i].value, sizeof(envbuf[0]));
+            env[count] = envbuf[count];
+            count++;
+        }
+        uint32_t pid = task_spawn_elf_args(a[1], argc - 1,
+                                           (const char *const *)(a + 1), count, env);
         if (!pid) {
-            emit(out, "elfrun: unsupported ELF32, invalid binary, or no free task slot\n");
+            emit(out, "elfrun: unsupported ELF32, resource shortage or invalid arguments\n");
             return 1;
         }
         emit(out, "elfrun: started ring-3 process pid=");
         num(out, pid);
-        emit(out, " (asynchronous; no POSIX argv/env or wait yet)\n");
+        emit(out, " (asynchronous, argv and envp supplied)\n");
         return 0;
+    } else if (!strcmp(c, "elfwait")) {
+        if (argc != 2 || atoi(a[1]) <= 0) {
+            emit(out, "usage: elfwait PID\n");
+            return 2;
+        }
+        unsigned code = 0;
+        if (!task_wait_elf((uint32_t)atoi(a[1]), 10000u, &code)) {
+            emit(out, "elfwait: process unknown, not a child or wait timed out\n");
+            return 1;
+        }
+        emit(out, "elfwait: exit code ");
+        num(out, code);
+        emit(out, "\n");
+        return code ? 1 : 0;
     } else if (!strcmp(c, "echo")) {
         for (int i = 1; i < argc; i++) {
             if (i > 1)
