@@ -44,7 +44,7 @@ static void exec_close_fd(Task *t, unsigned fd) {
             else stream_close();
             exec_net_owner = 0;
         }
-    } else if (kind && id < EXEC_PIPE_COUNT) {
+    } else if ((kind == 1u || kind == 2u) && id < EXEC_PIPE_COUNT) {
         ExecPipe *p = &exec_pipes[id];
         if (p->used) {
             if (kind == 1u && p->readers) p->readers--;
@@ -1095,6 +1095,68 @@ static TrapFrame *syscall(TrapFrame *f) {
         }
         uint32_t pid = task_spawn_elf_args(path, argc, arg_vector, envc, env_vector);
         f->eax = pid ? pid : (uint32_t)-1;
+        break;
+    }
+    case SYS_EXEC_OPENDIR: {
+        char raw[PATH_CAP], path[PATH_CAP];
+        if (!exec_string(t, f->ebx, raw, sizeof(raw)) ||
+            !exec_path(t, raw, path)) {
+            f->eax = (uint32_t)-1; break;
+        }
+        File *directory = fs_find(path);
+        if (!directory || !directory->dir) {
+            f->eax = (uint32_t)-1; break;
+        }
+        unsigned slot=0;
+        for (; slot<EXEC_FD_MAX; slot++)
+            if (!t->exec_fds[slot].open) break;
+        if (slot==EXEC_FD_MAX) {f->eax=(uint32_t)-1;break;}
+        strcpy(t->exec_fds[slot].path, path);
+        t->exec_fds[slot].flags = 0u;
+        t->exec_fds[slot].offset = 0u;
+        t->exec_fds[slot].kind = 5u; /* directory cursor */
+        t->exec_fds[slot].open = true;
+        f->eax = slot+3u;
+        break;
+    }
+    case SYS_EXEC_READDIR: {
+        uint32_t fd=f->ebx, ptr=f->ecx;
+        /* LunaGuestDirent: inode, mode, mtime, name[128] (140 bytes). */
+        if (!t->exec_image || fd<3u || fd>=3u+EXEC_FD_MAX ||
+            !t->exec_fds[fd-3u].open || t->exec_fds[fd-3u].kind!=5u ||
+            !exec_user_range(t,ptr,140u,true)) {
+            f->eax=(uint32_t)-1; break;
+        }
+        const char *base=t->exec_fds[fd-3u].path;
+        size_t nbase=strlen(base);
+        unsigned at=t->exec_fds[fd-3u].offset;
+        f->eax=0u; /* end of directory */
+        for (;at<(unsigned)fs_file_capacity;at++) {
+            File *file=&files[at];
+            if (!file->used) continue;
+            const char *name=0;
+            if (nbase==1u && base[0]=='/' && file->path[0]=='/')
+                name=file->path+1u;
+            else if (!strncmp(file->path,base,nbase) &&
+                     file->path[nbase]=='/')
+                name=file->path+nbase+1u;
+            if (!name || !*name || strchr(name,'/')) continue;
+            struct {
+                uint32_t ino, mode, mtime;
+                char name[128];
+            } entry = {0};
+            entry.ino=at+1u; /* currently snapshot-relative, not stable inode */
+            entry.mode=file->mode ? file->mode :
+                (file->dir ? 0040755u : 0100644u);
+            entry.mtime=file->mtime;
+            strcpy(entry.name,name);
+            memcpy((void *)(uintptr_t)(USER_CODE+ptr),&entry,sizeof(entry));
+            t->exec_fds[fd-3u].offset=at+1u;
+            f->eax=1u;
+            break;
+        }
+        if (f->eax==0u)
+            t->exec_fds[fd-3u].offset=(uint32_t)fs_file_capacity;
         break;
     }
     case SYS_EXEC_TCP_CONNECT: {
