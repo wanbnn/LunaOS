@@ -15,7 +15,7 @@
 #define LUNA_SEEK_CUR 1
 #define LUNA_SEEK_END 2
 typedef struct {
-    uint32_t size, mode, reserved;
+    uint32_t size, mode, reserved, mtime, ctime;
 } LunaGuestStat;
 long write(int fd, const void *buffer, size_t n);
 long read(int fd, void *buffer, size_t n);
@@ -33,6 +33,8 @@ int fsync(int fd); /* persists a LunaFS2 snapshot */
 int luna_spawn(const char *path, const char *const argv[], const char *const envp[]);
 int luna_waitpid(int pid, int *status, int options); /* options 1 = WNOHANG */
 int luna_execve(const char *path, const char *const argv[], const char *const envp[]); /* does not return on success */
+int chmod(const char *path, unsigned mode);
+int luna_utime(const char *path, uint32_t unix_seconds);
 int luna_stat(const char *path, LunaGuestStat *info);
 __attribute__((noreturn)) void _exit(int code);
 #endif
