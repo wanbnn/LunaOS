@@ -46,6 +46,10 @@ int luna_spawn(const char *path, const char *const argv[], const char *const env
 int luna_waitpid(int pid, int *status, int options) {
     return (int)call3(21, (unsigned)pid, (unsigned)(uintptr_t)status, (unsigned)options);
 }
+int luna_execve(const char *path, const char *const argv[], const char *const envp[]) {
+    return (int)call3(22, (unsigned)(uintptr_t)path,
+                      (unsigned)(uintptr_t)argv, (unsigned)(uintptr_t)envp);
+}
 __attribute__((noreturn)) void _exit(int code) {
     (void)call3(3, (unsigned)code, 0, 0);
     for (;;) { __asm__ volatile("pause"); }
