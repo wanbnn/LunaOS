@@ -66,6 +66,9 @@ int luna_opendir(const char *path) {
 int luna_readdir(int fd, LunaGuestDirent *entry) {
     return (int)call3(27, (unsigned)fd, (unsigned)(uintptr_t)entry, 0);
 }
+void *luna_brk(void *address) {
+    return (void *)(uintptr_t)call3(28, (unsigned)(uintptr_t)address, 0, 0);
+}
 __attribute__((noreturn)) void _exit(int code) {
     (void)call3(3, (unsigned)code, 0, 0);
     for (;;) { __asm__ volatile("pause"); }
