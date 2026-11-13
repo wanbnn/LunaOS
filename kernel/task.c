@@ -254,11 +254,11 @@ uint32_t task_spawn(int app, const char *name, unsigned ring, unsigned probe) {
 }
 /* Restricted i386 user-mode loader; separate physical pages per process.
  * A GDT base at USER_CODE makes all guest pointers segment-relative. */
-static bool setup_exec_stack(Task *t, int argc, const char *const argv[],
-                             int envc, const char *const envp[]) {
+static bool prepare_exec_stack(uint8_t *stack, int argc, const char *const argv[],
+                               int envc, const char *const envp[], uint32_t *esp_out) {
     if (argc < 1 || argc > 24 || envc < 0 || envc > 16)
         return false;
-    unsigned slot = (unsigned)(t - tasks), sp = USER_STACK_BYTES;
+    unsigned sp = USER_STACK_BYTES;
     uint32_t args[24], env[16];
     for (int group = 0; group < 2; group++) {
         int count = group ? envc : argc;
@@ -267,10 +267,10 @@ static bool setup_exec_stack(Task *t, int argc, const char *const argv[],
             if (!strings || !strings[i])
                 return false;
             size_t len = strlen(strings[i]) + 1u;
-            if (len < 2u || len > 256u || sp < len + 256u)
+            if (len > 256u || sp < len + 256u)
                 return false;
             sp -= (unsigned)len;
-            memcpy(user_stacks[slot] + sp, strings[i], len);
+            memcpy(stack + sp, strings[i], len);
             (group ? env : args)[i] = LUNA_ELF_STACK_OFFSET + sp;
         }
     }
@@ -279,7 +279,7 @@ static bool setup_exec_stack(Task *t, int argc, const char *const argv[],
     if (sp < words * sizeof(uint32_t) + 16u)
         return false;
     sp = (sp - words * sizeof(uint32_t)) & ~15u;
-    uint32_t *p = (uint32_t *)(void *)(user_stacks[slot] + sp);
+    uint32_t *p = (uint32_t *)(void *)(stack + sp);
     *p++ = (uint32_t)argc;
     for (int i = 0; i < argc; i++)
         *p++ = args[i];
@@ -289,7 +289,7 @@ static bool setup_exec_stack(Task *t, int argc, const char *const argv[],
     *p++ = 0;
     *p++ = 0; /* AT_NULL */
     *p++ = 0;
-    t->frame->useresp = LUNA_ELF_STACK_OFFSET + sp;
+    *esp_out = LUNA_ELF_STACK_OFFSET + sp;
     return true;
 }
 uint32_t task_spawn_elf_args(const char *path, int argc, const char *const argv[],
@@ -338,7 +338,9 @@ uint32_t task_spawn_elf_args(const char *path, int argc, const char *const argv[
         goto fail_load;
     Task *t = task_by_pid(pid);
     unsigned slot = (unsigned)(t - tasks);
-    if (!setup_exec_stack(t, argc, argv, envc, envp)) {
+    uint32_t stack_esp = 0;
+    if (!prepare_exec_stack(user_stacks[slot], argc, argv, envc, envp,
+                            &stack_esp)) {
         t->state = TASK_EXITED;
         goto fail_load;
     }
@@ -365,6 +367,7 @@ uint32_t task_spawn_elf_args(const char *path, int argc, const char *const argv[
     memcpy(t->exec_permissions, image->permissions, sizeof(t->exec_permissions));
     t->exec_physical_bytes = physical_bytes;
     t->frame->eip = image->entry;
+    t->frame->useresp = stack_esp;
     t->parent_pid = parent_pid;
     strcpy(t->exec_cwd, parent_cwd);
     t->exec_image = true;
@@ -380,6 +383,116 @@ fail_load:
 uint32_t task_spawn_elf(const char *path) {
     const char *a[1] = {path};
     return task_spawn_elf_args(path, 1, a, 0, NULL);
+}
+/* POSIX-like execve subset: stage the complete new image and stack before
+ * changing the calling process. Failed exec leaves the old image intact.
+ * On success PID, parentage, cwd and open descriptors are preserved.
+ * No interpreter/relocations, shebangs, close-on-exec or signals yet. */
+static bool task_execve_elf(Task *t, TrapFrame *frame, const char *path,
+                            int argc, const char *const argv[],
+                            int envc, const char *const envp[]) {
+    if (!t->exec_image || t->ring != 3)
+        return false;
+    uint8_t *new_stack = heap_allocate(USER_STACK_BYTES);
+    if (!new_stack)
+        return false;
+    memset(new_stack, 0, USER_STACK_BYTES);
+    uint32_t new_esp = 0;
+    if (!prepare_exec_stack(new_stack, argc, argv, envc, envp, &new_esp)) {
+        heap_release(new_stack);
+        return false;
+    }
+    File *file = fs_find(path);
+    if (!file || file->dir || file->size < 84u ||
+        file->size > LUNA_ELF_MAX_FILE_BYTES) {
+        heap_release(new_stack);
+        return false;
+    }
+    uint8_t head[LUNA_ELF_HEADER_BYTES];
+    size_t bytes = file->size < sizeof(head) ? file->size : sizeof(head);
+    LunaElfImage *image = heap_allocate(sizeof(*image));
+    if (!image) {
+        heap_release(new_stack);
+        return false;
+    }
+    if (!fs_read_bytes(file, 0, head, bytes) ||
+        !luna_elf32_inspect(head, bytes, file->size, image)) {
+        heap_release(image);
+        heap_release(new_stack);
+        return false;
+    }
+    PmmAllocation fresh[LUNA_ELF_MAX_SEGMENTS] = {{0}};
+    uint32_t physical_bytes = 0;
+    bool loaded = true;
+    for (unsigned i = 0; i < image->segments; i++) {
+        const LunaElfSegment *s = &image->load[i];
+        uint32_t n = s->page_count * LUNA_ELF_PAGE_BYTES;
+        if (memory_allocate(n, LUNA_ELF_PAGE_BYTES, UINT32_MAX, 0u,
+                            true, true, &fresh[i])) {
+            loaded = false;
+            break;
+        }
+        physical_bytes += n;
+        if (s->file_bytes &&
+            !fs_read_bytes(file, s->file_offset,
+                           (uint8_t *)(uintptr_t)fresh[i].address +
+                           (s->address % LUNA_ELF_PAGE_BYTES), s->file_bytes)) {
+            loaded = false;
+            break;
+        }
+    }
+    if (!loaded) {
+        for (unsigned i = 0; i < LUNA_ELF_MAX_SEGMENTS; i++)
+            if (fresh[i].cookie && memory_release(&fresh[i]))
+                kernel_fault();
+        heap_release(image);
+        heap_release(new_stack);
+        return false;
+    }
+    /* Commit point. The current trap frame stays on a supervisor stack.
+     * Interrupts are disabled while the active CR3 mappings change. */
+    uint32_t irq = drv_irq_save();
+    unsigned slot = (unsigned)(t - tasks);
+    PmmAllocation previous[LUNA_ELF_MAX_SEGMENTS];
+    unsigned old_count = t->exec_segments;
+    memcpy(previous, t->exec_allocation, sizeof(previous));
+    memset(user_tables[slot], 0, sizeof(user_tables[slot]));
+    memset(user_large_tables[slot], 0, sizeof(user_large_tables[slot]));
+    for (unsigned i = 0; i < USER_STACK_BYTES / 4096u; i++)
+        user_stack_tables[slot][16 + i] =
+            ((uint32_t)user_stacks[slot] + i * 4096u) | 7u;
+    memcpy(user_stacks[slot], new_stack, USER_STACK_BYTES);
+    memset(t->exec_allocation, 0, sizeof(t->exec_allocation));
+    for (unsigned i = 0; i < image->segments; i++) {
+        const LunaElfSegment *s = &image->load[i];
+        for (uint32_t j = 0; j < s->page_count; j++) {
+            uint32_t page = s->first_page + j;
+            uint32_t *table = page < 1024u ?
+                user_tables[slot] : user_large_tables[slot];
+            table[page & 1023u] =
+                (fresh[i].address + j * LUNA_ELF_PAGE_BYTES) |
+                ((s->flags & LUNA_ELF_WRITE) ? 7u : 5u);
+        }
+        t->exec_allocation[i] = fresh[i];
+    }
+    t->exec_segments = image->segments;
+    t->exec_physical_bytes = physical_bytes;
+    memcpy(t->exec_permissions, image->permissions, sizeof(t->exec_permissions));
+    /* The return from int 0x80 enters _start of the replacement program,
+     * never the old instruction after execve. */
+    frame->eip = image->entry;
+    frame->useresp = new_esp;
+    frame->eax = frame->ebx = frame->ecx = frame->edx = 0;
+    frame->esi = frame->edi = frame->ebp = 0;
+    frame->eflags = 0x202u;
+    __asm__ volatile("mov %0,%%cr3" :: "r"(t->directory) : "memory");
+    for (unsigned i = 0; i < old_count; i++)
+        if (previous[i].cookie && memory_release(&previous[i]))
+            kernel_fault();
+    drv_irq_restore(irq);
+    heap_release(image);
+    heap_release(new_stack);
+    return true;
 }
 bool task_wait_elf(uint32_t pid, uint32_t timeout_ms, unsigned *exit_code) {
     uint32_t parent = task_current()->pid, started = frame_clock;
@@ -953,6 +1066,23 @@ static TrapFrame *syscall(TrapFrame *f) {
         }
         uint32_t pid = task_spawn_elf_args(path, argc, arg_vector, envc, env_vector);
         f->eax = pid ? pid : (uint32_t)-1;
+        break;
+    }
+    case SYS_EXEC_EXECVE: {
+        char raw[PATH_CAP], path[PATH_CAP];
+        if (!exec_string(t, f->ebx, raw, sizeof(raw)) ||
+            !exec_path(t, raw, path)) {
+            f->eax = (uint32_t)-1; break;
+        }
+        char arg_storage[24][256], env_storage[16][256];
+        const char *arg_vector[24], *env_vector[16];
+        int argc = 0, envc = 0;
+        if (!exec_guest_vector(t, f->ecx, arg_storage, arg_vector, 24, &argc) ||
+            !argc ||
+            !exec_guest_vector(t, f->edx, env_storage, env_vector, 16, &envc) ||
+            !task_execve_elf(t, f, path, argc, arg_vector, envc, env_vector))
+            f->eax = (uint32_t)-1;
+        /* On success the new program starts when this trap returns. */
         break;
     }
     case SYS_EXEC_WAITPID: {
