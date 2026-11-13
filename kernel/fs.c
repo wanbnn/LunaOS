@@ -3,6 +3,13 @@
 #include "notices.h"
 #include "heap.h"
 #include "fs_volume.h"
+/* In the real kernel use the synchronized UTC clock. Host tests that
+ * compile fs.c alone do not link clock.c and correctly fall back to zero. */
+extern uint64_t clock_utc_ms(void) __attribute__((weak));
+static uint32_t fs_epoch(void) {
+    uint64_t sec = clock_utc_ms ? clock_utc_ms() / 1000u : 0u;
+    return sec > UINT32_MAX ? UINT32_MAX : (uint32_t)sec;
+}
 File *files;
 int fs_file_capacity;
 char cwd[PATH_CAP] = "/home/luna";
@@ -161,6 +168,11 @@ typedef struct {
     uint32_t index;
     char path[PATH_CAP];
     uint32_t size, dir;
+} RecordV2;
+typedef struct {
+    uint32_t index;
+    char path[PATH_CAP];
+    uint32_t size, dir, mode, mtime, ctime;
 } Record;
 typedef struct {
     char path[PATH_CAP];
@@ -168,7 +180,8 @@ typedef struct {
     char data[8192];
 } LegacyFile;
 _Static_assert(sizeof(Snapshot)==512, "LunaFS header");
-_Static_assert(sizeof(Record)==140, "LunaFS2 entry layout");
+_Static_assert(sizeof(RecordV2)==140, "LunaFS2 legacy entry layout");
+_Static_assert(sizeof(Record)==152, "LunaFS3 metadata entry layout");
 _Static_assert(sizeof(LegacyFile)==FS_V1_FILE_BYTES, "LunaFS1 legacy entry layout");
 
 static void unpin_backup(FileState *state) {
@@ -367,6 +380,8 @@ int fs_create(const char *path, bool dir) {
             strcpy(files[i].path, p);
             files[i].used = 1;
             files[i].dir = dir;
+            files[i].mode = dir ? 0040755u : 0100644u;
+            files[i].mtime = files[i].ctime = fs_epoch();
             files[i].data = buffer;
             if (buffer)
                 buffer[0] = 0;
@@ -430,6 +445,7 @@ int fs_write_bytes(const char *path, const void *data, size_t n, bool add) {
     if(f->data)heap_release(f->data);
     f->data=new_data;
     f->size=(uint32_t)wanted;
+    f->mtime=f->ctime=fs_epoch();
     fs_dirty=true;
     return 0;
 }
@@ -558,12 +574,15 @@ static bool read_slot(unsigned device,const FsVolume *volume,unsigned slot,uint3
     if (!disk_read_on(device, base, &header))
         return false;
     bool legacy = !memcmp(header.magic, "LUNAFS1", 7) && header.version == 1;
-    bool modern = !memcmp(header.magic, "LUNAFS2", 7) && header.version == 2;
+    bool modern = !memcmp(header.magic, "LUNAFS2", 7) &&
+        (header.version == 2 || header.version == 3);
     if (!legacy && !modern)
         return false;
     if (!header.bytes || header.bytes > limit ||
         (legacy && header.bytes != LEGACY_FILES * sizeof(LegacyFile)) ||
-        (modern && (!header.entries || header.entries > header.bytes / sizeof(Record))))
+        (modern && (!header.entries ||
+         header.entries > header.bytes / (header.version == 2 ?
+             sizeof(RecordV2) : sizeof(Record)))))
         return false;
     if (!reserve_state(&staging, legacy ? LEGACY_FILES : header.entries))
         return false;
@@ -584,6 +603,7 @@ static bool read_slot(unsigned device,const FsVolume *volume,unsigned slot,uint3
             f->used = 1;
             f->dir = record.dir;
             f->size = record.size;
+            f->mode = record.dir ? 0040755u : 0100644u;
             if (!f->dir) {
                 f->data = allocate_data(f->size);
                 if (!f->data)
@@ -594,9 +614,22 @@ static bool read_slot(unsigned device,const FsVolume *volume,unsigned slot,uint3
     } else {
         unsigned indices = header.entries < LEGACY_FILES ? LEGACY_FILES : header.entries;
         for (unsigned i = 0; i < header.entries; i++) {
-            Record record;
-            if (!take(&stream, &record, sizeof(record)) || record.index >= indices ||
-                record.dir > 1 || record.size > limit || (record.dir && record.size))
+            Record record = {0};
+            if (header.version == 2) {
+                RecordV2 previous;
+                if (!take(&stream, &previous, sizeof(previous)))
+                    goto bad;
+                record.index = previous.index;
+                memcpy(record.path, previous.path, PATH_CAP);
+                record.size = previous.size;
+                record.dir = previous.dir;
+                record.mode = record.dir ? 0040755u : 0100644u;
+            } else if (!take(&stream, &record, sizeof(record)))
+                goto bad;
+            if (record.index >= indices || record.dir > 1 || record.size > limit ||
+                (record.dir && record.size) ||
+                (header.version == 3 && record.mode &&
+                 ((record.mode & 0170000u) != (record.dir ? 0040000u : 0100000u))))
                 goto bad;
             if (!reserve_state(&staging, record.index + 1u) || staging.files[record.index].used)
                 goto bad;
@@ -605,6 +638,9 @@ static bool read_slot(unsigned device,const FsVolume *volume,unsigned slot,uint3
             f->used = 1;
             f->dir = record.dir;
             f->size = record.size;
+            f->mode = record.mode ? record.mode : (record.dir ? 0040755u : 0100644u);
+            f->mtime = record.mtime;
+            f->ctime = record.ctime;
             if (!f->dir) {
                 relocate_file(f, device, ((uint64_t)base + 1u) * 512u + stream.pos);
                 if (f->size <= FILE_CACHE_BYTES) {
@@ -700,6 +736,9 @@ static bool save_snapshot(unsigned destination) {
             memcpy(record.path, files[i].path, PATH_CAP);
             record.size = files[i].dir ? 0 : files[i].size;
             record.dir = files[i].dir;
+            record.mode = files[i].mode;
+            record.mtime = files[i].mtime;
+            record.ctime = files[i].ctime;
             if (!put(&stream, &record, sizeof(record)) ||
                 (!files[i].dir && !put_file(&stream, &files[i])))
                 return false;
@@ -707,7 +746,7 @@ static bool save_snapshot(unsigned destination) {
     if (!writer_finish(&stream) || stream.pos != n || !disk_flush(destination))
         return false;
     memcpy(header.magic, "LUNAFS2", 7);
-    header.version = 2;
+    header.version = 3;
     header.generation = next;
     header.entries = entries;
     header.bytes = (uint32_t)n;
@@ -761,6 +800,8 @@ void fs_init(void) {
     files=0;fs_file_capacity=0;
     if (!reserve_files(LEGACY_FILES)) return;
     files[0].used = files[0].dir = 1;
+    files[0].mode = 0040755u;
+    files[0].ctime = files[0].mtime = fs_epoch();
     strcpy(files[0].path, "/");
     fs_create("/home", true);
     fs_create("/home/luna", true);
@@ -813,7 +854,9 @@ static bool verify_snapshot(unsigned device) {
                         match = &staging.files[j];
                         break;
                     }
-                if (!match || files[i].dir != match->dir || files[i].size != match->size)
+                if (!match || files[i].dir != match->dir || files[i].size != match->size ||
+                    files[i].mode != match->mode ||
+                    files[i].mtime != match->mtime || files[i].ctime != match->ctime)
                     same = false;
                 if (same && !files[i].dir) {
                     uint8_t left[4096], right[4096];
@@ -854,6 +897,7 @@ static struct {
     Stream stream;
     size_t record_pos, payload_pos;
     uint32_t prefix_hash, payload_hash;
+    uint32_t meta_mode, meta_mtime, meta_ctime;
     char path[PATH_CAP];
 } transaction;
 
@@ -910,6 +954,8 @@ bool fs_begin_write(const char *path, bool append_data, uint32_t owner) {
     transaction.active = true;
     transaction.owner = owner;
     transaction.target = target;
+    transaction.meta_mode = old ? old->mode : 0100644u;
+    transaction.meta_mtime = transaction.meta_ctime = fs_epoch();
     transaction.disk = disk_boot_index();
     strcpy(transaction.path, canonical);
     if (!fs_volume(transaction.disk, true, &transaction.volume))
@@ -931,6 +977,9 @@ bool fs_begin_write(const char *path, bool append_data, uint32_t owner) {
             memcpy(record.path, files[i].path, PATH_CAP);
             record.size = files[i].size;
             record.dir = files[i].dir;
+            record.mode = files[i].mode;
+            record.mtime = files[i].mtime;
+            record.ctime = files[i].ctime;
             if (!put(&transaction.stream, &record, sizeof(record)) ||
                 (!files[i].dir && !put_file(&transaction.stream, &files[i])))
                 goto fail;
@@ -938,6 +987,9 @@ bool fs_begin_write(const char *path, bool append_data, uint32_t owner) {
     Record record = {0};
     record.index = transaction.entries++;
     strcpy(record.path, canonical);
+    record.mode = transaction.meta_mode;
+    record.mtime = transaction.meta_mtime;
+    record.ctime = transaction.meta_ctime;
     transaction.record_pos = transaction.stream.pos;
     transaction.prefix_hash = transaction.stream.hash;
     transaction.payload_hash = 2166136261u;
@@ -965,6 +1017,9 @@ static bool patch_record(void) {
     record.index = transaction.entries - 1u;
     strcpy(record.path, transaction.path);
     record.size = transaction.bytes;
+    record.mode = transaction.meta_mode;
+    record.mtime = transaction.meta_mtime;
+    record.ctime = transaction.meta_ctime;
     const uint8_t *data = (const void *)&record;
     size_t remaining = sizeof(record);
     uint64_t position = ((uint64_t)transaction.base + 1u) * 512u + transaction.record_pos;
@@ -1011,6 +1066,9 @@ bool fs_finish_write(void) {
     expected.index = transaction.entries - 1u;
     strcpy(expected.path, transaction.path);
     expected.size = transaction.bytes;
+    expected.mode = transaction.meta_mode;
+    expected.mtime = transaction.meta_mtime;
+    expected.ctime = transaction.meta_ctime;
     if (!take(&reader, &actual, sizeof(actual)) || memcmp(&actual, &expected, sizeof(actual)))
         goto fail;
     uint32_t payload_hash = 2166136261u;
@@ -1026,7 +1084,7 @@ bool fs_finish_write(void) {
         goto fail;
     Snapshot header = {0};
     memcpy(header.magic, "LUNAFS2", 7);
-    header.version = 2;
+    header.version = 3;
     header.generation = transaction.next;
     header.bytes = transaction.stream.pos;
     header.hash = reader.hash;
@@ -1049,6 +1107,9 @@ bool fs_finish_write(void) {
     memset(file, 0, sizeof(*file));
     file->used = 1;
     file->size = transaction.bytes;
+    file->mode = transaction.meta_mode;
+    file->mtime = transaction.meta_mtime;
+    file->ctime = transaction.meta_ctime;
     strcpy(file->path, transaction.path);
     relocate_file(file, transaction.disk,
                   ((uint64_t)transaction.base + 1u) * 512u + transaction.payload_pos);
@@ -1117,6 +1178,30 @@ int fs_rename(const char *source, const char *destination) {
         memset(target, 0, sizeof(*target));
     }
     strcpy(file->path, path);
+    file->ctime = fs_epoch();
+    fs_dirty = true;
+    return 0;
+}
+
+/* Persisted POSIX-like metadata. chmod does not yet enforce access control.
+ * Modifications commit together with file bytes in LunaFS snapshot v3. */
+int fs_chmod(const char *path, uint32_t mode) {
+    if (fs_locked || disk_readers || (mode & ~0777u))
+        return -1;
+    File *f = fs_find(path);
+    if (!f) return -1;
+    f->mode = (f->dir ? 0040000u : 0100000u) | mode;
+    f->ctime = fs_epoch();
+    fs_dirty = true;
+    return 0;
+}
+int fs_set_mtime(const char *path, uint32_t unix_seconds) {
+    if (fs_locked || disk_readers)
+        return -1;
+    File *f = fs_find(path);
+    if (!f) return -1;
+    f->mtime = unix_seconds;
+    f->ctime = fs_epoch();
     fs_dirty = true;
     return 0;
 }

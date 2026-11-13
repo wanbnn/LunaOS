@@ -27,3 +27,19 @@ at `c0edecef62bcac6ce3f783540099190bafadadda` (upstream 7.0.0). See
 `uacpi/LUNA-PIN.txt` and `uacpi/LICENSE`. Upstream test fixtures are omitted.
 The kernel uses the reduced-hardware build for boot-time ACPI storage discovery,
 without SCI/GPE takeover. The license is also included in `/etc/licenses/uACPI.txt`.
+
+## zlib — upstream DEFLATE library (Git dependency)
+
+`zlib/` is a pinned upstream Git submodule
+(`madler/zlib` release v1.4, commit
+`99623ef7097352da7993ba614161fd6a311e046e`, published
+2026-11-05). `make luna-zlib-guest` builds core deflate/inflate
+into `build/libz-luna.a` with freestanding i386 compilation.
+The upstream zlib license remains at `third_party/zlib/LICENSE`
+and is distributed as `/etc/licenses/zlib.txt` in images with
+the submodule checked out. The bundled freestanding test allocator
+in `sdk/guest/memory.c` is **test-only**, not a Git/libc heap.
+
+This does not implement Git's remaining requirements: portable
+filesystem metadata, BSD sockets, HTTPS Git smart protocol, SSH,
+POSIX processes, CLI command helpers, credential management.

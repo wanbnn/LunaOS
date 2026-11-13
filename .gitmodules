@@ -5,3 +5,11 @@
 [submodule "third_party/litehtml"]
 	path = third_party/litehtml
 	url = https://github.com/litehtml/litehtml.git
+
+[submodule "third_party/git"]
+	path = third_party/git
+	url = https://github.com/git/git.git
+
+[submodule "third_party/zlib"]
+	path = third_party/zlib
+	url = https://github.com/madler/zlib.git

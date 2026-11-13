@@ -1,0 +1,85 @@
+name: LunaOS ELF32 ring-3 executor and POSIX foundation checks
+on:
+  pull_request:
+    paths:
+      - 'kernel/elf32.*'
+      - 'kernel/task.*'
+      - 'kernel/fs.c'
+      - 'kernel/luna.h'
+      - 'apps/shell.c'
+      - 'tests/elf32.c'
+      - 'tests/elf32_guest.py'
+      - 'sdk/guest/**'
+      - 'third_party/zlib'
+      - 'tools/notices.py'
+      - 'Makefile'
+      - '.github/workflows/elf32-exec.yml'
+  push:
+    branches: [feat/full-upstream-git-port]
+    paths:
+      - 'kernel/elf32.*'
+      - 'kernel/task.*'
+      - 'kernel/fs.c'
+      - 'kernel/luna.h'
+      - 'apps/shell.c'
+      - 'tests/elf32.c'
+      - 'tests/elf32_guest.py'
+      - 'sdk/guest/**'
+      - 'third_party/zlib'
+      - 'tools/notices.py'
+      - 'Makefile'
+      - '.github/workflows/elf32-exec.yml'
+concurrency:
+  group: luna-elf32-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  elf32-host:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate malformed binaries and bounds with sanitizers
+        run: make test-elf32
+      - name: Compile freestanding i386 loader
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gcc-multilib libc6-dev-i386
+          mkdir -p build/ci
+          gcc -m32 -std=gnu11 -O2 -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Ikernel -c kernel/elf32.c -o build/ci/elf32.o
+  iso-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install build toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gcc-multilib g++-multilib libc6-dev-i386 clang lld cmake zlib1g-dev libcairo2 python3-pip qemu-system-x86
+          mkdir -p .tools/python build dist
+          python3 -m pip install --target .tools/python -r requirements-dev.txt
+      - name: Build actual LunaOS ISO with loader and shell changes
+        run: make -j2 all
+      - name: Cross-build native C guest using LunaOS syscall shim
+        run: make luna-guest-hello
+      - name: Build official zlib 1.4 as freestanding LunaOS guest
+        run: |
+          test -f third_party/zlib/LICENSE
+          test -f third_party/zlib/zlib.h
+          make luna-guest-zlib-smoke
+          make luna-guest-spawn-smoke
+          make luna-guest-execve-smoke
+          make luna-guest-tcp-smoke
+          make luna-guest-metadata-check
+          make luna-guest-runtime-smoke
+      - name: Verify boot images exist
+        run: |
+          test -s dist/LunaOS.iso
+          test -s dist/LunaOS.img
+      - name: Check QEMU smoke script syntax
+        run: python3 -m py_compile tests/elf32_guest.py
+      - name: Execute ELF32 in QEMU ring 3 with open/read/write
+        run: python3 tests/elf32_guest.py

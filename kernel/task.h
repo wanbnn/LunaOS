@@ -1,6 +1,8 @@
 #ifndef LUNA_TASK_H
 #define LUNA_TASK_H
 #include "perf.h"
+#include "elf32.h"
+#include "pmm.h"
 #define TASK_MAX 20
 #define TASK_EVENTS 64
 #define APP_COUNT 7
@@ -26,12 +28,37 @@
 #define USER_CODE 0x40000000u
 #define USER_STACK 0x40010000u
 #define USER_STACK_BYTES 16384u
+#define USER_ELF_STACK (USER_CODE + LUNA_ELF_STACK_OFFSET)
 #define SYS_HELLO 0
 #define SYS_WAIT_EVENT 1
 #define SYS_APP_EVENT 2
 #define SYS_EXIT 3
 #define SYS_SYSTEM 4
 #define SYS_PROBE_FAIL 5
+#define SYS_EXEC_WRITE 6 /* ELF32 ring-3 stdout only, not POSIX write(2). */
+#define SYS_EXEC_OPEN 7  /* Read-only, LunaOS-specific ABI. */
+#define SYS_EXEC_READ 8
+#define SYS_EXEC_CLOSE 9
+#define SYS_EXEC_LSEEK 10
+#define SYS_EXEC_STAT 11
+#define SYS_EXEC_CHDIR 12
+#define SYS_EXEC_GETCWD 13
+#define SYS_EXEC_MKDIR 14
+#define SYS_EXEC_UNLINK 15
+#define SYS_EXEC_RENAME 16
+#define SYS_EXEC_GETPID 17
+#define SYS_EXEC_PIPE 18 /* Bounded pipe: immediate EAGAIN-like failure when empty/full. */
+#define SYS_EXEC_FSYNC 19 /* Commits LunaFS2 snapshot for durable writes. */
+#define SYS_EXEC_SPAWN 20 /* Native child process, argv/envp pointers. */
+#define SYS_EXEC_WAITPID 21 /* Child exit status, not full waitpid(2) yet. */
+#define SYS_EXEC_EXECVE 22 /* Replace current process image, preserve PID and open FDs. */
+#define SYS_EXEC_CHMOD 23 /* Persist 0777 permission bits, no enforcement yet. */
+#define SYS_EXEC_UTIME 24 /* Persist file mtime (epoch seconds). */
+#define SYS_EXEC_TCP_CONNECT 25 /* Exclusive outbound IPv4 TCP/TLS socket. */
+#define SYS_EXEC_OPENDIR 26 /* Descriptor-backed directory iterator. */
+#define SYS_EXEC_READDIR 27 /* One LunaGuestDirent record per call. */
+#define SYS_EXEC_BRK 28 /* Bounded process heap, Linux-like program-break result. */
+#define EXEC_FD_MAX 8
 /* Saved by the common interrupt entry; useresp/ss exist only on privilege transitions. */
 typedef struct {
     uint32_t gs, fs, es, ds, edi, esi, ebp, esp_dummy, ebx, edx, ecx, eax;
@@ -64,7 +91,14 @@ typedef struct {
     AppEvent events[TASK_EVENTS];
     uint32_t read_event, write_event;
     AppEvent delivered;
-    bool event_pending, system;
+    bool event_pending, system, exec_image;
+    uint8_t exec_permissions[LUNA_ELF_PAGES];
+    PmmAllocation exec_allocation[LUNA_ELF_MAX_SEGMENTS];
+    uint32_t exec_segments, exec_physical_bytes;
+    uint32_t exec_heap_base, exec_heap_break, exec_heap_pages;
+    uint32_t parent_pid;
+    char exec_cwd[128];
+    struct { char path[128]; uint32_t offset, flags; uint8_t kind, pipe_id; bool open; } exec_fds[EXEC_FD_MAX];
     void (*service)(void);
     PerfArea perf_area;
     unsigned storage_depth;
@@ -81,6 +115,10 @@ extern Task tasks[TASK_MAX];
 extern int current_task;
 void task_init(void);
 uint32_t task_spawn(int, const char *, unsigned, unsigned);
+uint32_t task_spawn_elf(const char *path);
+bool task_wait_elf(uint32_t pid, uint32_t timeout_ms, unsigned *exit_code);
+uint32_t task_spawn_elf_args(const char *path, int argc, const char *const argv[],
+                             int envc, const char *const envp[]);
 uint32_t task_spawn_service(const char *, void (*service)(void));
 Task *task_by_pid(uint32_t);
 Task *task_for_app(int);

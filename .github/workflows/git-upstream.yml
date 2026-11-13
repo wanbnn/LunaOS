@@ -1,0 +1,50 @@
+name: Upstream Git 2.56.1 host portability baseline
+on:
+  pull_request:
+    paths:
+      - '.gitmodules'
+      - 'third_party/git'
+      - 'tools/git-port/**'
+      - 'tests/git_upstream_host.py'
+      - '.github/workflows/git-upstream.yml'
+  push:
+    branches: [feat/full-upstream-git-port]
+    paths:
+      - '.gitmodules'
+      - 'third_party/git'
+      - 'tools/git-port/**'
+      - 'tests/git_upstream_host.py'
+      - '.github/workflows/git-upstream.yml'
+permissions:
+  contents: read
+jobs:
+  official-git-host:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Install upstream Git build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y build-essential zlib1g-dev libcurl4-openssl-dev libssl-dev libexpat1-dev
+      - name: Verify pinned upstream Git commit
+        run: |
+          test "$(git -C third_party/git rev-parse HEAD)" = "03b41523c576f26ad34085378717a0c1b287470f"
+          # actions/checkout fetches a detached submodule SHA without its tag.
+          # Fetch the exact annotated tag so upstream Git's version generator
+          # outputs the real release version, rather than a -GIT fallback.
+          git -C third_party/git fetch --depth=1 origin tag v2.56.1
+          git -C third_party/git describe --tags --exact-match HEAD | grep -Fx v2.56.1
+      - name: Build official Git (host comparison only)
+        run: |
+          make -C third_party/git -j2 NO_GETTEXT=YesPlease NO_TCLTK=YesPlease NO_PERL=YesPlease NO_PYTHON=YesPlease all
+      - name: Verify official Git CLI and local push/pull fixture
+        run: |
+          python3 tests/git_upstream_host.py --git third_party/git/git
+      - name: Declare guest limitation explicitly
+        run: |
+          echo 'Host baseline passes do not establish Git is available in the LunaOS guest.'
+          echo 'Requires executable loader, POSIX ABI/VFS, zlib, HTTPS/SSH, and end-to-end guest tests.'

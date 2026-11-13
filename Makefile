@@ -60,7 +60,7 @@ build/font.h: tools/fontgen.py assets/fonts/InterTight.ttf assets/fonts/NotoSans
 	$(PYTHON) tools/fontgen.py
 build/notices.h: tools/notices.py assets/fonts/OFL.txt assets/fonts/NotoSans-OFL.txt \
              assets/fonts/Montserrat-OFL.txt assets/fonts/NotoSansSymbols2-OFL.txt \
-             assets/icons/lucide/LICENSE $(wildcard assets/licenses/*) third_party/quickjs/LICENSE third_party/micropython/LICENSE third_party/wasm3/LICENSE third_party/musl/COPYRIGHT third_party/bearssl/LICENSE.txt third_party/stb/LICENSE third_party/uacpi/LICENSE $(wildcard third_party/lexbor/LICENSE third_party/litehtml/LICENSE third_party/litehtml/src/gumbo/LICENSE)
+             assets/icons/lucide/LICENSE $(wildcard assets/licenses/*) third_party/quickjs/LICENSE third_party/micropython/LICENSE third_party/wasm3/LICENSE third_party/musl/COPYRIGHT third_party/bearssl/LICENSE.txt third_party/stb/LICENSE third_party/uacpi/LICENSE $(wildcard third_party/lexbor/LICENSE third_party/zlib/LICENSE third_party/litehtml/LICENSE third_party/litehtml/src/gumbo/LICENSE)
 	$(PYTHON) tools/notices.py
 build/uacpi/%.o: third_party/uacpi/source/%.c $(shell find third_party/uacpi/include -name '*.h')
 	@mkdir -p $(dir $@)
@@ -486,3 +486,85 @@ test-fs-streaming:
 	@mkdir -p build
 	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -Itests/fs_mock -Ikernel kernel/fs.c kernel/fs_volume.c net/http_stream.c tests/fs_streaming.c -o build/fs-streaming-test
 	./build/fs-streaming-test
+
+# Pinned upstream Git host baseline; never linked into the LunaOS guest ISO.
+# Requires git submodule update --init --recursive third_party/git.
+.PHONY: git-upstream-host-build git-upstream-host-test
+git-upstream-host-build:
+	@test -f third_party/git/Makefile || (echo "Missing upstream Git source. Run git submodule update --init --recursive third_party/git" && exit 1)
+	+$(MAKE) -C third_party/git -j2 NO_GETTEXT=YesPlease NO_TCLTK=YesPlease NO_PERL=YesPlease NO_PYTHON=YesPlease all
+
+git-upstream-host-test: git-upstream-host-build
+	$(PYTHON) tests/git_upstream_host.py --git third_party/git/git
+
+# ELF32 validation test; host-only parser and guest freestanding i386 object.
+.PHONY: test-elf32
+test-elf32:
+	@mkdir -p build
+	$(CC) -std=gnu11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -Ikernel kernel/elf32.c tests/elf32.c -o build/elf32-test
+	./build/elf32-test
+
+# Cross-build a real freestanding C program for the restricted LunaOS i386 ABI.
+# This target builds on Linux and runs only inside the LunaOS guest via elfrun.
+.PHONY: luna-guest-hello
+luna-guest-hello: build/guest/hello.elf
+build/guest/hello.elf: sdk/guest/hello.c sdk/guest/posix.c sdk/guest/posix.h sdk/guest/crt0.S sdk/guest/luna32.ld
+	@mkdir -p build/guest
+	$(CC) -m32 -Os -std=gnu11 -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -fno-asynchronous-unwind-tables -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Isdk/guest -c sdk/guest/hello.c -o build/guest/hello.o
+	$(CC) -m32 -Os -std=gnu11 -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -fno-asynchronous-unwind-tables -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Isdk/guest -c sdk/guest/posix.c -o build/guest/posix.o
+	$(CC) -m32 -c sdk/guest/crt0.S -o build/guest/crt0.o
+	$(LD) -m elf_i386 -T sdk/guest/luna32.ld --build-id=none -o $@ build/guest/crt0.o build/guest/hello.o build/guest/posix.o
+	@file $@
+	@readelf -l $@ | grep -q LOAD
+
+# Upstream zlib 1.4 core built as a separate freestanding i386 archive.
+# This is an early guest dependency for Git objects/packfiles; it does not
+# make the Git CLI usable until the POSIX process/VFS ABI is complete.
+ZLIB_LUNA_SRC := adler32 crc32 deflate infback inffast inflate inftrees trees zutil compress uncompr
+ZLIB_LUNA_OBJ := $(addprefix build/zlib-guest/,$(addsuffix .o,$(ZLIB_LUNA_SRC)))
+build/zlib-guest/%.o: third_party/zlib/%.c
+	@mkdir -p build/zlib-guest
+	$(CC) -m32 -std=gnu11 -O2 -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -msoft-float -Ithird_party/zlib -c $< -o $@
+build/libz-luna.a: $(ZLIB_LUNA_OBJ)
+	ar rcs $@ $^
+.PHONY: luna-zlib-guest luna-guest-zlib-smoke
+luna-zlib-guest: build/libz-luna.a
+luna-guest-zlib-smoke: build/guest/zlib-smoke.elf
+build/guest/zlib-smoke.elf: sdk/guest/zlib_smoke.c sdk/guest/memory.c sdk/guest/posix.h sdk/guest/luna32.ld build/guest/hello.elf build/libz-luna.a
+	@mkdir -p build/guest
+	$(CC) -m32 -std=gnu11 -Os -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Isdk/guest -Ithird_party/zlib -c sdk/guest/zlib_smoke.c -o build/guest/zlib_smoke.o
+	$(CC) -m32 -std=gnu11 -Os -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Isdk/guest -c sdk/guest/memory.c -o build/guest/memory.o
+	$(LD) -m elf_i386 -T sdk/guest/luna32.ld --build-id=none -o $@ build/guest/crt0.o build/guest/zlib_smoke.o build/guest/posix.o build/guest/memory.o build/libz-luna.a
+	@file $@
+
+.PHONY: luna-guest-spawn-smoke
+luna-guest-spawn-smoke: build/guest/spawn-smoke.elf
+build/guest/spawn-smoke.elf: sdk/guest/spawn_smoke.c sdk/guest/posix.h sdk/guest/luna32.ld build/guest/hello.elf
+	@mkdir -p build/guest
+	$(CC) -m32 -Os -std=gnu11 -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Isdk/guest -c sdk/guest/spawn_smoke.c -o build/guest/spawn_smoke.o
+	$(LD) -m elf_i386 -T sdk/guest/luna32.ld --build-id=none -o $@ build/guest/crt0.o build/guest/spawn_smoke.o build/guest/posix.o
+.PHONY: luna-guest-execve-smoke
+luna-guest-execve-smoke: build/guest/execve-smoke.elf
+build/guest/execve-smoke.elf: sdk/guest/execve_smoke.c sdk/guest/posix.h sdk/guest/luna32.ld build/guest/hello.elf
+	@mkdir -p build/guest
+	$(CC) -m32 -Os -std=gnu11 -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Isdk/guest -c sdk/guest/execve_smoke.c -o build/guest/execve_smoke.o
+	$(LD) -m elf_i386 -T sdk/guest/luna32.ld --build-id=none -o $@ build/guest/crt0.o build/guest/execve_smoke.o build/guest/posix.o
+.PHONY: luna-guest-tcp-smoke luna-guest-metadata-check
+luna-guest-tcp-smoke: build/guest/tcp-smoke.elf
+luna-guest-metadata-check: build/guest/metadata-check.elf
+build/guest/tcp-smoke.elf: sdk/guest/tcp_smoke.c sdk/guest/posix.h sdk/guest/luna32.ld build/guest/hello.elf
+	@mkdir -p build/guest
+	$(CC) -m32 -Os -std=gnu11 -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Isdk/guest -c sdk/guest/tcp_smoke.c -o build/guest/tcp_smoke.o
+	$(LD) -m elf_i386 -T sdk/guest/luna32.ld --build-id=none -o $@ build/guest/crt0.o build/guest/tcp_smoke.o build/guest/posix.o
+build/guest/metadata-check.elf: sdk/guest/metadata_check.c sdk/guest/posix.h sdk/guest/luna32.ld build/guest/hello.elf
+	@mkdir -p build/guest
+	$(CC) -m32 -Os -std=gnu11 -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Isdk/guest -c sdk/guest/metadata_check.c -o build/guest/metadata_check.o
+	$(LD) -m elf_i386 -T sdk/guest/luna32.ld --build-id=none -o $@ build/guest/crt0.o build/guest/metadata_check.o build/guest/posix.o
+
+.PHONY: luna-guest-runtime-smoke
+luna-guest-runtime-smoke: build/guest/runtime-smoke.elf
+build/guest/runtime-smoke.elf: sdk/guest/runtime_smoke.c sdk/guest/memory.c sdk/guest/posix.h sdk/guest/luna32.ld build/guest/hello.elf
+	@mkdir -p build/guest
+	$(CC) -m32 -Os -std=gnu11 -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Isdk/guest -c sdk/guest/runtime_smoke.c -o build/guest/runtime_smoke.o
+	$(LD) -m elf_i386 -T sdk/guest/luna32.ld --build-id=none -o $@ build/guest/crt0.o build/guest/runtime_smoke.o build/guest/posix.o build/guest/memory.o
+	@file $@
