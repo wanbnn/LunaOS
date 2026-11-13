@@ -6,6 +6,7 @@ on:
       - 'kernel/task.*'
       - 'apps/shell.c'
       - 'tests/elf32.c'
+      - 'tests/elf32_guest.py'
       - 'Makefile'
       - '.github/workflows/elf32-exec.yml'
   push:
@@ -43,7 +44,7 @@ jobs:
       - name: Install build toolchain
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y gcc-multilib g++-multilib libc6-dev-i386 clang lld cmake zlib1g-dev libcairo2 python3-pip
+          sudo apt-get install -y gcc-multilib g++-multilib libc6-dev-i386 clang lld cmake zlib1g-dev libcairo2 python3-pip qemu-system-x86
           mkdir -p .tools/python build dist
           python3 -m pip install --target .tools/python -r requirements-dev.txt
       - name: Build actual LunaOS ISO with loader and shell changes
@@ -52,3 +53,5 @@ jobs:
         run: |
           test -s dist/LunaOS.iso
           test -s dist/LunaOS.img
+      - name: Execute ELF32 in QEMU ring 3 with open/read/write
+        run: python3 tests/elf32_guest.py
