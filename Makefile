@@ -543,3 +543,9 @@ build/guest/spawn-smoke.elf: sdk/guest/spawn_smoke.c sdk/guest/posix.h sdk/guest
 	@mkdir -p build/guest
 	$(CC) -m32 -Os -std=gnu11 -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Isdk/guest -c sdk/guest/spawn_smoke.c -o build/guest/spawn_smoke.o
 	$(LD) -m elf_i386 -T sdk/guest/luna32.ld --build-id=none -o $@ build/guest/crt0.o build/guest/spawn_smoke.o build/guest/posix.o
+.PHONY: luna-guest-execve-smoke
+luna-guest-execve-smoke: build/guest/execve-smoke.elf
+build/guest/execve-smoke.elf: sdk/guest/execve_smoke.c sdk/guest/posix.h sdk/guest/luna32.ld build/guest/hello.elf
+	@mkdir -p build/guest
+	$(CC) -m32 -Os -std=gnu11 -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Isdk/guest -c sdk/guest/execve_smoke.c -o build/guest/execve_smoke.o
+	$(LD) -m elf_i386 -T sdk/guest/luna32.ld --build-id=none -o $@ build/guest/crt0.o build/guest/execve_smoke.o build/guest/posix.o
