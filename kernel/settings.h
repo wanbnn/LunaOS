@@ -21,7 +21,7 @@ void settings_key(int);
 void settings_click(int, int, int, int);
 void quick_pointer(int, int, bool, bool);
 void settings_drag(int, int, int, int);
-void quick_draw(void);
+void quick_draw(int y_offset);
 bool quick_click(int, int);
 void quick_key(int);
 void input_apply_settings(void);
