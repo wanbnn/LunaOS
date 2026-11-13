@@ -38,6 +38,14 @@
 #define SYS_EXEC_OPEN 7  /* Read-only, LunaOS-specific ABI. */
 #define SYS_EXEC_READ 8
 #define SYS_EXEC_CLOSE 9
+#define SYS_EXEC_LSEEK 10
+#define SYS_EXEC_STAT 11
+#define SYS_EXEC_CHDIR 12
+#define SYS_EXEC_GETCWD 13
+#define SYS_EXEC_MKDIR 14
+#define SYS_EXEC_UNLINK 15
+#define SYS_EXEC_RENAME 16
+#define SYS_EXEC_GETPID 17
 #define EXEC_FD_MAX 8
 /* Saved by the common interrupt entry; useresp/ss exist only on privilege transitions. */
 typedef struct {
@@ -76,7 +84,7 @@ typedef struct {
     PmmAllocation exec_allocation;
     uint32_t parent_pid;
     char exec_cwd[128];
-    struct { char path[128]; uint32_t offset; bool open; } exec_fds[EXEC_FD_MAX];
+    struct { char path[128]; uint32_t offset, flags; bool open; } exec_fds[EXEC_FD_MAX];
     void (*service)(void);
     PerfArea perf_area;
     unsigned storage_depth;
