@@ -254,6 +254,7 @@ int main(void) {
     assert(tcp.goal < TCP_UNSCALED_MAX);
     /* Only shrink physical storage once previously advertised credit is gone. */
     tcp.right_edge = tcp.ack;
+    frame_clock += 4000u;
     tcp_tune_receive();
     assert(tcp.capacity < TCP_UNSCALED_MAX);
     /* RFC 6298 estimation, Karn exclusion and capped exponential backoff. */
