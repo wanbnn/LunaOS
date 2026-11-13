@@ -60,6 +60,12 @@ int luna_tcp_connect(const char *host, unsigned port, int verified_tls) {
     return (int)call3(25, (unsigned)(uintptr_t)host, port,
                       (unsigned)(verified_tls != 0));
 }
+int luna_opendir(const char *path) {
+    return (int)call3(26, (unsigned)(uintptr_t)path, 0, 0);
+}
+int luna_readdir(int fd, LunaGuestDirent *entry) {
+    return (int)call3(27, (unsigned)fd, (unsigned)(uintptr_t)entry, 0);
+}
 __attribute__((noreturn)) void _exit(int code) {
     (void)call3(3, (unsigned)code, 0, 0);
     for (;;) { __asm__ volatile("pause"); }
