@@ -25,6 +25,9 @@ on:
       - 'tools/notices.py'
       - 'Makefile'
       - '.github/workflows/elf32-exec.yml'
+concurrency:
+  group: luna-elf32-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
@@ -63,6 +66,7 @@ jobs:
           test -f third_party/zlib/LICENSE
           test -f third_party/zlib/zlib.h
           make luna-guest-zlib-smoke
+          make luna-guest-spawn-smoke
       - name: Verify boot images exist
         run: |
           test -s dist/LunaOS.iso
