@@ -1,4 +1,5 @@
 #include "python.h"
+#include "git.h"
 #include "clock.h"
 #include "wifi_profiles.h"
 #include "../drivers/rtw8822be_diag.h"
@@ -27,7 +28,7 @@ static const char *commands[] = {
     "uname",  "free",  "uptime",  "date",     "pci",     "net",     "ifconfig", "dns", "ping",  "wget",
     "browse", "audio", "beep",    "sync",     "history", "source",  "set",      "env",   "true",
     "false",  "sleep", "reboot",  "poweroff", "about",   "ps",      "tasks",    "kill",  "ringtest",
-    "js",     "python", "python3", "python3.13", "micropython", "pip", "venv",  "deactivate", "dev",   "bench", "perf", "drvinfo", "whoami",   "setup",   "drvtest", "fwinfo",   "wifidiag", "wifi", "memtest", 0};
+    "js",     "python", "python3", "python3.13", "micropython", "pip", "venv",  "deactivate", "dev",   "bench", "perf", "drvinfo", "whoami",   "setup",   "drvtest", "fwinfo",   "wifidiag", "wifi", "memtest", "git", 0};
 #define CAP 8192
 static void emit(char *out, const char *s) {
     append(out, s, CAP);
@@ -317,6 +318,8 @@ static int execute(int argc, char **a, const char *input, char *out) {
         }
         emit(out, "\nSyntax: quotes, variables, |, >, >>, <, ;, &&, ||\nSuper: app search | "
                   "Alt+Tab: switch | Alt+F4: close | Tab: complete\n");
+    } else if (!strcmp(c, "git")) {
+        return luna_git_command(argc, a, out, CAP);
     } else if (!strcmp(c, "echo")) {
         for (int i = 1; i < argc; i++) {
             if (i > 1)
