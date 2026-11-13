@@ -32,6 +32,7 @@
 #define SYS_EXIT 3
 #define SYS_SYSTEM 4
 #define SYS_PROBE_FAIL 5
+#define SYS_EXEC_WRITE 6 /* ELF32 ring-3 stdout only, not POSIX write(2). */
 /* Saved by the common interrupt entry; useresp/ss exist only on privilege transitions. */
 typedef struct {
     uint32_t gs, fs, es, ds, edi, esi, ebp, esp_dummy, ebx, edx, ecx, eax;
@@ -64,7 +65,7 @@ typedef struct {
     AppEvent events[TASK_EVENTS];
     uint32_t read_event, write_event;
     AppEvent delivered;
-    bool event_pending, system;
+    bool event_pending, system, exec_image;
     void (*service)(void);
     PerfArea perf_area;
     unsigned storage_depth;
@@ -81,6 +82,7 @@ extern Task tasks[TASK_MAX];
 extern int current_task;
 void task_init(void);
 uint32_t task_spawn(int, const char *, unsigned, unsigned);
+uint32_t task_spawn_elf(const char *path);
 uint32_t task_spawn_service(const char *, void (*service)(void));
 Task *task_by_pid(uint32_t);
 Task *task_for_app(int);
