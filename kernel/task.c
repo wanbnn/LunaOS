@@ -315,6 +315,21 @@ uint32_t task_spawn_elf(const char *path) {
     const char *a[1] = {path};
     return task_spawn_elf_args(path, 1, a, 0, NULL);
 }
+bool task_wait_elf(uint32_t pid, uint32_t timeout_ms, unsigned *exit_code) {
+    uint32_t parent = task_current()->pid, started = frame_clock;
+    for (;;) {
+        Task *t = task_by_pid(pid);
+        if (!t || !t->exec_image || t->parent_pid != parent)
+            return false;
+        if (t->state == TASK_EXITED) {
+            if (exit_code) *exit_code = t->exit_code;
+            return true;
+        }
+        if ((uint32_t)(frame_clock - started) >= timeout_ms)
+            return false;
+        task_sleep_ms(10);
+    }
+}
 uint32_t task_spawn_service(const char *name, void (*service)(void)) {
     return spawn(-1, name, 3, 0, service);
 }
