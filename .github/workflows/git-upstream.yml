@@ -33,6 +33,10 @@ jobs:
       - name: Verify pinned upstream Git commit
         run: |
           test "$(git -C third_party/git rev-parse HEAD)" = "03b41523c576f26ad34085378717a0c1b287470f"
+          # actions/checkout fetches a detached submodule SHA without its tag.
+          # Fetch the exact annotated tag so upstream Git's version generator
+          # outputs the real release version, rather than a -GIT fallback.
+          git -C third_party/git fetch --depth=1 origin tag v2.56.1
           git -C third_party/git describe --tags --exact-match HEAD | grep -Fx v2.56.1
       - name: Build official Git (host comparison only)
         run: |
