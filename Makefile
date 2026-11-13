@@ -503,3 +503,16 @@ test-elf32:
 	@mkdir -p build
 	$(CC) -std=gnu11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -Ikernel kernel/elf32.c tests/elf32.c -o build/elf32-test
 	./build/elf32-test
+
+# Cross-build a real freestanding C program for the restricted LunaOS i386 ABI.
+# This target builds on Linux and runs only inside the LunaOS guest via elfrun.
+.PHONY: luna-guest-hello
+luna-guest-hello: build/guest/hello.elf
+build/guest/hello.elf: sdk/guest/hello.c sdk/guest/posix.c sdk/guest/posix.h sdk/guest/crt0.S sdk/guest/luna32.ld
+	@mkdir -p build/guest
+	$(CC) -m32 -Os -std=gnu11 -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -fno-asynchronous-unwind-tables -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Isdk/guest -c sdk/guest/hello.c -o build/guest/hello.o
+	$(CC) -m32 -Os -std=gnu11 -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -fno-asynchronous-unwind-tables -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Isdk/guest -c sdk/guest/posix.c -o build/guest/posix.o
+	$(CC) -m32 -c sdk/guest/crt0.S -o build/guest/crt0.o
+	$(LD) -m elf_i386 -T sdk/guest/luna32.ld --build-id=none -o $@ build/guest/crt0.o build/guest/hello.o build/guest/posix.o
+	@file $@
+	@readelf -l $@ | grep -q LOAD
