@@ -18,6 +18,11 @@ static uint32_t user_tables[TASK_MAX][1024] __attribute__((aligned(4096)));
 /* Up to 8 MiB application image plus a third PDE for the guarded ELF stack. */
 static uint32_t user_large_tables[TASK_MAX][1024] __attribute__((aligned(4096)));
 static uint32_t user_stack_tables[TASK_MAX][1024] __attribute__((aligned(4096)));
+/* A maximum of 2 MiB of demand-allocated 4 KiB pages per native process.
+ * Only physical handles, never heap page content, are stored in kernel BSS. */
+#define EXEC_HEAP_LIMIT (2u * 1024u * 1024u)
+#define EXEC_HEAP_MAX_PAGES (EXEC_HEAP_LIMIT / LUNA_ELF_PAGE_BYTES)
+static PmmAllocation exec_heap_pages[TASK_MAX][EXEC_HEAP_MAX_PAGES];
 static uint8_t user_code[4096] __attribute__((aligned(4096)));
 /* ELF image pages are allocated per process through the physical allocator. */
 static uint8_t user_stacks[TASK_MAX][USER_STACK_BYTES] __attribute__((aligned(4096)));
@@ -235,6 +240,7 @@ static uint32_t spawn(int app, const char *name, unsigned ring, unsigned probe,
     memset(user_tables[slot], 0, 4096);
     memset(user_large_tables[slot], 0, 4096);
     memset(user_stack_tables[slot], 0, 4096);
+    memset(exec_heap_pages[slot], 0, sizeof(exec_heap_pages[slot]));
     directories[slot][USER_CODE >> 22] = (uint32_t)user_tables[slot] | 7;
     if (ring == 3) {
         directories[slot][(USER_CODE >> 22) + 1] = (uint32_t)user_large_tables[slot] | 7;
@@ -375,6 +381,17 @@ uint32_t task_spawn_elf_args(const char *path, int argc, const char *const argv[
     }
     memcpy(t->exec_permissions, image->permissions, sizeof(t->exec_permissions));
     t->exec_physical_bytes = physical_bytes;
+    uint32_t highest = 0;
+    for (unsigned i = 0; i < image->segments; i++) {
+        const LunaElfSegment *s = &image->load[i];
+        uint32_t end = s->address + s->memory_bytes;
+        if (highest < end) highest = end;
+    }
+    /* Leave one guard page between the final ELF segment and new heap. */
+    uint32_t heap_start = ((highest + 4095u) & ~4095u);
+    if (heap_start < LUNA_ELF_IMAGE_BYTES - 4096u)
+        heap_start += 4096u;
+    t->exec_heap_base = t->exec_heap_break = heap_start;
     t->frame->eip = image->entry;
     t->frame->useresp = stack_esp;
     t->parent_pid = parent_pid;
@@ -486,6 +503,25 @@ static bool task_execve_elf(Task *t, TrapFrame *frame, const char *path,
     }
     t->exec_segments = image->segments;
     t->exec_physical_bytes = physical_bytes;
+    unsigned slot_for_heap = (unsigned)(t - tasks);
+    for (unsigned i=0;i<t->exec_heap_pages;i++) {
+        /* Already detached from the page table by the image swap. */
+        if (exec_heap_pages[slot_for_heap][i].cookie &&
+            memory_release(&exec_heap_pages[slot_for_heap][i]))
+            kernel_fault();
+        exec_heap_pages[slot_for_heap][i] = (PmmAllocation){0};
+    }
+    t->exec_heap_pages = 0;
+    uint32_t highest = 0;
+    for (unsigned i=0;i<image->segments;i++) {
+        const LunaElfSegment *s=&image->load[i];
+        uint32_t end=s->address+s->memory_bytes;
+        if (end>highest) highest=end;
+    }
+    uint32_t heap_start=(highest+4095u)&~4095u;
+    if (heap_start < LUNA_ELF_IMAGE_BYTES - 4096u)
+        heap_start+=4096u;
+    t->exec_heap_base=t->exec_heap_break=heap_start;
     memcpy(t->exec_permissions, image->permissions, sizeof(t->exec_permissions));
     /* The return from int 0x80 enters _start of the replacement program,
      * never the old instruction after execve. */
@@ -553,6 +589,13 @@ static void finish(Task *t, unsigned code) {
     }
     t->exec_segments = 0;
     t->exec_physical_bytes = 0;
+    unsigned slot=(unsigned)(t-tasks);
+    for (unsigned i=0;i<t->exec_heap_pages;i++)
+        if (exec_heap_pages[slot][i].cookie &&
+            memory_release(&exec_heap_pages[slot][i]))
+            kernel_fault();
+    t->exec_heap_pages=0;
+    t->exec_heap_break=t->exec_heap_base=0;
     if (t->app >= 0) {
         uint32_t previous=task_memory_enter(t->pid);
         app_close(t->app);
@@ -1117,6 +1160,68 @@ static TrapFrame *syscall(TrapFrame *f) {
         t->exec_fds[slot].kind = 5u; /* directory cursor */
         t->exec_fds[slot].open = true;
         f->eax = slot+3u;
+        break;
+    }
+    case SYS_EXEC_BRK: {
+        /* ABI: brk(0) queries current end. Successful calls return requested
+         * end, failures return old end. Physical memory is allocated only
+         * for touched pages. The heap cannot exceed 2 MiB or the 8 MiB
+         * program VA span. */
+        uint32_t request=f->ebx;
+        uint32_t base=t->exec_heap_base;
+        if (!t->exec_image || !base) {
+            f->eax=0; break;
+        }
+        if (!request) {
+            f->eax=t->exec_heap_break; break;
+        }
+        if (request<base || request>LUNA_ELF_IMAGE_BYTES ||
+            request-base>EXEC_HEAP_LIMIT) {
+            f->eax=t->exec_heap_break; break;
+        }
+        uint32_t want=(request-base+4095u)/4096u;
+        unsigned slot=(unsigned)(t-tasks), old=t->exec_heap_pages;
+        if (want>old) {
+            unsigned j=old;
+            for (;j<want;j++)
+                if (memory_allocate(4096u,4096u,UINT32_MAX,0u,true,true,
+                                    &exec_heap_pages[slot][j]))
+                    break;
+            if (j!=want) {
+                for (unsigned k=old;k<j;k++)
+                    if (memory_release(&exec_heap_pages[slot][k]))
+                        kernel_fault();
+                f->eax=t->exec_heap_break;
+                break;
+            }
+        }
+        uint32_t irq=drv_irq_save();
+        for (unsigned i=old;i<want;i++) {
+            uint32_t v=base+i*4096u, page=v>>12;
+            uint32_t *table=page<1024u ?
+                user_tables[slot] : user_large_tables[slot];
+            table[page&1023u]=exec_heap_pages[slot][i].address|7u;
+            t->exec_permissions[page]=LUNA_ELF_READ|LUNA_ELF_WRITE;
+        }
+        for (unsigned i=want;i<old;i++) {
+            uint32_t page=(base+i*4096u)>>12;
+            uint32_t *table=page<1024u ?
+                user_tables[slot] : user_large_tables[slot];
+            table[page&1023u]=0;
+            t->exec_permissions[page]=0;
+        }
+        __asm__ volatile("mov %0,%%cr3"::"r"(t->directory):"memory");
+        drv_irq_restore(irq);
+        if (want<old) {
+            for (unsigned i=want;i<old;i++) {
+                if (memory_release(&exec_heap_pages[slot][i]))
+                    kernel_fault();
+                exec_heap_pages[slot][i]=(PmmAllocation){0};
+            }
+        }
+        t->exec_heap_pages=want;
+        t->exec_heap_break=request;
+        f->eax=request;
         break;
     }
     case SYS_EXEC_READDIR: {
