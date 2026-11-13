@@ -172,13 +172,15 @@ def sample_large_multisegment_elf() -> bytes:
 
 
 MULTI_DATA = sample_large_multisegment_elf()
+C_DATA = (ROOT / "build/guest/hello.elf").read_bytes()
+assert len(C_DATA) <= 256 * 1024, "guest ELF exceeds loader file limit"
 
 DATA = sample_elf()
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
-        data = MULTI_DATA if self.path.endswith("/multi.elf") else DATA
+        data = C_DATA if self.path.endswith("/c-hello.elf") else (MULTI_DATA if self.path.endswith("/multi.elf") else DATA)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -211,6 +213,14 @@ try:
     assert "ARGV ENV MULTISEG OK" in g.transcript, g.transcript[-3000:]
     g.command("cat /tmp/luna-elf-created.txt", "WRITTEN BY NATIVE RING3")
     print("PASS: multisegment ELF32 >12 KiB, argc/argv/envp, writable pages, open/read/write/rename, child wait", flush=True)
+    g.command(f"wget http://10.0.2.2:{port}/c-hello.elf /tmp/c-hello.elf", "Saved", timeout=30)
+    launched = g.command("elfrun /tmp/c-hello.elf Apple Banana", "started ring-3 process")
+    match = re.search(r"started ring-3 process pid=(\d+)", launched)
+    assert match, launched
+    g.command("elfwait " + match.group(1), "exit code 0", timeout=25)
+    assert "LUNA GUEST C POSIX OK" in g.transcript, g.transcript[-3000:]
+    g.command("cat /tmp/guest-c-after.txt", "C SDK FILE WRITE OK")
+    print("PASS: actual freestanding C ELF32, i386 crt0, argv/envp and file syscalls in QEMU", flush=True)
 
 finally:
     if g:
