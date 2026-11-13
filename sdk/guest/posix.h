@@ -42,6 +42,7 @@ int luna_utime(const char *path, uint32_t unix_seconds);
 int luna_tcp_connect(const char *host, unsigned port, int verified_tls);
 int luna_opendir(const char *path); /* return fd >=3 */
 int luna_readdir(int fd, LunaGuestDirent *entry); /* 1 entry, 0 EOF, -1 error */
+void *luna_brk(void *address); /* brk(NULL) queries process heap end */
 /* Returns a guest fd; use read/write/close. Singleton TCP backend for now. */
 int luna_stat(const char *path, LunaGuestStat *info);
 __attribute__((noreturn)) void _exit(int code);
