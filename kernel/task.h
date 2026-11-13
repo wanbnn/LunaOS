@@ -49,6 +49,8 @@
 #define SYS_EXEC_GETPID 17
 #define SYS_EXEC_PIPE 18 /* Bounded pipe: immediate EAGAIN-like failure when empty/full. */
 #define SYS_EXEC_FSYNC 19 /* Commits LunaFS2 snapshot for durable writes. */
+#define SYS_EXEC_SPAWN 20 /* Native child process, argv/envp pointers. */
+#define SYS_EXEC_WAITPID 21 /* Child exit status, not full waitpid(2) yet. */
 #define EXEC_FD_MAX 8
 /* Saved by the common interrupt entry; useresp/ss exist only on privilege transitions. */
 typedef struct {
