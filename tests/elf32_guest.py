@@ -242,6 +242,12 @@ try:
     assert "LUNA CHILD EXECUTE OK" in g.transcript, g.transcript[-4000:]
     assert "LUNA SPAWN WAIT OK" in g.transcript, g.transcript[-4000:]
     print("PASS: native child spawn/argv/env and waitpid exit-code forwarding in LunaOS", flush=True)
+    g.close()
+    g = None
+    g = Guest(TEST / "elf32-disk.img", network=False, ram=128)
+    g.command("cat /tmp/guest-c-after.txt", "C SDK FILE WRITE OK")
+    print("PASS: fsync guest file/rename survived LunaOS reboot", flush=True)
+
 
 
 
