@@ -287,6 +287,7 @@ try:
     assert "LUNA NATIVE TCP GUEST OK" in g.transcript, g.transcript[-4000:]
     print("PASS: native i386 TCP socket connect/read/write/close to host echo server", flush=True)
 
+    g.command("sync", "LunaFS: snapshot committed to disk", timeout=35)
     g.close()
     g = None
     g = Guest(TEST / "elf32-disk.img", network=False, ram=128)
