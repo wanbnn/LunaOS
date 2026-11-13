@@ -5,6 +5,7 @@ Uses the actual LunaOS disk, RTL8139 HTTP, ring-3 loader, stdout, open/read/clos
 This is NOT a Git/posix compatibility test.
 """
 import http.server
+import socket
 import shutil
 import struct
 import threading
@@ -176,6 +177,8 @@ C_DATA = (ROOT / "build/guest/hello.elf").read_bytes()
 Z_DATA = (ROOT / "build/guest/zlib-smoke.elf").read_bytes()
 SPAWN_DATA = (ROOT / "build/guest/spawn-smoke.elf").read_bytes()
 EXECVE_DATA = (ROOT / "build/guest/execve-smoke.elf").read_bytes()
+TCP_DATA = (ROOT / "build/guest/tcp-smoke.elf").read_bytes()
+META_DATA = (ROOT / "build/guest/metadata-check.elf").read_bytes()
 assert len(Z_DATA) <= 16 * 1024 * 1024, "zlib guest ELF exceeds loader budget"
 assert len(C_DATA) <= 256 * 1024, "guest ELF exceeds loader file limit"
 
@@ -184,7 +187,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
-        data = (EXECVE_DATA if self.path.endswith("/execve.elf") else
+        data = (META_DATA if self.path.endswith("/metadata-check.elf") else
+                TCP_DATA if self.path.endswith("/tcp.elf") else
+                EXECVE_DATA if self.path.endswith("/execve.elf") else
                 SPAWN_DATA if self.path.endswith("/spawn.elf") else
                 Z_DATA if self.path.endswith("/zlib.elf") else
                 C_DATA if self.path.endswith("/c-hello.elf") else
@@ -197,6 +202,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
 
+tcp_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+tcp_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+tcp_server.bind(("127.0.0.1", 0))
+tcp_server.listen(1)
+tcp_port = tcp_server.getsockname()[1]
+
+def tcp_echo():
+    tcp_server.settimeout(50)
+    try:
+        conn, _ = tcp_server.accept()
+        with conn:
+            conn.settimeout(25)
+            data = conn.recv(256)
+            if data == b"PING LUNA TCP\n":
+                conn.sendall(b"PONG LUNA TCP\n")
+    finally:
+        tcp_server.close()
+
+threading.Thread(target=tcp_echo, daemon=True).start()
 server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 TEST.mkdir(parents=True, exist_ok=True)
@@ -254,11 +278,26 @@ try:
     g.command("cat /tmp/execve-fd.txt", "EXECVE SAME PID FD OK")
     print("PASS: failed execve preserves caller, successful execve replaces image without PID/FD loss", flush=True)
 
+    g.command(f"wget http://10.0.2.2:{port}/metadata-check.elf /tmp/metadata-check.elf", "Saved", timeout=30)
+    g.command(f"wget http://10.0.2.2:{port}/tcp.elf /tmp/tcp.elf", "Saved", timeout=30)
+    launched = g.command(f"elfrun /tmp/tcp.elf {tcp_port}", "started ring-3 process")
+    match = re.search(r"started ring-3 process pid=(\d+)", launched)
+    assert match, launched
+    g.command("elfwait " + match.group(1), "exit code 0", timeout=50)
+    assert "LUNA NATIVE TCP GUEST OK" in g.transcript, g.transcript[-4000:]
+    print("PASS: native i386 TCP socket connect/read/write/close to host echo server", flush=True)
+
     g.close()
     g = None
     g = Guest(TEST / "elf32-disk.img", network=False, ram=128)
     g.command("cat /tmp/guest-c-after.txt", "C SDK FILE WRITE OK")
     print("PASS: fsync guest file/rename survived LunaOS reboot", flush=True)
+    launched = g.command("elfrun /tmp/metadata-check.elf", "started ring-3 process")
+    match = re.search(r"started ring-3 process pid=(\d+)", launched)
+    assert match, launched
+    g.command("elfwait " + match.group(1), "exit code 0", timeout=25)
+    assert "LUNA FS3 METADATA REBOOT OK" in g.transcript, g.transcript[-4000:]
+    print("PASS: LunaFS snapshot v3 chmod/mtime persisted across reboot", flush=True)
 
 
 
