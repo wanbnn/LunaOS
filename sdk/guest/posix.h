@@ -35,6 +35,8 @@ int luna_waitpid(int pid, int *status, int options); /* options 1 = WNOHANG */
 int luna_execve(const char *path, const char *const argv[], const char *const envp[]); /* does not return on success */
 int chmod(const char *path, unsigned mode);
 int luna_utime(const char *path, uint32_t unix_seconds);
+int luna_tcp_connect(const char *host, unsigned port, int verified_tls);
+/* Returns a guest fd; use read/write/close. Singleton TCP backend for now. */
 int luna_stat(const char *path, LunaGuestStat *info);
 __attribute__((noreturn)) void _exit(int code);
 #endif
