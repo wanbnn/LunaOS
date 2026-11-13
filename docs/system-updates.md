@@ -23,13 +23,21 @@ while a 256 KiB chunk is decompressed and hashed. The package still requires
 enough RAM for its compressed payload, and the two phases are sequential,
 not parallel workers.
 
-For update-package downloads, the TCP stack proactively reserves a larger
-receive window (up to 256 KiB target, bounded by negotiated scaling, memory
-availability and the existing allocation policy), coalesces small window-credit
-updates, and avoids shrinking the ring while fresh packets are arriving.
-Other ordinary HTTP requests retain their existing starting buffer policy.
-These are transport optimizations, **not** a claim of 700 Mb/s Wi-Fi throughput
-or hardware validation.
+For update-package downloads, the TCP stack initially allocates up to
+**1 MiB of receive buffer** after the TLS connection is established, then
+auto-tunes the window based on measured delivery rate and TCP RTT, up to
+**10 MiB** when the peer negotiates window scaling and enough RAM is
+available. Ten MiB is a *conditional ceiling*, never a mandatory upfront
+allocation. The limit can be lower with little RAM or no TCP window scaling.
+Failed large allocations retain the previous working buffer. TCP also
+coalesces small window-credit updates and avoids shrinking the ring while
+fresh packets are arriving. Other HTTP requests retain their existing
+adaptation policy.
+
+At 50 ms RTT, 10 MiB is enough receive credit for up to ~1.68 Gbit/s
+**window-bound** throughput; it is not a measured radio or download rate.
+Driver RX processing, WPA2 decryption, TLS overhead, losses and remote
+congestion control still limit end-to-end speed.
 
 For an installed clean build, LunaOS first requests
 `update-from-<installed full commit SHA>.pack` for the exact target commit.
