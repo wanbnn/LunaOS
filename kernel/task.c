@@ -597,12 +597,14 @@ static TrapFrame *syscall(TrapFrame *f) {
         }
         const char *path = t->exec_fds[fd - 3].path;
         File *file = fs_find(path);
-        if (!file || file->dir || t->exec_fds[fd - 3].offset != file->size ||
+        if (!file || file->dir ||
+            (!(t->exec_fds[fd - 3].flags & 1024u) &&
+             t->exec_fds[fd - 3].offset != file->size) ||
             fs_write_bytes(path, (const void *)(uintptr_t)(USER_CODE + pos), length, true)) {
             f->eax = (uint32_t)-1;
             break;
         }
-        t->exec_fds[fd - 3].offset += length;
+        t->exec_fds[fd - 3].offset = file->size + length;
         f->eax = length;
         break;
     }
@@ -656,7 +658,7 @@ static TrapFrame *syscall(TrapFrame *f) {
         File *file = fs_find(t->exec_fds[fd - 3].path);
         if (!file || file->dir) { f->eax = (uint32_t)-1; break; }
         uint32_t offset = t->exec_fds[fd - 3].offset;
-        if (offset > file->size) { f->eax = (uint32_t)-1; break; }
+        if (offset >= file->size) { f->eax = 0; break; } /* EOF is not an error. */
         size_t amount = file->size - offset;
         if (amount > length) amount = length;
         if (amount && !fs_read_bytes(file, offset, (void *)(uintptr_t)(USER_CODE + addr), amount)) {
