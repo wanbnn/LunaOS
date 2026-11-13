@@ -14,6 +14,9 @@ static bool initialized, idling;
 static uint32_t next_pid = 1, stamp, sample_stamp, sample_tick;
 static uint32_t directories[TASK_MAX][1024] __attribute__((aligned(4096)));
 static uint32_t user_tables[TASK_MAX][1024] __attribute__((aligned(4096)));
+/* Up to 8 MiB application image plus a third PDE for the guarded ELF stack. */
+static uint32_t user_large_tables[TASK_MAX][1024] __attribute__((aligned(4096)));
+static uint32_t user_stack_tables[TASK_MAX][1024] __attribute__((aligned(4096)));
 static uint8_t user_code[4096] __attribute__((aligned(4096)));
 /* ELF image pages are allocated per process through the physical allocator. */
 static uint8_t user_stacks[TASK_MAX][USER_STACK_BYTES] __attribute__((aligned(4096)));
@@ -62,7 +65,8 @@ uint32_t task_memory_enter(uint32_t pid) {
 void task_memory_leave(uint32_t previous) { task_current()->memory_owner=previous; }
 static uint32_t private_reservation(const Task *t) {
     return t->ring ? t->stack_bytes+USER_STACK_BYTES+sizeof(directories[0])+sizeof(user_tables[0])+
-           (t->exec_image ? LUNA_ELF_IMAGE_BYTES : 0u) : 0;
+           (t->exec_image ? sizeof(user_large_tables[0])+sizeof(user_stack_tables[0])+
+                             t->exec_physical_bytes : 0u) : 0;
 }
 void task_memory_stats(const Task *t,TaskMemoryStats *out) {
     if (!out) return;
@@ -119,9 +123,13 @@ void task_init(void) {
         /* Paging treats CPL 0, 1 and 2 as supervisor. Bound every nonzero
          * data/code selector as well; otherwise ring 1 could load a flat DPL-3
          * data selector and reach supervisor mappings. */
-        uint32_t base = ring ? USER_CODE : 0, limit = ring ? 0x13fff : 0xfffff;
-        gdt[1 + ring * 2] = segment(base, limit, 0x9a | (ring << 5), ring ? 4 : 0xc);
-        gdt[2 + ring * 2] = segment(base, limit, 0x92 | (ring << 5), ring ? 4 : 0xc);
+        uint32_t base = ring ? USER_CODE : 0;
+        uint32_t limit = ring == 3 ?
+            (LUNA_ELF_STACK_OFFSET + USER_STACK_BYTES - 1u) >> 12 :
+            (ring ? 0x13fffu : 0xfffffu);
+        uint8_t flags = ring == 3 || ring == 0 ? 0xc : 4;
+        gdt[1 + ring * 2] = segment(base, limit, 0x9a | (ring << 5), flags);
+        gdt[2 + ring * 2] = segment(base, limit, 0x92 | (ring << 5), flags);
     }
     gdt[9] = segment((uint32_t)&tss, sizeof(tss) - 1, 0x89, 0);
     struct {
@@ -191,7 +199,13 @@ static uint32_t spawn(int app, const char *name, unsigned ring, unsigned probe,
     memset(user_stacks[slot], 0, USER_STACK_BYTES);
     memcpy(directories[slot], directories[0], 4096);
     memset(user_tables[slot], 0, 4096);
+    memset(user_large_tables[slot], 0, 4096);
+    memset(user_stack_tables[slot], 0, 4096);
     directories[slot][USER_CODE >> 22] = (uint32_t)user_tables[slot] | 7;
+    if (ring == 3) {
+        directories[slot][(USER_CODE >> 22) + 1] = (uint32_t)user_large_tables[slot] | 7;
+        directories[slot][(USER_CODE >> 22) + 2] = (uint32_t)user_stack_tables[slot] | 7;
+    }
     user_tables[slot][0] = (uint32_t)user_code | 5;
     for (unsigned i = 0; i < USER_STACK_BYTES / 4096; i++)
         user_tables[slot][16 + i] = ((uint32_t)user_stacks[slot] + i * 4096) | 7;
@@ -232,7 +246,7 @@ static bool setup_exec_stack(Task *t, int argc, const char *const argv[],
                 return false;
             sp -= (unsigned)len;
             memcpy(user_stacks[slot] + sp, strings[i], len);
-            (group ? env : args)[i] = USER_STACK - USER_CODE + sp;
+            (group ? env : args)[i] = LUNA_ELF_STACK_OFFSET + sp;
         }
     }
     sp &= ~3u;
@@ -250,7 +264,7 @@ static bool setup_exec_stack(Task *t, int argc, const char *const argv[],
     *p++ = 0;
     *p++ = 0; /* AT_NULL */
     *p++ = 0;
-    t->frame->useresp = USER_STACK - USER_CODE + sp;
+    t->frame->useresp = LUNA_ELF_STACK_OFFSET + sp;
     return true;
 }
 uint32_t task_spawn_elf_args(const char *path, int argc, const char *const argv[],
@@ -258,58 +272,84 @@ uint32_t task_spawn_elf_args(const char *path, int argc, const char *const argv[
     File *f = fs_find(path);
     if (!f || f->dir || f->size < 84u || f->size > LUNA_ELF_MAX_FILE_BYTES)
         return 0;
-    uint8_t *bytes = heap_allocate(f->size);
-    if (!bytes)
+    /* Only read the ELF and PHDR header; stream PT_LOAD bytes to the PMM.
+     * Never stage a 16 MiB Git binary and its virtual image in the heap. */
+    uint8_t header[LUNA_ELF_HEADER_BYTES];
+    size_t head_bytes = f->size;
+    if (head_bytes > sizeof(header))
+        head_bytes = sizeof(header);
+    if (!fs_read_bytes(f, 0, header, head_bytes))
         return 0;
-    bool read_ok = fs_read_bytes(f, 0, bytes, f->size);
     LunaElfImage *image = heap_allocate(sizeof(*image));
-    if (!image) {
-        heap_release(bytes);
+    if (!image)
         return 0;
-    }
-    bool accepted = read_ok && luna_elf32_load(bytes, f->size, image);
-    heap_release(bytes);
+    bool accepted = luna_elf32_inspect(header, head_bytes, f->size, image);
     if (!accepted) {
         heap_release(image);
         return 0;
     }
-    PmmAllocation allocation = {0};
-    if (memory_allocate(LUNA_ELF_IMAGE_BYTES, 4096u, UINT32_MAX, 0u,
-                        true, true, &allocation)) {
-        heap_release(image);
-        return 0;
+    PmmAllocation allocations[LUNA_ELF_MAX_SEGMENTS] = {{0}};
+    uint32_t physical_bytes = 0;
+    for (unsigned i = 0; i < image->segments; i++) {
+        const LunaElfSegment *seg = &image->load[i];
+        uint32_t bytes = seg->page_count * LUNA_ELF_PAGE_BYTES;
+        if (memory_allocate(bytes, LUNA_ELF_PAGE_BYTES, UINT32_MAX, 0u,
+                            true, true, &allocations[i]))
+            goto fail_load;
+        physical_bytes += bytes;
+        if (seg->file_bytes &&
+            !fs_read_bytes(f, seg->file_offset,
+                           (uint8_t *)(uintptr_t)allocations[i].address +
+                           (seg->address % LUNA_ELF_PAGE_BYTES),
+                           seg->file_bytes))
+            goto fail_load;
     }
     uint32_t parent_pid = task_current()->pid;
     char parent_cwd[PATH_CAP];
     strcpy(parent_cwd, cwd);
     uint32_t pid = spawn(-1, "ELF32 native user process", 3, 0, NULL);
-    if (!pid) {
-        memory_release(&allocation);
-        heap_release(image);
-        return 0;
-    }
+    if (!pid)
+        goto fail_load;
     Task *t = task_by_pid(pid);
     unsigned slot = (unsigned)(t - tasks);
     if (!setup_exec_stack(t, argc, argv, envc, envp)) {
         t->state = TASK_EXITED;
-        memory_release(&allocation);
-        heap_release(image);
-        return 0;
+        goto fail_load;
     }
-    memcpy((void *)(uintptr_t)allocation.address, image->memory, LUNA_ELF_IMAGE_BYTES);
-    for (unsigned i = 0; i < LUNA_ELF_PAGES; i++) {
-        t->exec_permissions[i] = image->permissions[i];
-        if (image->permissions[i])
-            user_tables[slot][i] = (allocation.address + i * 4096u) |
-                ((image->permissions[i] & LUNA_ELF_WRITE) ? 7u : 5u);
+    /* Remove the legacy stack alias (at 64 KiB). New guest stack lives
+     * at an isolated third PDE above the 8 MiB program image. */
+    for (unsigned i = 0; i < USER_STACK_BYTES / 4096u; i++) {
+        user_tables[slot][16 + i] = 0;
+        user_stack_tables[slot][16 + i] =
+            ((uint32_t)user_stacks[slot] + i * 4096u) | 7u;
     }
-    t->exec_allocation = allocation;
+    for (unsigned i = 0; i < image->segments; i++) {
+        const LunaElfSegment *seg = &image->load[i];
+        for (uint32_t j = 0; j < seg->page_count; j++) {
+            uint32_t page = seg->first_page + j;
+            uint32_t *page_table = page < 1024u ?
+                user_tables[slot] : user_large_tables[slot];
+            page_table[page & 1023u] =
+                (allocations[i].address + j * LUNA_ELF_PAGE_BYTES) |
+                ((seg->flags & LUNA_ELF_WRITE) ? 7u : 5u);
+        }
+        t->exec_allocation[i] = allocations[i];
+        t->exec_segments++;
+    }
+    memcpy(t->exec_permissions, image->permissions, sizeof(t->exec_permissions));
+    t->exec_physical_bytes = physical_bytes;
     t->frame->eip = image->entry;
     t->parent_pid = parent_pid;
     strcpy(t->exec_cwd, parent_cwd);
     t->exec_image = true;
     heap_release(image);
     return pid;
+fail_load:
+    for (unsigned i = 0; i < LUNA_ELF_MAX_SEGMENTS; i++)
+        if (allocations[i].cookie && memory_release(&allocations[i]))
+            kernel_fault();
+    heap_release(image);
+    return 0;
 }
 uint32_t task_spawn_elf(const char *path) {
     const char *a[1] = {path};
@@ -354,11 +394,14 @@ static void finish(Task *t, unsigned code) {
     t->exit_code = code;
     t->state = TASK_EXITED;
     net_cancel_owner(t->pid);
-    if (t->exec_allocation.cookie) {
-        if (memory_release(&t->exec_allocation))
+    for (unsigned i = 0; i < t->exec_segments; i++) {
+        if (t->exec_allocation[i].cookie &&
+            memory_release(&t->exec_allocation[i]))
             kernel_fault();
-        t->exec_allocation = (PmmAllocation){0};
+        t->exec_allocation[i] = (PmmAllocation){0};
     }
+    t->exec_segments = 0;
+    t->exec_physical_bytes = 0;
     if (t->app >= 0) {
         uint32_t previous=task_memory_enter(t->pid);
         app_close(t->app);
@@ -485,14 +528,15 @@ static void sample(void) {
  * The kernel cannot safely dereference holes in the PTE map. Validate all
  * touched pages before copying any bytes (also protects supervisor code). */
 static bool exec_user_range(const Task *t, uint32_t off, uint32_t n, bool writable) {
-    if (!t->exec_image || t->ring != 3 || off >= 0x14000u || n > 0x14000u - off)
+    if (!t->exec_image || t->ring != 3)
+        return false;
+    if (off >= LUNA_ELF_STACK_OFFSET &&
+        off < LUNA_ELF_STACK_OFFSET + USER_STACK_BYTES)
+        return n <= LUNA_ELF_STACK_OFFSET + USER_STACK_BYTES - off;
+    if (off >= LUNA_ELF_IMAGE_BYTES || n > LUNA_ELF_IMAGE_BYTES - off)
         return false;
     if (!n)
         return true;
-    if (off >= 0x10000u)
-        return true; /* Existing private 16 KiB user stack. */
-    if (n > 0x10000u - off)
-        return false; /* Reject gaps and mixed code/stack ranges. */
     uint32_t first = off >> 12, last = (off + n - 1u) >> 12;
     for (uint32_t i = first; i <= last; i++)
         if (!(t->exec_permissions[i] & LUNA_ELF_READ) ||
