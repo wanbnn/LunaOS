@@ -8,6 +8,8 @@ on:
       - 'tests/elf32.c'
       - 'tests/elf32_guest.py'
       - 'sdk/guest/**'
+      - 'third_party/zlib'
+      - 'tools/notices.py'
       - 'Makefile'
       - '.github/workflows/elf32-exec.yml'
   push:
@@ -17,6 +19,10 @@ on:
       - 'kernel/task.*'
       - 'apps/shell.c'
       - 'tests/elf32.c'
+      - 'tests/elf32_guest.py'
+      - 'sdk/guest/**'
+      - 'third_party/zlib'
+      - 'tools/notices.py'
       - 'Makefile'
       - '.github/workflows/elf32-exec.yml'
 permissions:
@@ -52,6 +58,11 @@ jobs:
         run: make -j2 all
       - name: Cross-build native C guest using LunaOS syscall shim
         run: make luna-guest-hello
+      - name: Build official zlib 1.4 as freestanding LunaOS guest
+        run: |
+          test -f third_party/zlib/LICENSE
+          test -f third_party/zlib/zlib.h
+          make luna-guest-zlib-smoke
       - name: Verify boot images exist
         run: |
           test -s dist/LunaOS.iso
