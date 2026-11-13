@@ -560,3 +560,11 @@ build/guest/metadata-check.elf: sdk/guest/metadata_check.c sdk/guest/posix.h sdk
 	@mkdir -p build/guest
 	$(CC) -m32 -Os -std=gnu11 -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Isdk/guest -c sdk/guest/metadata_check.c -o build/guest/metadata_check.o
 	$(LD) -m elf_i386 -T sdk/guest/luna32.ld --build-id=none -o $@ build/guest/crt0.o build/guest/metadata_check.o build/guest/posix.o
+
+.PHONY: luna-guest-runtime-smoke
+luna-guest-runtime-smoke: build/guest/runtime-smoke.elf
+build/guest/runtime-smoke.elf: sdk/guest/runtime_smoke.c sdk/guest/memory.c sdk/guest/posix.h sdk/guest/luna32.ld build/guest/hello.elf
+	@mkdir -p build/guest
+	$(CC) -m32 -Os -std=gnu11 -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Isdk/guest -c sdk/guest/runtime_smoke.c -o build/guest/runtime_smoke.o
+	$(LD) -m elf_i386 -T sdk/guest/luna32.ld --build-id=none -o $@ build/guest/crt0.o build/guest/runtime_smoke.o build/guest/posix.o build/guest/memory.o
+	@file $@
