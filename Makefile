@@ -486,3 +486,13 @@ test-fs-streaming:
 	@mkdir -p build
 	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -Itests/fs_mock -Ikernel kernel/fs.c kernel/fs_volume.c net/http_stream.c tests/fs_streaming.c -o build/fs-streaming-test
 	./build/fs-streaming-test
+
+# Pinned upstream Git host baseline; never linked into the LunaOS guest ISO.
+# Requires git submodule update --init --recursive third_party/git.
+.PHONY: git-upstream-host-build git-upstream-host-test
+git-upstream-host-build:
+	@test -f third_party/git/Makefile || (echo "Missing upstream Git source. Run git submodule update --init --recursive third_party/git" && exit 1)
+	+$(MAKE) -C third_party/git -j2 NO_GETTEXT=YesPlease NO_TCLTK=YesPlease NO_PERL=YesPlease NO_PYTHON=YesPlease all
+
+git-upstream-host-test: git-upstream-host-build
+	$(PYTHON) tests/git_upstream_host.py --git third_party/git/git
