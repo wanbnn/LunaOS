@@ -27,7 +27,7 @@ static const char *commands[] = {
     "uname",  "free",  "uptime",  "date",     "pci",     "net",     "ifconfig", "dns", "ping",  "wget",
     "browse", "audio", "beep",    "sync",     "history", "source",  "set",      "env",   "true",
     "false",  "sleep", "reboot",  "poweroff", "about",   "ps",      "tasks",    "kill",  "ringtest",
-    "js",     "python", "python3", "python3.13", "micropython", "pip", "venv",  "deactivate", "dev",   "bench", "perf", "drvinfo", "whoami",   "setup",   "drvtest", "fwinfo",   "wifidiag", "wifi", "memtest", 0};
+    "js",     "python", "python3", "python3.13", "micropython", "pip", "venv",  "deactivate", "dev",   "bench", "perf", "drvinfo", "whoami",   "setup",   "drvtest", "fwinfo",   "wifidiag", "wifi", "memtest", "elfrun", 0};
 #define CAP 8192
 static void emit(char *out, const char *s) {
     append(out, s, CAP);
@@ -317,6 +317,20 @@ static int execute(int argc, char **a, const char *input, char *out) {
         }
         emit(out, "\nSyntax: quotes, variables, |, >, >>, <, ;, &&, ||\nSuper: app search | "
                   "Alt+Tab: switch | Alt+F4: close | Tab: complete\n");
+    } else if (!strcmp(c, "elfrun")) {
+        if (argc != 2) {
+            emit(out, "usage: elfrun FILE (restricted static i386 ELF32)\n");
+            return 2;
+        }
+        uint32_t pid = task_spawn_elf(a[1]);
+        if (!pid) {
+            emit(out, "elfrun: unsupported ELF32, invalid binary, or no free task slot\n");
+            return 1;
+        }
+        emit(out, "elfrun: started ring-3 process pid=");
+        num(out, pid);
+        emit(out, " (asynchronous; no POSIX argv/env or wait yet)\n");
+        return 0;
     } else if (!strcmp(c, "echo")) {
         for (int i = 1; i < argc; i++) {
             if (i > 1)
