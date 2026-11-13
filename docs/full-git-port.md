@@ -1,6 +1,6 @@
 # Porte do Git original ao LunaOS — contrato de compatibilidade
 
-**Status: projeto de porte; nao implementado.** Este documento define o requisito solicitado: executar o `git` real a partir do `lunaSH` com o mesmo fluxo de trabalho que em sistemas POSIX, incluindo trabalho offline, remotos HTTPS/SSH e interoperabilidade com repositórios criados em outros sistemas. Nenhuma substituicao parcial, emulacao de respostas ou dependencia obrigatoria de um host Linux e aceitavel.
+**Status: fase 1 iniciada (fonte Git upstream 2.56.1 fixada, build e testes de referencia no host); execucao do Git no LunaOS guest ainda nao implementada.** Este documento define o requisito solicitado: executar o `git` real a partir do `lunaSH` com o mesmo fluxo de trabalho que em sistemas POSIX, incluindo trabalho offline, remotos HTTPS/SSH e interoperabilidade com repositórios criados em outros sistemas. Nenhuma substituicao parcial, emulacao de respostas ou dependencia obrigatoria de um host Linux e aceitavel.
 
 ## Decisao arquitetural
 
@@ -63,3 +63,13 @@ A branch experimental `feat/lunash-native-git-foundation` contem uma tentativa i
 ## Notas de projeto
 
 Nao habilitar login automatico, armazenar PAT em plaintext, desabilitar TLS, ignorar verificacao de host SSH ou enviar codigo dos usuarios para terceiro para simplificar a implementacao. A paridade com Git deve ser demonstrada, nao presumida.
+
+
+## Progresso executado na fase 1 (13/11/2026)
+
+- Adicionado o codigo upstream oficial do Git via submodulo Git em `third_party/git`, fixado em `03b41523c576f26ad34085378717a0c1b287470f` (tag assinada `v2.56.1`, com correcoes de seguranca).
+- Criado `tests/git_upstream_host.py` para comparar o fluxo real de Git no ambiente host: inicializacao, arquivos binarios, add/commit, branch, merge, rebase, stash, clone/fetch/pull/push em remoto local, fsck e gc.
+- Criado `git-upstream-host-build` / `git-upstream-host-test` no Makefile e CI `.github/workflows/git-upstream.yml` para compilar o Git original em Linux. Esses alvos nao entram na ISO.
+- Documentados o ambiente e as etapas em `tools/git-port/README.md`.
+
+**Ainda não há no LunaOS um processo user-mode do Git, loader, ABI POSIX, VFS completo ou SSH/HTTPS para Git.** Uma compilacao no host, mesmo aprovada, nao e demonstracao de Git funcional no guest. A branch parcial anterior `feat/lunash-native-git-foundation` continua isolada e nao deve ser mesclada.
