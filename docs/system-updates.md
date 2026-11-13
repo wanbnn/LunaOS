@@ -14,7 +14,22 @@ downloads. It contains the validated `LUNAUPD1` 9,984-byte manifest followed
 in order by the compressed payload of every nonempty block. The v1 manifest
 layout and per-block SHA-256 remain unchanged. The file is downloaded directly
 into bounded RAM allocations through one HTTPS body stream; there is no
-temporary file on the live LunaFS snapshot volume.
+temporary file on the live LunaFS snapshot volume. During the transfer, the
+network callback only parses the manifest and copies compressed blocks into
+RAM. **After HTTPS finishes**, the updater inflates and SHA-256-verifies every
+included block in a distinct 40–50% progress phase; no disk sectors are
+modified until that phase succeeds. This avoids stalling Wi-Fi RX/TCP polling
+while a 256 KiB chunk is decompressed and hashed. The package still requires
+enough RAM for its compressed payload, and the two phases are sequential,
+not parallel workers.
+
+For update-package downloads, the TCP stack proactively reserves a larger
+receive window (up to 256 KiB target, bounded by negotiated scaling, memory
+availability and the existing allocation policy), coalesces small window-credit
+updates, and avoids shrinking the ring while fresh packets are arriving.
+Other ordinary HTTP requests retain their existing starting buffer policy.
+These are transport optimizations, **not** a claim of 700 Mb/s Wi-Fi throughput
+or hardware validation.
 
 For an installed clean build, LunaOS first requests
 `update-from-<installed full commit SHA>.pack` for the exact target commit.
@@ -54,8 +69,9 @@ HTTPS requires valid hostnames, certificates and redirects; HTTP downgrade
 is prohibited. No offline release-signing key is in this version: trust
 remains anchored in the official GitHub repository and its release assets.
 
-The Settings progress bar shows bytes received, current speed, recovery
-blocks, and verified installed blocks. It does not collect telemetry.
+The Settings progress bar shows bytes received and current speed during
+1–40% (download), SHA-256 block progress during 40–50% (verification), recovery
+blocks and verified installed blocks afterward. It does not collect telemetry.
 
 Run `make test-update` for full/delta package format, exact revision identity,
 streaming verification, invalid package handling, network errors, disk
