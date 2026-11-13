@@ -142,6 +142,14 @@ int main(void) {
     assert(fs_load());
     f=fs_find("/home/luna/legacy.txt");
     assert(f && !strcmp(f->data,"migrated to v2"));
+    /* v3 snapshots persist chmod/mtime across remount while accepting v1. */
+    assert(!fs_chmod("/home/luna/legacy.txt", 0755u));
+    assert(!fs_set_mtime("/home/luna/legacy.txt", 1735689600u));
+    assert(fs_save());
+    assert(fs_load());
+    f = fs_find("/home/luna/legacy.txt");
+    assert(f && f->mode == 0100755u && f->mtime == 1735689600u);
+    assert(fs_verify_on(0));
     /* No overrun of the volume slot; bound is aggregate capacity, not 8K. */
     assert(fs_write_bytes("/home/luna/too-big",blob,3u*1024u*1024u,false)<0);
     /* Grow onto free disk space without overwriting another partition. */
