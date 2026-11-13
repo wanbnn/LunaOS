@@ -57,6 +57,7 @@
 #define SYS_EXEC_TCP_CONNECT 25 /* Exclusive outbound IPv4 TCP/TLS socket. */
 #define SYS_EXEC_OPENDIR 26 /* Descriptor-backed directory iterator. */
 #define SYS_EXEC_READDIR 27 /* One LunaGuestDirent record per call. */
+#define SYS_EXEC_BRK 28 /* Bounded process heap, Linux-like program-break result. */
 #define EXEC_FD_MAX 8
 /* Saved by the common interrupt entry; useresp/ss exist only on privilege transitions. */
 typedef struct {
@@ -94,6 +95,7 @@ typedef struct {
     uint8_t exec_permissions[LUNA_ELF_PAGES];
     PmmAllocation exec_allocation[LUNA_ELF_MAX_SEGMENTS];
     uint32_t exec_segments, exec_physical_bytes;
+    uint32_t exec_heap_base, exec_heap_break, exec_heap_pages;
     uint32_t parent_pid;
     char exec_cwd[128];
     struct { char path[128]; uint32_t offset, flags; uint8_t kind, pipe_id; bool open; } exec_fds[EXEC_FD_MAX];
