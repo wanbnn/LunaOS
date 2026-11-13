@@ -1,5 +1,4 @@
 #include "elf32.h"
-#include <stdint.h>
 #include "luna.h"
 
 static uint16_t u16(const uint8_t *p) {
@@ -10,36 +9,57 @@ static uint32_t u32(const uint8_t *p) {
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 bool luna_elf32_load(const uint8_t *b, size_t n, LunaElfImage *image) {
-    if (!b || !image || n < 52 || n > 1024u * 1024u)
+    if (!b || !image || n < 84 || n > LUNA_ELF_MAX_FILE_BYTES ||
+        b[0] != 0x7f || b[1] != 'E' || b[2] != 'L' || b[3] != 'F' ||
+        b[4] != 1 || b[5] != 1 || b[6] != 1 || b[7] != 0 ||
+        (u16(b + 16) != 2 && u16(b + 16) != 3) ||
+        u16(b + 18) != 3 || u32(b + 20) != 1 ||
+        u16(b + 40) != 52 || u16(b + 42) != 32)
         return false;
-    if (b[0] != 0x7f || b[1] != 'E' || b[2] != 'L' || b[3] != 'F' ||
-        b[4] != 1 || b[5] != 1 || b[6] != 1 || b[7] != 0)
-        return false; /* ELFCLASS32, little endian, version 1, System V */
-    uint16_t type = u16(b + 16);
-    if ((type != 2 && type != 3) || u16(b + 18) != 3 || u32(b + 20) != 1 ||
-        u16(b + 40) != 52 || u16(b + 42) != 32 || u16(b + 44) != 1)
-        return false; /* Single segment static i386 executable only. */
-    uint32_t off = u32(b + 28);
-    if (off > n || n - off < 32)
+    uint32_t phoff = u32(b + 28), count = u16(b + 44), entry = u32(b + 24);
+    if (!count || count > LUNA_ELF_MAX_SEGMENTS ||
+        phoff > n || count * 32u > n - phoff)
         return false;
-    const uint8_t *ph = b + off;
-    if (u32(ph) != 1)
-        return false; /* PT_LOAD */
-    uint32_t source = u32(ph + 4), target = u32(ph + 8);
-    uint32_t file_size = u32(ph + 16), mem_size = u32(ph + 20);
-    uint32_t flags = u32(ph + 24), entry = u32(b + 24);
-    if (!(flags & 1) || (flags & 2) || /* RX only, never user-writable code */
-        file_size > mem_size ||
-        source > n || file_size > n - source ||
-        target >= LUNA_ELF_CODE_BYTES ||
-        mem_size > LUNA_ELF_CODE_BYTES - target ||
-        entry < target || entry - target >= mem_size)
+    memset(image, 0, sizeof(*image));
+    bool executable_entry = false;
+    for (uint32_t i = 0; i < count; i++) {
+        const uint8_t *p = b + phoff + i * 32u;
+        uint32_t type = u32(p);
+        if (type != 1) {
+            /* Permit only PT_NULL; reject interpreters and dynamic linking. */
+            if (type != 0)
+                return false;
+            continue;
+        }
+        uint32_t src = u32(p + 4), dest = u32(p + 8);
+        uint32_t file_size = u32(p + 16), mem_size = u32(p + 20);
+        uint32_t flags = u32(p + 24), align = u32(p + 28);
+        if (!mem_size || file_size > mem_size || src > n || file_size > n - src ||
+            dest >= LUNA_ELF_IMAGE_BYTES ||
+            mem_size > LUNA_ELF_IMAGE_BYTES - dest ||
+            !(flags & LUNA_ELF_READ) || (flags & ~7u) ||
+            ((flags & 3u) == 3u) ||
+            (align > LUNA_ELF_PAGE_BYTES) ||
+            (align > 1 && ((align & (align - 1u)) ||
+                           (dest & (align - 1u)) != (src & (align - 1u)))))
+            return false;
+        uint32_t first = dest / LUNA_ELF_PAGE_BYTES;
+        uint32_t last = (dest + mem_size - 1u) / LUNA_ELF_PAGE_BYTES;
+        for (uint32_t page = first; page <= last; page++) {
+            /* Shared pages between PT_LOADs would have ambiguous W^X policy. */
+            if (image->permissions[page])
+                return false;
+            image->permissions[page] = (uint8_t)flags;
+        }
+        if (file_size)
+            memcpy(image->memory + dest, b + src, file_size);
+        if ((flags & LUNA_ELF_EXEC) && file_size &&
+            entry >= dest && entry - dest < file_size)
+            executable_entry = true;
+        image->segments++;
+    }
+    if (!image->segments || !executable_entry)
         return false;
-    /* Reject executable with an empty segment or malformed entry point. */
-    if (!file_size || !mem_size)
-        return false;
-    memset(image->code, 0, sizeof(image->code));
-    memcpy(image->code + target, b + source, file_size);
     image->entry = entry;
     return true;
 }
