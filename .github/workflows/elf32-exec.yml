@@ -74,6 +74,7 @@ jobs:
           make luna-guest-execve-smoke
           make luna-guest-tcp-smoke
           make luna-guest-metadata-check
+          make luna-guest-runtime-smoke
       - name: Verify boot images exist
         run: |
           test -s dist/LunaOS.iso
