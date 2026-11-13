@@ -179,6 +179,7 @@ SPAWN_DATA = (ROOT / "build/guest/spawn-smoke.elf").read_bytes()
 EXECVE_DATA = (ROOT / "build/guest/execve-smoke.elf").read_bytes()
 TCP_DATA = (ROOT / "build/guest/tcp-smoke.elf").read_bytes()
 META_DATA = (ROOT / "build/guest/metadata-check.elf").read_bytes()
+RUNTIME_DATA = (ROOT / "build/guest/runtime-smoke.elf").read_bytes()
 assert len(Z_DATA) <= 16 * 1024 * 1024, "zlib guest ELF exceeds loader budget"
 assert len(C_DATA) <= 256 * 1024, "guest ELF exceeds loader file limit"
 
@@ -187,13 +188,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
-        data = (META_DATA if self.path.endswith("/metadata-check.elf") else
+        data = (RUNTIME_DATA if self.path.endswith("/runtime.elf") else
+                META_DATA if self.path.endswith("/metadata-check.elf") else
                 TCP_DATA if self.path.endswith("/tcp.elf") else
                 EXECVE_DATA if self.path.endswith("/execve.elf") else
                 SPAWN_DATA if self.path.endswith("/spawn.elf") else
                 Z_DATA if self.path.endswith("/zlib.elf") else
                 C_DATA if self.path.endswith("/c-hello.elf") else
-                MULTI_DATA if self.path.endswith("/multi.elf") else DATA)
+                MULTI_DATA if self.path.endswith("/multi.elf") else DATA))
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -268,6 +270,15 @@ try:
     assert "LUNA CHILD EXECUTE OK" in g.transcript, g.transcript[-4000:]
     assert "LUNA SPAWN WAIT OK" in g.transcript, g.transcript[-4000:]
     print("PASS: native child spawn/argv/env and waitpid exit-code forwarding in LunaOS", flush=True)
+
+    g.command(f"wget http://10.0.2.2:{port}/runtime.elf /tmp/runtime.elf", "Saved", timeout=30)
+    launched = g.command("elfrun /tmp/runtime.elf", "started ring-3 process")
+    match = re.search(r"started ring-3 process pid=(\d+)", launched)
+    assert match, launched
+    g.command("elfwait " + match.group(1), "exit code 0", timeout=40)
+    assert "LUNA HEAP AND IPC GUEST OK" in g.transcript, g.transcript[-4000:]
+    print("PASS: dynamic brk/malloc/free/realloc and blocking inherited-pipe child IPC", flush=True)
+
 
     g.command(f"wget http://10.0.2.2:{port}/execve.elf /tmp/execve.elf", "Saved", timeout=30)
     launched = g.command("elfrun /tmp/execve.elf", "started ring-3 process")
