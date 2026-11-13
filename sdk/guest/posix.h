@@ -28,6 +28,8 @@ int mkdir(const char *path, unsigned mode);
 int unlink(const char *path);
 int rename(const char *from, const char *to);
 int getpid(void);
+int pipe(int fds[2]); /* bounded 4096 B; returns -1 instead of blocking */
+int fsync(int fd); /* persists a LunaFS2 snapshot */
 int luna_stat(const char *path, LunaGuestStat *info);
 __attribute__((noreturn)) void _exit(int code);
 #endif
