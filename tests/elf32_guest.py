@@ -195,7 +195,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 SPAWN_DATA if self.path.endswith("/spawn.elf") else
                 Z_DATA if self.path.endswith("/zlib.elf") else
                 C_DATA if self.path.endswith("/c-hello.elf") else
-                MULTI_DATA if self.path.endswith("/multi.elf") else DATA))
+                MULTI_DATA if self.path.endswith("/multi.elf") else DATA)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
