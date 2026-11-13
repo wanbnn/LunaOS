@@ -56,6 +56,10 @@ int chmod(const char *path, unsigned mode) {
 int luna_utime(const char *path, uint32_t seconds) {
     return (int)call3(24, (unsigned)(uintptr_t)path, (unsigned)seconds, 0);
 }
+int luna_tcp_connect(const char *host, unsigned port, int verified_tls) {
+    return (int)call3(25, (unsigned)(uintptr_t)host, port,
+                      (unsigned)(verified_tls != 0));
+}
 __attribute__((noreturn)) void _exit(int code) {
     (void)call3(3, (unsigned)code, 0, 0);
     for (;;) { __asm__ volatile("pause"); }
