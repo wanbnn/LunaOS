@@ -524,7 +524,7 @@ ZLIB_LUNA_SRC := adler32 crc32 deflate infback inffast inflate inftrees trees zu
 ZLIB_LUNA_OBJ := $(addprefix build/zlib-guest/,$(addsuffix .o,$(ZLIB_LUNA_SRC)))
 build/zlib-guest/%.o: third_party/zlib/%.c
 	@mkdir -p build/zlib-guest
-	$(CC) -m32 -std=gnu11 -O2 -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -msoft-float -DZ_SOLO -Ithird_party/zlib -c $< -o $@
+	$(CC) -m32 -std=gnu11 -O2 -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -msoft-float -Ithird_party/zlib -c $< -o $@
 build/libz-luna.a: $(ZLIB_LUNA_OBJ)
 	ar rcs $@ $^
 .PHONY: luna-zlib-guest luna-guest-zlib-smoke
@@ -532,7 +532,7 @@ luna-zlib-guest: build/libz-luna.a
 luna-guest-zlib-smoke: build/guest/zlib-smoke.elf
 build/guest/zlib-smoke.elf: sdk/guest/zlib_smoke.c sdk/guest/memory.c sdk/guest/posix.h sdk/guest/luna32.ld build/guest/hello.elf build/libz-luna.a
 	@mkdir -p build/guest
-	$(CC) -m32 -std=gnu11 -Os -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -DZ_SOLO -Isdk/guest -Ithird_party/zlib -c sdk/guest/zlib_smoke.c -o build/guest/zlib_smoke.o
+	$(CC) -m32 -std=gnu11 -Os -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Isdk/guest -Ithird_party/zlib -c sdk/guest/zlib_smoke.c -o build/guest/zlib_smoke.o
 	$(CC) -m32 -std=gnu11 -Os -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Isdk/guest -c sdk/guest/memory.c -o build/guest/memory.o
 	$(LD) -m elf_i386 -T sdk/guest/luna32.ld --build-id=none -o $@ build/guest/crt0.o build/guest/zlib_smoke.o build/guest/posix.o build/guest/memory.o build/libz-luna.a
 	@file $@
