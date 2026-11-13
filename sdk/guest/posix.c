@@ -50,6 +50,12 @@ int luna_execve(const char *path, const char *const argv[], const char *const en
     return (int)call3(22, (unsigned)(uintptr_t)path,
                       (unsigned)(uintptr_t)argv, (unsigned)(uintptr_t)envp);
 }
+int chmod(const char *path, unsigned mode) {
+    return (int)call3(23, (unsigned)(uintptr_t)path, (unsigned)mode, 0);
+}
+int luna_utime(const char *path, uint32_t seconds) {
+    return (int)call3(24, (unsigned)(uintptr_t)path, (unsigned)seconds, 0);
+}
 __attribute__((noreturn)) void _exit(int code) {
     (void)call3(3, (unsigned)code, 0, 0);
     for (;;) { __asm__ volatile("pause"); }
