@@ -895,18 +895,32 @@ static TrapFrame *syscall(TrapFrame *f) {
                 f->eax = (uint32_t)-1;
                 break;
             }
-            /* A bounded, in-kernel ring buffer; no blocking semantics yet. */
-            uint32_t irq = drv_irq_save();
-            ExecPipe *p = &exec_pipes[id];
-            if (length > EXEC_PIPE_CAP - p->length) {
-                f->eax = (uint32_t)-1;
-            } else {
-                memcpy(p->buffer + p->length,
-                       (const void *)(uintptr_t)(USER_CODE + pos), length);
-                p->length += length;
-                f->eax = length;
+            /* Writes <= PIPE_BUF(4096) are atomic. Wait for space while
+             * readers remain open, with a bounded kernel wait budget. */
+            uint32_t began = frame_clock;
+            for (;;) {
+                uint32_t irq = drv_irq_save();
+                ExecPipe *p = &exec_pipes[id];
+                if (!p->used || !p->readers) {
+                    f->eax = (uint32_t)-1;
+                    drv_irq_restore(irq);
+                    break;
+                }
+                if (length <= EXEC_PIPE_CAP - p->length) {
+                    memcpy(p->buffer + p->length,
+                           (const void *)(uintptr_t)(USER_CODE + pos), length);
+                    p->length += length;
+                    f->eax = length;
+                    drv_irq_restore(irq);
+                    break;
+                }
+                drv_irq_restore(irq);
+                if (frame_clock - began >= 30000u) {
+                    f->eax=(uint32_t)-1;
+                    break;
+                }
+                task_sleep_ms(2);
             }
-            drv_irq_restore(irq);
             break;
         }
         const char *path = t->exec_fds[fd - 3].path;
@@ -987,18 +1001,31 @@ static TrapFrame *syscall(TrapFrame *f) {
                 f->eax = (uint32_t)-1;
                 break;
             }
-            uint32_t irq = drv_irq_save();
-            ExecPipe *p = &exec_pipes[id];
-            if (!p->length && p->writers) {
-                f->eax = (uint32_t)-1; /* Would block; no errno yet. */
-            } else {
-                size_t n = p->length < length ? p->length : length;
-                memcpy((void *)(uintptr_t)(USER_CODE + addr), p->buffer, n);
-                memmove(p->buffer, p->buffer + n, p->length - n);
-                p->length -= (uint32_t)n;
-                f->eax = (uint32_t)n;
+            uint32_t began=frame_clock;
+            for (;;) {
+                uint32_t irq=drv_irq_save();
+                ExecPipe *p=&exec_pipes[id];
+                if (!p->used) {
+                    f->eax=(uint32_t)-1;
+                    drv_irq_restore(irq);
+                    break;
+                }
+                if (p->length || !p->writers || !length) {
+                    size_t n=p->length < length ? p->length : length;
+                    memcpy((void *)(uintptr_t)(USER_CODE+addr),p->buffer,n);
+                    memmove(p->buffer,p->buffer+n,p->length-n);
+                    p->length-=(uint32_t)n;
+                    f->eax=(uint32_t)n; /* zero at EOF */
+                    drv_irq_restore(irq);
+                    break;
+                }
+                drv_irq_restore(irq);
+                if (frame_clock-began>=30000u) {
+                    f->eax=(uint32_t)-1;
+                    break;
+                }
+                task_sleep_ms(2);
             }
-            drv_irq_restore(irq);
             break;
         }
         File *file = fs_find(t->exec_fds[fd - 3].path);
