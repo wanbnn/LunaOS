@@ -39,7 +39,15 @@ bool luna_elf32_inspect(const uint8_t *b, size_t available,
         uint32_t src = u32(p + 4), dest = u32(p + 8);
         uint32_t file_size = u32(p + 16), mem_size = u32(p + 20);
         uint32_t flags = u32(p + 24), align = u32(p + 28);
-        if (!mem_size || file_size > mem_size ||
+        /* GNU ld may emit an empty RW PT_LOAD for a read-only binary.
+         * It has no pages to map and must not invalidate a valid text image.
+         * A zero-memory LOAD with nonzero file bytes remains invalid. */
+        if (!mem_size) {
+            if (file_size)
+                return false;
+            continue;
+        }
+        if (file_size > mem_size ||
             src > file_bytes || file_size > file_bytes - src ||
             dest >= LUNA_ELF_IMAGE_BYTES ||
             mem_size > LUNA_ELF_IMAGE_BYTES - dest ||
