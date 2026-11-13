@@ -116,6 +116,7 @@ extern int fs_file_capacity;
 typedef struct {
     char path[PATH_CAP];
     uint32_t used, size, dir;
+    uint32_t mode, mtime, ctime; /* LunaFS v3 persisted POSIX metadata, epoch seconds. */
     char *data; /* Optional owned text cache, NUL-terminated when present. */
     unsigned disk;
     uint64_t disk_offset; /* Backing bytes in the committed snapshot. */
@@ -142,6 +143,8 @@ bool fs_materialize(File *);
 bool fs_read_text(const File *, char *, size_t);
 int fs_copy(const char *, const char *);
 int fs_rename(const char *, const char *);
+int fs_chmod(const char *, uint32_t mode);
+int fs_set_mtime(const char *, uint32_t unix_seconds);
 bool fs_begin_write(const char *, bool, uint32_t);
 bool fs_write_part(const void *, size_t);
 bool fs_finish_write(void);
