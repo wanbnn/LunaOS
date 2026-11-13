@@ -17,6 +17,10 @@
 typedef struct {
     uint32_t size, mode, reserved, mtime, ctime;
 } LunaGuestStat;
+typedef struct {
+    uint32_t ino, mode, mtime;
+    char name[128];
+} LunaGuestDirent;
 long write(int fd, const void *buffer, size_t n);
 long read(int fd, void *buffer, size_t n);
 int open(const char *path, int flags, ...);
@@ -36,6 +40,8 @@ int luna_execve(const char *path, const char *const argv[], const char *const en
 int chmod(const char *path, unsigned mode);
 int luna_utime(const char *path, uint32_t unix_seconds);
 int luna_tcp_connect(const char *host, unsigned port, int verified_tls);
+int luna_opendir(const char *path); /* return fd >=3 */
+int luna_readdir(int fd, LunaGuestDirent *entry); /* 1 entry, 0 EOF, -1 error */
 /* Returns a guest fd; use read/write/close. Singleton TCP backend for now. */
 int luna_stat(const char *path, LunaGuestStat *info);
 __attribute__((noreturn)) void _exit(int code);
