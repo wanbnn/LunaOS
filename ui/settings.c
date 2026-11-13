@@ -493,8 +493,8 @@ void settings_drag(int x, int y, int width, int height) {
     if (slider >= 0)
         apply_slider(x, width);
 }
-void quick_draw(void) {
-    gfx_set_origin(W - GFX_BOOT_W, 0);
+void quick_draw(int y_offset) {
+    gfx_set_origin(W - GFX_BOOT_W, y_offset);
     glass(688, 58, 316, 448, 25, 1);
     text(710, 78, system_text("Control Center", "Central de controle"), 20, WHITE);
     char battery[64];
