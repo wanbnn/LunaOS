@@ -39,6 +39,13 @@ int rename(const char *from, const char *to) {
 int getpid(void) { return (int)call3(17, 0, 0, 0); }
 int pipe(int fds[2]) { return (int)call3(18, (unsigned)(uintptr_t)fds, 0, 0); }
 int fsync(int fd) { return (int)call3(19, (unsigned)fd, 0, 0); }
+int luna_spawn(const char *path, const char *const argv[], const char *const envp[]) {
+    return (int)call3(20, (unsigned)(uintptr_t)path,
+                      (unsigned)(uintptr_t)argv, (unsigned)(uintptr_t)envp);
+}
+int luna_waitpid(int pid, int *status, int options) {
+    return (int)call3(21, (unsigned)pid, (unsigned)(uintptr_t)status, (unsigned)options);
+}
 __attribute__((noreturn)) void _exit(int code) {
     (void)call3(3, (unsigned)code, 0, 0);
     for (;;) { __asm__ volatile("pause"); }
