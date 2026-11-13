@@ -43,6 +43,17 @@ int main(void) {
     w32(b + 76, 7); assert(!luna_elf32_load(b, 128, img));
     fixture(b, 128); w16(b + 44, 2); assert(!luna_elf32_load(b, 128, img));
 
+    /* An empty PT_LOAD from GNU ld must not prevent a read-only process. */
+    fixture(b, 128);
+    w16(b + 44, 2);
+    w32(b + 84, 1); w32(b + 88, 128); w32(b + 92, 0x2000);
+    w32(b + 100, 0); w32(b + 104, 0); w32(b + 108, 6);
+    w32(b + 112, 1);
+    assert(luna_elf32_load(b, 128, img));
+    assert(img->segments == 1);
+    w32(b + 100, 1);
+    assert(!luna_elf32_load(b, 128, img));
+
     /* Valid multisegment, >4 KiB input, RX and RW separate page mappings. */
     fixture(b, 10000);
     w16(b + 44, 2);
