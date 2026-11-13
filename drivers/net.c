@@ -112,6 +112,10 @@ static void time_network_poll(void);
 static void time_network_input(const uint8_t [4],const uint8_t *,unsigned);
 #define TCP_MSS 1460u
 #define TCP_RECEIVE_MIN 16384u
+/* Give large HTTPS bodies headroom without reserving it for ordinary requests. */
+#define TCP_BULK_RECEIVE_TARGET (256u * 1024u)
+#define TCP_WINDOW_UPDATE_MIN (2u * TCP_MSS)
+#define TCP_WINDOW_UPDATE_MAX (16u * TCP_MSS)
 #define TCP_UNSCALED_MAX 65535u
 #define TCP_RECEIVE_MAX (65535u << 14)
 #define TCP_PAWS_AGE_MS (24u * 24u * 60u * 60u * 1000u)
@@ -334,6 +338,11 @@ static void tcp_tune_receive(void) {
         quiet = 2000u;
     if (tcp.pending)
         return;
+    /* A streaming reader often drains the ring immediately. Low occupancy is
+     * not idleness: shrinking it during an active transfer constrains the
+     * advertised receive window and can induce avoidable sender stalls. */
+    if (tcp.receive_started && (uint32_t)(frame_clock - tcp.receive_last) < quiet)
+        return;
     unsigned minimum = 2u * (1u << tcp.scale_rx);
     if (minimum < TCP_RECEIVE_MIN)
         minimum = TCP_RECEIVE_MIN;
@@ -536,6 +545,16 @@ static void send_tcp(int flags, const char *data, unsigned n) {
     uint32_t s = be16(local_ip) + be16(local_ip + 2) + be16(tcp.ip) + be16(tcp.ip + 2) + 6 + header + n;
     put16(p + 16, sum(p, header + n, s));
     send_ip(tcp.ip, 6, p, header + n);
+}
+/* Reserve a larger TCP ring for long authenticated streams. This runs after
+ * the TCP/TLS connection has been established, so window scaling is known.
+ * If memory is scarce the existing receive buffer and window remain valid. */
+static void tcp_prepare_bulk_receive(void) {
+    if (tcp.state != 2) return;
+    unsigned previous = tcp.capacity;
+    tcp_grow(TCP_BULK_RECEIVE_TARGET);
+    if (tcp.capacity > previous)
+        send_tcp(0x10, NULL, 0); /* Announce additional credit to the peer. */
 }
 static void tcp_flush_ack(void) {
     if (tcp.ack_pending)
@@ -1526,7 +1545,14 @@ int stream_read(void *out, unsigned n) {
     tcp_tune_receive();
     unsigned window = tcp_window() >> tcp.scale_rx;
     unsigned granted = tcp_granted() >> tcp.scale_rx;
-    if (tcp.ack_pending || window > granted)
+    /* Window updates need not consume a Wi-Fi TX frame on every small read.
+     * Always reopen a zero window promptly; otherwise batch credit updates
+     * while preserving immediate ACKs already pending for received data. */
+    unsigned released = window > granted ? window - granted : 0;
+    unsigned threshold = tcp.capacity / 8u;
+    if (threshold < TCP_WINDOW_UPDATE_MIN) threshold = TCP_WINDOW_UPDATE_MIN;
+    if (threshold > TCP_WINDOW_UPDATE_MAX) threshold = TCP_WINDOW_UPDATE_MAX;
+    if (tcp.ack_pending || (released && (!granted || released >= threshold)))
         send_tcp(0x10, NULL, 0);
     return n;
 }
@@ -2177,6 +2203,7 @@ bool net_https_stream(const char *url, NetHttpsSink sink, void *context, uint64_
         bool secure = false;
         if (http_open(current, &secure, error, ecap) < 0 || !secure)
             goto done;
+        tcp_prepare_bulk_receive();
         static HttpInput update_https_input;
         update_https_input = (HttpInput){.read = download_read, .context = (void *)(uintptr_t)1};
         HttpReply reply;
