@@ -28,6 +28,7 @@
 #define USER_CODE 0x40000000u
 #define USER_STACK 0x40010000u
 #define USER_STACK_BYTES 16384u
+#define USER_ELF_STACK (USER_CODE + LUNA_ELF_STACK_OFFSET)
 #define SYS_HELLO 0
 #define SYS_WAIT_EVENT 1
 #define SYS_APP_EVENT 2
@@ -81,7 +82,8 @@ typedef struct {
     AppEvent delivered;
     bool event_pending, system, exec_image;
     uint8_t exec_permissions[LUNA_ELF_PAGES];
-    PmmAllocation exec_allocation;
+    PmmAllocation exec_allocation[LUNA_ELF_MAX_SEGMENTS];
+    uint32_t exec_segments, exec_physical_bytes;
     uint32_t parent_pid;
     char exec_cwd[128];
     struct { char path[128]; uint32_t offset, flags; bool open; } exec_fds[EXEC_FD_MAX];
