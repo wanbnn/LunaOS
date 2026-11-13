@@ -4,6 +4,8 @@ on:
     paths:
       - 'kernel/elf32.*'
       - 'kernel/task.*'
+      - 'kernel/fs.c'
+      - 'kernel/luna.h'
       - 'apps/shell.c'
       - 'tests/elf32.c'
       - 'tests/elf32_guest.py'
@@ -17,6 +19,8 @@ on:
     paths:
       - 'kernel/elf32.*'
       - 'kernel/task.*'
+      - 'kernel/fs.c'
+      - 'kernel/luna.h'
       - 'apps/shell.c'
       - 'tests/elf32.c'
       - 'tests/elf32_guest.py'
@@ -67,9 +71,14 @@ jobs:
           test -f third_party/zlib/zlib.h
           make luna-guest-zlib-smoke
           make luna-guest-spawn-smoke
+          make luna-guest-execve-smoke
+          make luna-guest-tcp-smoke
+          make luna-guest-metadata-check
       - name: Verify boot images exist
         run: |
           test -s dist/LunaOS.iso
           test -s dist/LunaOS.img
+      - name: Check QEMU smoke script syntax
+        run: python3 -m py_compile tests/elf32_guest.py
       - name: Execute ELF32 in QEMU ring 3 with open/read/write
         run: python3 tests/elf32_guest.py
