@@ -466,6 +466,49 @@ static void sample(void) {
     sample_stamp = now;
     sample_tick = ticks;
 }
+/* Userspace addresses are offsets under the USER_CODE segment base.
+ * The kernel cannot safely dereference holes in the PTE map. Validate all
+ * touched pages before copying any bytes (also protects supervisor code). */
+static bool exec_user_range(const Task *t, uint32_t off, uint32_t n, bool writable) {
+    if (!t->exec_image || t->ring != 3 || off >= 0x14000u || n > 0x14000u - off)
+        return false;
+    if (!n)
+        return true;
+    if (off >= 0x10000u)
+        return true; /* Existing private 16 KiB user stack. */
+    if (n > 0x10000u - off)
+        return false; /* Reject gaps and mixed code/stack ranges. */
+    uint32_t first = off >> 12, last = (off + n - 1u) >> 12;
+    for (uint32_t i = first; i <= last; i++)
+        if (!(t->exec_permissions[i] & LUNA_ELF_READ) ||
+            (writable && !(t->exec_permissions[i] & LUNA_ELF_WRITE)))
+            return false;
+    return true;
+}
+static bool exec_string(Task *t, uint32_t addr, char *out, size_t max) {
+    if (!max)
+        return false;
+    for (size_t i = 0; i < max; i++) {
+        if (!exec_user_range(t, addr, (uint32_t)(i + 1u), false))
+            return false;
+        char c = *(const char *)(uintptr_t)(USER_CODE + addr + (uint32_t)i);
+        out[i] = c;
+        if (!c)
+            return i > 0;
+    }
+    return false;
+}
+static bool exec_path(Task *t, const char *path, char out[PATH_CAP]) {
+    if (*path == '/')
+        return fs_path(path, out);
+    char joined[256];
+    if (strlen(t->exec_cwd) + strlen(path) + 2u > sizeof(joined))
+        return false;
+    strcpy(joined, t->exec_cwd);
+    strcat(joined, "/");
+    strcat(joined, path);
+    return fs_path(joined, out);
+}
 static TrapFrame *syscall(TrapFrame *f) {
     Task *t = task_current();
     unsigned call = f->eax;
@@ -516,105 +559,93 @@ static TrapFrame *syscall(TrapFrame *f) {
         finish(t, f->ebx);
         break;
     case SYS_EXEC_WRITE: {
-        /* stdout/stderr only, bounded access to the guest's code/stack.
-         * No implicit access to supervisor memory or other processes.
-         * EIP/ECX here are segment-relative user offsets. */
-        uint32_t pos = f->ecx, length = f->edx;
-        if (!t->exec_image || t->ring != 3 ||
-            (f->ebx != 1 && f->ebx != 2) || length > 256u ||
-            pos >= 0x14000u || length > 0x14000u - pos ||
-            !((pos < LUNA_ELF_CODE_BYTES && length <= LUNA_ELF_CODE_BYTES - pos) ||
-              (pos >= 0x10000u && length <= 0x14000u - pos))) {
+        uint32_t fd = f->ebx, pos = f->ecx, length = f->edx;
+        if (length > 4096u || !exec_user_range(t, pos, length, false)) {
             f->eax = (uint32_t)-1;
             break;
         }
-        char buffer[257];
-        memcpy(buffer, (const void *)(uintptr_t)(USER_CODE + pos), length);
-        buffer[length] = 0;
-        /* Reject embedded NUL until stream-safe terminal output exists. */
-        if (strlen(buffer) != length) {
+        if (fd == 1 || fd == 2) {
+            /* Terminal currently prints bounded text, not arbitrary binary. */
+            if (length > 256u) { f->eax = (uint32_t)-1; break; }
+            char buffer[257];
+            memcpy(buffer, (const void *)(uintptr_t)(USER_CODE + pos), length);
+            buffer[length] = 0;
+            if (strlen(buffer) != length) { f->eax = (uint32_t)-1; break; }
+            shell_print(buffer);
+            f->eax = length;
+            break;
+        }
+        if (fd < 3 || fd >= 3 + EXEC_FD_MAX ||
+            !t->exec_fds[fd - 3].open || !(t->exec_fds[fd - 3].flags & 3u)) {
             f->eax = (uint32_t)-1;
             break;
         }
-        shell_print(buffer);
+        const char *path = t->exec_fds[fd - 3].path;
+        File *file = fs_find(path);
+        if (!file || file->dir || t->exec_fds[fd - 3].offset != file->size ||
+            fs_write_bytes(path, (const void *)(uintptr_t)(USER_CODE + pos), length, true)) {
+            f->eax = (uint32_t)-1;
+            break;
+        }
+        t->exec_fds[fd - 3].offset += length;
         f->eax = length;
         break;
     }
     case SYS_EXEC_OPEN: {
-        /* ebx: segment-relative path pointer, ecx: flags (only O_RDONLY=0).
-         * Paths and descriptors live in the requesting task, never another. */
         uint32_t addr = f->ebx, flags = f->ecx;
-        if (!t->exec_image || t->ring != 3 || flags != 0 ||
-            !((addr < LUNA_ELF_CODE_BYTES) || (addr >= 0x10000u && addr < 0x14000u))) {
+        /* Linux i386 O_{RDONLY,WRONLY,RDWR,CREAT,TRUNC,APPEND} subset. */
+        if (flags & ~(3u | 64u | 512u | 1024u) || (flags & 3u) == 3u ||
+            ((flags & 3u) && !(flags & (512u | 1024u))) ||
+            ((flags & (64u | 512u | 1024u)) && !(flags & 3u))) {
             f->eax = (uint32_t)-1;
             break;
         }
-        uint32_t limit = addr < LUNA_ELF_CODE_BYTES ? LUNA_ELF_CODE_BYTES : 0x14000u;
-        char pathname[128];
-        unsigned n = 0;
-        const char *src = (const char *)(uintptr_t)(USER_CODE + addr);
-        while (addr + n < limit && n < sizeof(pathname) - 1u && src[n]) {
-            pathname[n] = src[n];
-            n++;
-        }
-        if (addr + n == limit || n == sizeof(pathname) - 1u || !n ||
-            src[n] != 0) {
+        char raw[PATH_CAP], path[PATH_CAP];
+        if (!exec_string(t, addr, raw, sizeof(raw)) || !exec_path(t, raw, path)) {
             f->eax = (uint32_t)-1;
             break;
         }
-        pathname[n] = 0;
-        File *file = fs_find(pathname);
-        if (!file || file->dir) {
+        File *file = fs_find(path);
+        if ((!file && !(flags & 64u)) || (file && file->dir)) {
             f->eax = (uint32_t)-1;
             break;
         }
-        char canonical[PATH_CAP];
-        if (!fs_path(pathname, canonical)) {
-            f->eax = (uint32_t)-1;
-            break;
-        }
-        unsigned slot;
-        for (slot = 0; slot < EXEC_FD_MAX; slot++)
+        unsigned slot = 0;
+        for (; slot < EXEC_FD_MAX; slot++)
             if (!t->exec_fds[slot].open)
                 break;
-        if (slot == EXEC_FD_MAX) {
-            f->eax = (uint32_t)-1;
-            break;
+        if (slot == EXEC_FD_MAX) { f->eax = (uint32_t)-1; break; }
+        if ((flags & 512u) || (!file && (flags & 64u))) {
+            if (fs_write_bytes(path, "", 0, false)) {
+                f->eax = (uint32_t)-1; break;
+            }
+            file = fs_find(path);
         }
-        strcpy(t->exec_fds[slot].path, canonical);
-        t->exec_fds[slot].offset = 0;
+        if (!file) { f->eax = (uint32_t)-1; break; }
+        strcpy(t->exec_fds[slot].path, path);
+        t->exec_fds[slot].offset = (flags & 1024u) ? file->size : 0;
+        t->exec_fds[slot].flags = flags;
         t->exec_fds[slot].open = true;
-        f->eax = slot + 3;
+        f->eax = slot + 3u;
         break;
     }
     case SYS_EXEC_READ: {
-        /* ebx: fd >=3, ecx: writable stack offset, edx: count <=4096.
-         * User code page is read-only and is never a valid read destination. */
         uint32_t fd = f->ebx, addr = f->ecx, length = f->edx;
-        if (!t->exec_image || t->ring != 3 ||
+        if (length > 4096u || !exec_user_range(t, addr, length, true) ||
             fd < 3 || fd >= 3 + EXEC_FD_MAX ||
             !t->exec_fds[fd - 3].open ||
-            addr < 0x10000u || addr >= 0x14000u ||
-            length > 4096u || length > 0x14000u - addr) {
+            (t->exec_fds[fd - 3].flags & 3u) == 1u) {
             f->eax = (uint32_t)-1;
             break;
         }
         File *file = fs_find(t->exec_fds[fd - 3].path);
-        if (!file || file->dir) {
-            f->eax = (uint32_t)-1;
-            break;
-        }
+        if (!file || file->dir) { f->eax = (uint32_t)-1; break; }
         uint32_t offset = t->exec_fds[fd - 3].offset;
-        if (offset > file->size) {
-            f->eax = (uint32_t)-1;
-            break;
-        }
+        if (offset > file->size) { f->eax = (uint32_t)-1; break; }
         size_t amount = file->size - offset;
-        if (amount > length)
-            amount = length;
+        if (amount > length) amount = length;
         if (amount && !fs_read_bytes(file, offset, (void *)(uintptr_t)(USER_CODE + addr), amount)) {
-            f->eax = (uint32_t)-1;
-            break;
+            f->eax = (uint32_t)-1; break;
         }
         t->exec_fds[fd - 3].offset = offset + (uint32_t)amount;
         f->eax = (uint32_t)amount;
@@ -624,15 +655,90 @@ static TrapFrame *syscall(TrapFrame *f) {
         uint32_t fd = f->ebx;
         if (!t->exec_image || t->ring != 3 || fd < 3 || fd >= 3 + EXEC_FD_MAX ||
             !t->exec_fds[fd - 3].open) {
-            f->eax = (uint32_t)-1;
-            break;
+            f->eax = (uint32_t)-1; break;
         }
-        t->exec_fds[fd - 3].open = false;
-        t->exec_fds[fd - 3].path[0] = 0;
-        t->exec_fds[fd - 3].offset = 0;
+        memset(&t->exec_fds[fd - 3], 0, sizeof(t->exec_fds[0]));
         f->eax = 0;
         break;
     }
+    case SYS_EXEC_LSEEK: {
+        uint32_t fd = f->ebx, whence = f->edx;
+        int32_t delta = (int32_t)f->ecx;
+        if (!t->exec_image || fd < 3 || fd >= 3 + EXEC_FD_MAX ||
+            !t->exec_fds[fd - 3].open || whence > 2u) {
+            f->eax = (uint32_t)-1; break;
+        }
+        File *file = fs_find(t->exec_fds[fd - 3].path);
+        if (!file || file->dir) { f->eax = (uint32_t)-1; break; }
+        int64_t base = whence == 0u ? 0 : whence == 1u ?
+            t->exec_fds[fd - 3].offset : file->size;
+        int64_t wanted = base + delta;
+        if (wanted < 0 || wanted > INT32_MAX ||
+            ((t->exec_fds[fd - 3].flags & 3u) && (uint32_t)wanted != file->size)) {
+            f->eax = (uint32_t)-1; break;
+        }
+        t->exec_fds[fd - 3].offset = (uint32_t)wanted;
+        f->eax = (uint32_t)wanted;
+        break;
+    }
+    case SYS_EXEC_STAT: {
+        char raw[PATH_CAP], path[PATH_CAP];
+        uint32_t addr = f->ecx; /* ebx: NUL path; ecx: writable stat buffer */
+        if (!exec_string(t, f->ebx, raw, sizeof(raw)) ||
+            !exec_path(t, raw, path) || !exec_user_range(t, addr, 12u, true)) {
+            f->eax = (uint32_t)-1; break;
+        }
+        File *file = fs_find(path);
+        if (!file) { f->eax = (uint32_t)-1; break; }
+        uint32_t value[3] = {file->size, file->dir ? 0040755u : 0100644u, 0};
+        memcpy((void *)(uintptr_t)(USER_CODE + addr), value, sizeof(value));
+        f->eax = 0;
+        break;
+    }
+    case SYS_EXEC_CHDIR: {
+        char raw[PATH_CAP], path[PATH_CAP];
+        if (!exec_string(t, f->ebx, raw, sizeof(raw)) || !exec_path(t, raw, path)) {
+            f->eax = (uint32_t)-1; break;
+        }
+        File *file = fs_find(path);
+        if (!file || !file->dir) { f->eax = (uint32_t)-1; break; }
+        strcpy(t->exec_cwd, path);
+        f->eax = 0;
+        break;
+    }
+    case SYS_EXEC_GETCWD: {
+        uint32_t addr = f->ebx, capacity = f->ecx;
+        size_t len = strlen(t->exec_cwd) + 1u;
+        if (!capacity || len > capacity || !exec_user_range(t, addr, (uint32_t)len, true)) {
+            f->eax = (uint32_t)-1; break;
+        }
+        memcpy((void *)(uintptr_t)(USER_CODE + addr), t->exec_cwd, len);
+        f->eax = addr;
+        break;
+    }
+    case SYS_EXEC_MKDIR:
+    case SYS_EXEC_UNLINK: {
+        char raw[PATH_CAP], path[PATH_CAP];
+        if (!exec_string(t, f->ebx, raw, sizeof(raw)) || !exec_path(t, raw, path)) {
+            f->eax = (uint32_t)-1; break;
+        }
+        int rc = call == SYS_EXEC_MKDIR ? fs_create(path, true) : fs_remove(path);
+        f->eax = rc ? (uint32_t)-1 : 0;
+        break;
+    }
+    case SYS_EXEC_RENAME: {
+        char raw1[PATH_CAP], raw2[PATH_CAP], path1[PATH_CAP], path2[PATH_CAP];
+        if (!exec_string(t, f->ebx, raw1, sizeof(raw1)) ||
+            !exec_string(t, f->ecx, raw2, sizeof(raw2)) ||
+            !exec_path(t, raw1, path1) || !exec_path(t, raw2, path2)) {
+            f->eax = (uint32_t)-1; break;
+        }
+        f->eax = fs_rename(path1, path2) ? (uint32_t)-1 : 0;
+        break;
+    }
+    case SYS_EXEC_GETPID:
+        f->eax = t->exec_image ? t->pid : (uint32_t)-1;
+        break;
     case SYS_SYSTEM:
         f->eax = (uint32_t)-1;
         break;
