@@ -209,7 +209,7 @@ void task_init(void) {
     serial_write("Tasks: paging / TSS / CPL 0,1,2,3 / int80 / private stacks\n");
 }
 static uint32_t spawn(int app, const char *name, unsigned ring, unsigned probe,
-                      void (*service)(void)) {
+                      void (*service)(void), bool defer_start) {
     if (!initialized || ring < 1 || ring > 3 || app >= APP_COUNT)
         return 0;
     int slot;
@@ -259,13 +259,13 @@ static uint32_t spawn(int app, const char *name, unsigned ring, unsigned probe,
     t->frame->eflags = 0x202;
     t->frame->useresp = USER_STACK + USER_STACK_BYTES - USER_CODE - 16;
     t->frame->eax = probe;
-    t->state = TASK_READY;
+    t->state = defer_start ? TASK_WAITING : TASK_READY;
     if (!service)
         gui_damage_all();
     return t->pid;
 }
 uint32_t task_spawn(int app, const char *name, unsigned ring, unsigned probe) {
-    return spawn(app, name, ring, probe, NULL);
+    return spawn(app, name, ring, probe, NULL, false);
 }
 /* Restricted i386 user-mode loader; separate physical pages per process.
  * A GDT base at USER_CODE makes all guest pointers segment-relative. */
@@ -348,7 +348,7 @@ uint32_t task_spawn_elf_args(const char *path, int argc, const char *const argv[
     char parent_cwd[PATH_CAP];
     Task *parent = task_current();
     strcpy(parent_cwd, parent->exec_image ? parent->exec_cwd : cwd);
-    uint32_t pid = spawn(-1, "ELF32 native user process", 3, 0, NULL);
+    uint32_t pid = spawn(-1, "ELF32 native user process", 3, 0, NULL, true);
     if (!pid)
         goto fail_load;
     Task *t = task_by_pid(pid);
@@ -397,7 +397,29 @@ uint32_t task_spawn_elf_args(const char *path, int argc, const char *const argv[
     t->parent_pid = parent_pid;
     strcpy(t->exec_cwd, parent_cwd);
     t->exec_image = true;
+    /* POSIX-like descriptor inheritance for regular files and pipes.
+     * Guest network descriptors are not inherited: the underlying driver
+     * is still a single host-wide TCP transport, not a cloneable socket. */
+    if (parent->exec_image) {
+        uint32_t irq=drv_irq_save();
+        for (unsigned i=0;i<EXEC_FD_MAX;i++) {
+            if (!parent->exec_fds[i].open) continue;
+            unsigned kind=parent->exec_fds[i].kind;
+            if (kind==3u || kind==4u) continue;
+            t->exec_fds[i]=parent->exec_fds[i];
+            if ((kind==1u || kind==2u) &&
+                t->exec_fds[i].pipe_id<EXEC_PIPE_COUNT) {
+                ExecPipe *p=&exec_pipes[t->exec_fds[i].pipe_id];
+                if (p->used) {
+                    if (kind==1u) p->readers++;
+                    else p->writers++;
+                } else t->exec_fds[i].open=false;
+            }
+        }
+        drv_irq_restore(irq);
+    }
     heap_release(image);
+    t->state=TASK_READY; /* child cannot run until mappings/argv/FDs exist */
     return pid;
 fail_load:
     for (unsigned i = 0; i < LUNA_ELF_MAX_SEGMENTS; i++)
@@ -555,7 +577,7 @@ bool task_wait_elf(uint32_t pid, uint32_t timeout_ms, unsigned *exit_code) {
     }
 }
 uint32_t task_spawn_service(const char *name, void (*service)(void)) {
-    return spawn(-1, name, 3, 0, service);
+    return spawn(-1, name, 3, 0, service, false);
 }
 bool task_post(uint32_t pid, AppEvent e) {
     Task *t = task_by_pid(pid);
