@@ -18,6 +18,7 @@ extra = {
     "QuickJS.txt": "third_party/quickjs/LICENSE",
     "BearSSL.txt": "third_party/bearssl/LICENSE.txt",
     "Musl.txt": "third_party/musl/COPYRIGHT",
+    "zlib.txt": "third_party/zlib/LICENSE",
     "GCC-Runtime-Exception.txt": "assets/licenses/GCC-Runtime-Exception.txt",
     "GCC-GPL3.txt": "assets/licenses/GPL-3.txt",
 }
