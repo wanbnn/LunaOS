@@ -954,14 +954,16 @@ static TrapFrame *syscall(TrapFrame *f) {
     }
     case SYS_EXEC_STAT: {
         char raw[PATH_CAP], path[PATH_CAP];
-        uint32_t addr = f->ecx; /* ebx: NUL path; ecx: writable stat buffer */
+        uint32_t addr = f->ecx; /* ebx: NUL path; ecx: 20-byte LunaGuestStat */
         if (!exec_string(t, f->ebx, raw, sizeof(raw)) ||
-            !exec_path(t, raw, path) || !exec_user_range(t, addr, 12u, true)) {
+            !exec_path(t, raw, path) || !exec_user_range(t, addr, 20u, true)) {
             f->eax = (uint32_t)-1; break;
         }
         File *file = fs_find(path);
         if (!file) { f->eax = (uint32_t)-1; break; }
-        uint32_t value[3] = {file->size, file->dir ? 0040755u : 0100644u, 0};
+        uint32_t value[5] = {file->size,
+                             file->mode ? file->mode : (file->dir ? 0040755u : 0100644u),
+                             0, file->mtime, file->ctime};
         memcpy((void *)(uintptr_t)(USER_CODE + addr), value, sizeof(value));
         f->eax = 0;
         break;
@@ -1066,6 +1068,18 @@ static TrapFrame *syscall(TrapFrame *f) {
         }
         uint32_t pid = task_spawn_elf_args(path, argc, arg_vector, envc, env_vector);
         f->eax = pid ? pid : (uint32_t)-1;
+        break;
+    }
+    case SYS_EXEC_CHMOD:
+    case SYS_EXEC_UTIME: {
+        char raw[PATH_CAP], path[PATH_CAP];
+        if (!exec_string(t, f->ebx, raw, sizeof(raw)) ||
+            !exec_path(t, raw, path)) {
+            f->eax = (uint32_t)-1; break;
+        }
+        f->eax = (call == SYS_EXEC_CHMOD ?
+                  fs_chmod(path, f->ecx) : fs_set_mtime(path, f->ecx))
+                     ? (uint32_t)-1 : 0u;
         break;
     }
     case SYS_EXEC_EXECVE: {
