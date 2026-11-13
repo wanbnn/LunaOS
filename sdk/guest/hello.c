@@ -29,6 +29,11 @@ int main(int argc, char **argv, char **envp) {
         return 46;
     if (rename("/tmp/guest-c-before.txt", "/tmp/guest-c-after.txt"))
         return 47;
+    /* An explicit second fsync commits the directory rename too, so the
+     * new name must remain accessible after a guest reboot. */
+    fd = open("/tmp/guest-c-after.txt", LUNA_O_RDONLY);
+    if (fd < 0 || fsync(fd) || close(fd))
+        return 57;
     LunaGuestStat st;
     if (luna_stat("/tmp/guest-c-after.txt", &st) || st.size != sizeof(payload) - 1u)
         return 48;
