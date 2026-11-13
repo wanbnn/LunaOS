@@ -33,7 +33,7 @@ int main(int argc, char **argv, char **envp) {
         if(grown[i]!=(unsigned char)(i&255u))return 135;
     free(grown);
     void *reused=malloc(64u*1024u);
-    if(!reused || reused!=(void *)grown)return 136;
+    if(!reused || reused!=(void *)buf)return 136;
     free(reused);
     unsigned char *zero=calloc(8192u,8u);
     if(!zero)return 137;
