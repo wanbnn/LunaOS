@@ -48,12 +48,12 @@ def sample_elf() -> bytes:
     mov(1, 0)
     call(7)
     code.extend(b"\x89\xc3")       # fd -> ebx
-    mov(1, 0x10000)                # ecx -> writable user stack
+    mov(1, 0x810000)                # ecx -> writable user stack
     mov(2, 24)
     call(8)                        # read(fd, stack, 24), result in eax
     code.extend(b"\x89\xc2")       # bytes -> edx
     mov(3, 1)
-    mov(1, 0x10000)
+    mov(1, 0x810000)
     call(6)
     mov(0, 3)
     code.extend(b"\x31\xdb\xcd\x80") # exit(0)
@@ -74,7 +74,7 @@ def sample_elf() -> bytes:
 
 
 def sample_large_multisegment_elf() -> bytes:
-    """Two PT_LOADs (8 KiB RX / 4 KiB RW), >12 KiB ELF and user argv/envp."""
+    """Two PT_LOADs in different PDEs, sparse >5 MiB VA and user argv/envp."""
     code = bytearray()
     data = bytearray()
     labels = {}
@@ -86,7 +86,7 @@ def sample_large_multisegment_elf() -> bytes:
         mov(0, no)
         code.extend(b"\xcd\x80")
     def dword(text: bytes):
-        offset = 0x4000 + len(data)
+        offset = 0x500000 + len(data)
         data.extend(text)
         return offset
     def jne_fail():
@@ -118,12 +118,12 @@ def sample_large_multisegment_elf() -> bytes:
     mov(1, 0)
     sys(7)
     code.extend(b"\x89\xc3")             # mov ebx,eax (fd)
-    mov(1, 0x10000)
+    mov(1, 0x810000)
     mov(2, 24)
     sys(8)
     code.extend(b"\x89\xc2")             # mov edx,eax (length)
     mov(3, 1)
-    mov(1, 0x10000)
+    mov(1, 0x810000)
     sys(6)
 
     # O_WRONLY|O_CREAT|O_TRUNC = 1|64|512 = 577.
@@ -160,7 +160,7 @@ def sample_large_multisegment_elf() -> bytes:
         2, 3, 1, 0, 52, 0, 0, 52, 32, 2, 0, 0, 0
     )
     ph0 = struct.pack("<IIIIIIII", 1, 4096, 0, 0, len(code), 8192, 5, 4096)
-    ph1 = struct.pack("<IIIIIIII", 1, 12288, 0x4000, 0x4000,
+    ph1 = struct.pack("<IIIIIIII", 1, 12288, 0x500000, 0x500000,
                       len(data), 4096, 6, 4096)
     image = bytearray(12288 + len(data))
     image[:len(ehdr)] = ehdr
@@ -212,7 +212,7 @@ try:
     g.command("elfwait " + match.group(1), "exit code 0", timeout=25)
     assert "ARGV ENV MULTISEG OK" in g.transcript, g.transcript[-3000:]
     g.command("cat /tmp/luna-elf-created.txt", "WRITTEN BY NATIVE RING3")
-    print("PASS: multisegment ELF32 >12 KiB, argc/argv/envp, writable pages, open/read/write/rename, child wait", flush=True)
+    print("PASS: sparse >5 MiB guest VA, multi-PDE ELF32, argv/envp, open/read/write/rename, child wait", flush=True)
     g.command(f"wget http://10.0.2.2:{port}/c-hello.elf /tmp/c-hello.elf", "Saved", timeout=30)
     launched = g.command("elfrun /tmp/c-hello.elf Apple Banana", "started ring-3 process")
     match = re.search(r"started ring-3 process pid=(\d+)", launched)
