@@ -34,9 +34,16 @@ int main(int argc, char **argv, char **envp) {
     fd = open("/tmp/guest-c-after.txt", LUNA_O_RDONLY);
     if (fd < 0 || fsync(fd) || close(fd))
         return 57;
+    if (chmod("/tmp/guest-c-after.txt", 0755u) ||
+        luna_utime("/tmp/guest-c-after.txt", 1735689600u))
+        return 58;
     LunaGuestStat st;
-    if (luna_stat("/tmp/guest-c-after.txt", &st) || st.size != sizeof(payload) - 1u)
+    if (luna_stat("/tmp/guest-c-after.txt", &st) || st.size != sizeof(payload) - 1u ||
+        st.mode != 0100755u || st.mtime != 1735689600u)
         return 48;
+    fd = open("/tmp/guest-c-after.txt", LUNA_O_RDONLY);
+    if (fd < 0 || fsync(fd) || close(fd))
+        return 59;
     char cwd[128];
     if (!getcwd(cwd, sizeof(cwd)) || cwd[0] != '/')
         return 49;
