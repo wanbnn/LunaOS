@@ -23,7 +23,9 @@ static uint32_t large_surface[GFX_MAX_W * GFX_MAX_H];
 static int large_owner = -1;
 /* Display-only Y offsets. The canonical Window geometry never changes during an animation. */
 static int motion_y[APP_COUNT];
-_Static_assert(APP_COUNT == MOTION_CHANNELS, "one motion channel per app");
+/* Separate animation channels for app launcher and Control Center. */
+static int overlay_y[2];
+_Static_assert(APP_COUNT + 2 == MOTION_CHANNELS, "motion slots for apps and overlays");
 static bool surface_valid[APP_COUNT], surface_focus[APP_COUNT];
 static bool browser_viewport_dirty;
 static bool launcher_open;
@@ -114,13 +116,14 @@ static void damage_tooltip(int app) {
 }
 static void damage_launcher(void) {
     int ox = (W - GFX_BOOT_W) / 2;
-    gui_damage(ox + 236, 40, 552, 96 + APP_COUNT * 48 + 20);
+    gui_damage(ox + 236, 18 + overlay_y[0], 552, 140 + APP_COUNT * 48);
 }
 void gui_damage_quick(void) {
     int ox = W - GFX_BOOT_W;
     if (ox < 0)
         ox = 0;
-    gui_damage(ox + 676, 46, 340, 484);
+    /* Cover the sliding panel, including its full shadow. */
+    gui_damage(ox + 676, 18, 340, 516);
 }
 static void damage_switch(void) {
     gui_damage((W - 468) / 2 - 10, H - 218, 488, 96);
@@ -134,14 +137,21 @@ static void damage_window_at(int app, int dy) {
 static void damage_window(int app) {
     damage_window_at(app, motion_y[app]);
 }
-static void transition_begin(int app, int offset, unsigned duration) {
+static void transition_begin(int app, int offset, MotionRecipe recipe) {
     Window *w = &windows[app];
     if (!w->open || w->minimized)
         return;
     damage_window(app);
-    motion_begin(app, frame_clock, offset, 0, duration);
+    motion_begin_recipe(app, frame_clock, offset, 0, recipe);
     motion_y[app] = offset;
     damage_window(app);
+}
+static void overlay_enter(int kind, int offset, MotionRecipe recipe) {
+    if (kind < 0 || kind > 1)
+        return;
+    motion_cancel(APP_COUNT + kind);
+    overlay_y[kind] = offset;
+    motion_begin_recipe(APP_COUNT + kind, frame_clock, offset, 0, recipe);
 }
 static void damage_titlebar(int app) {
     Window *w = &windows[app];
@@ -228,9 +238,9 @@ void window_focus(int app) {
     damage_titlebar(app);
     damage_dock();
     if (restored)
-        transition_begin(app, 28, 180);
+        transition_begin(app, 28, MOTION_RECIPE_WINDOW_RESTORE);
     else if (previous >= 0 && previous != app)
-        transition_begin(app, 10, 130);
+        transition_begin(app, 10, MOTION_RECIPE_WINDOW_FOCUS);
 }
 void gui_task_closed(int app) {
     if (app < 0 || app >= APP_COUNT)
@@ -298,6 +308,7 @@ static void fit_window(Window *w) {
 void gui_display_changed(void) {
     motion_reset();
     memset(motion_y, 0, sizeof(motion_y));
+    memset(overlay_y, 0, sizeof(overlay_y));
     for (int i = 0; i < APP_COUNT; i++) {
         if (windows[i].open)
             fit_window(&windows[i]);
@@ -370,7 +381,7 @@ void gui_open(int app) {
     }
     window_focus(app);
     if (created)
-        transition_begin(app, 28, 180);
+        transition_begin(app, 28, MOTION_RECIPE_WINDOW_ENTER);
     damage_dock();
 }
 void gui_focus_home(void) {
@@ -384,6 +395,10 @@ void gui_focus_home(void) {
     }
     active_app = -1;
     controls_open = false;
+    launcher_open = false;
+    motion_cancel(APP_COUNT);
+    motion_cancel(APP_COUNT + 1);
+    overlay_y[0] = overlay_y[1] = 0;
     gui_damage_all();
 }
 void gui_serial(int c) {
@@ -475,7 +490,15 @@ void gui_key(int key) {
     }
     if (code == KEY_SUPER) {
         launcher_open = !launcher_open;
+        if (launcher_open)
+            overlay_enter(0, -18, MOTION_RECIPE_MENU_DROPDOWN);
+        else {
+            motion_cancel(APP_COUNT);
+            overlay_y[0] = 0;
+        }
         controls_open = false;
+        motion_cancel(APP_COUNT + 1);
+        overlay_y[1] = 0;
         launcher_query[0] = 0;
         launcher_selected = 0;
         damage_launcher();
@@ -523,7 +546,7 @@ void gui_key(int key) {
         task_post(windows[active_app].pid, (AppEvent){EVENT_KEY, key & ~MOD_SHIFT, 0});
 }
 static void launcher_draw(void) {
-    gfx_set_origin((W - GFX_BOOT_W) / 2, 0);
+    gfx_set_origin((W - GFX_BOOT_W) / 2, overlay_y[0]);
     glass(252, 57, 520, 49, 24, 1);
     icon(270, 69, ICON_SEARCH, 24, 0xffffff);
     text(310, 70, *launcher_query ? launcher_query : "Type to search apps...", 16, 0xe3efff);
@@ -760,7 +783,7 @@ static void paint_region(int rx, int ry, int rw, int rh, int first) {
     if (damage_overlap(region, (Damage){dock_left() - 70, dock_top() - 46, 678, 146}))
         dock();
     if (controls_open)
-        quick_draw();
+        quick_draw(overlay_y[1]);
     if (launcher_open)
         launcher_draw();
     gfx_set_origin(0, 0);
@@ -810,6 +833,34 @@ void gui_motion_poll(void) {
         if (!motion_active(app, now)) {
             motion_cancel(app);
             motion_y[app] = 0;
+        }
+    }
+    /* Repaint only the old and new overlay footprints while they move. */
+    for (int kind = 0; kind < 2; kind++) {
+        bool visible = kind == 0 ? launcher_open : controls_open;
+        int channel = APP_COUNT + kind;
+        if (!visible) {
+            motion_cancel(channel);
+            overlay_y[kind] = 0;
+            continue;
+        }
+        if (!motion_active(channel, now) && !overlay_y[kind])
+            continue;
+        int next = motion_value(channel, now);
+        if (next != overlay_y[kind]) {
+            if (kind == 0)
+                damage_launcher();
+            else
+                gui_damage_quick();
+            overlay_y[kind] = next;
+            if (kind == 0)
+                damage_launcher();
+            else
+                gui_damage_quick();
+        }
+        if (!motion_active(channel, now)) {
+            motion_cancel(channel);
+            overlay_y[kind] = 0;
         }
     }
     /* A reusable eight-dot busy indicator for clients with nonblocking work.
@@ -932,11 +983,11 @@ void gui_pointer(int x, int y, int buttons) {
     }
     previous_buttons = buttons;
     if (controls_open && (buttons & 1)) {
-        quick_pointer(x, y, pressed, false);
+        quick_pointer(x, y - overlay_y[1], pressed, false);
         return;
     }
     if (controls_open && !(buttons & 1))
-        quick_pointer(x, y, false, true);
+        quick_pointer(x, y - overlay_y[1], false, true);
     if (!pressed && drag < 0 && (buttons & 1) && active_app == APP_SETTINGS)
         task_post(windows[APP_SETTINGS].pid,
                   (AppEvent){EVENT_DRAG, x - windows[APP_SETTINGS].x - 20,
@@ -947,8 +998,8 @@ void gui_pointer(int x, int y, int buttons) {
     if (launcher_open) {
         x -= (W - GFX_BOOT_W) / 2;
         int found[APP_COUNT], n = launcher_results(found);
-        if (hit(x, y, 252, 125, 520, n * 48)) {
-            int row = (y - 125) / 48;
+        if (hit(x, y - overlay_y[0], 252, 125, 520, n * 48)) {
+            int row = (y - overlay_y[0] - 125) / 48;
             if (row < n)
                 gui_open(found[row]);
         }
@@ -958,7 +1009,7 @@ void gui_pointer(int x, int y, int buttons) {
         return;
     }
     if (controls_open) {
-        if (!quick_click(x, y))
+        if (!quick_click(x, y - overlay_y[1]))
             controls_open = false;
         gui_damage_quick();
         return;
@@ -971,6 +1022,12 @@ void gui_pointer(int x, int y, int buttons) {
     }
     if (hit(x, y, W - 195, 8, 48, 36)) {
         controls_open = !controls_open;
+        if (controls_open)
+            overlay_enter(1, -22, MOTION_RECIPE_PANEL_REVEAL);
+        else {
+            motion_cancel(APP_COUNT + 1);
+            overlay_y[1] = 0;
+        }
         gui_damage_quick();
         return;
     }
