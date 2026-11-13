@@ -54,6 +54,7 @@
 #define SYS_EXEC_EXECVE 22 /* Replace current process image, preserve PID and open FDs. */
 #define SYS_EXEC_CHMOD 23 /* Persist 0777 permission bits, no enforcement yet. */
 #define SYS_EXEC_UTIME 24 /* Persist file mtime (epoch seconds). */
+#define SYS_EXEC_TCP_CONNECT 25 /* Exclusive outbound IPv4 TCP/TLS socket. */
 #define EXEC_FD_MAX 8
 /* Saved by the common interrupt entry; useresp/ss exist only on privilege transitions. */
 typedef struct {
