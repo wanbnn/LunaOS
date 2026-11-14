@@ -117,6 +117,7 @@ typedef struct {
     char path[PATH_CAP];
     uint32_t used, size, dir;
     uint32_t mode, mtime, ctime; /* LunaFS v3 persisted POSIX metadata, epoch seconds. */
+    bool readonly; /* Borrowed immutable system payload; excluded from snapshots. */
     char *data; /* Optional owned text cache, NUL-terminated when present. */
     unsigned disk;
     uint64_t disk_offset; /* Backing bytes in the committed snapshot. */
@@ -139,6 +140,7 @@ int fs_remove(const char *);
 int fs_write(const char *, const char *, bool);
 int fs_write_bytes(const char *, const void *, size_t, bool);
 int fs_write_at(const char *, const void *, size_t, uint32_t);
+int fs_mount_readonly(const char *, const void *, uint32_t, uint32_t);
 bool fs_read_bytes(const File *, uint32_t, void *, size_t);
 bool fs_materialize(File *);
 bool fs_read_text(const File *, char *, size_t);

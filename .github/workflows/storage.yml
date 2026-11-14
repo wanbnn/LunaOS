@@ -54,7 +54,7 @@ jobs:
       - name: Install freestanding and virtual-machine toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-multilib g++-multilib libc6-dev-i386 clang lld python3-pip qemu-system-x86 ovmf ninja-build pkgconf libglib2.0-dev libpixman-1-dev acpica-tools
+          sudo apt-get install -y autoconf automake m4 gcc-multilib g++-multilib libc6-dev-i386 clang lld python3-pip qemu-system-x86 ovmf ninja-build pkgconf libglib2.0-dev libpixman-1-dev acpica-tools
           mkdir -p .tools/python build dist
           python3 -m pip install --target .tools/python -r requirements-dev.txt
       - name: Test block-device contracts and PCI dispatch

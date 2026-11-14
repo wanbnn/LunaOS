@@ -35,7 +35,7 @@ jobs:
       - name: Install 32-bit C/C++ toolchain
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y gcc-multilib g++-multilib libc6-dev-i386
+          sudo apt-get install -y autoconf automake m4 gcc-multilib g++-multilib libc6-dev-i386
       - name: Verify freestanding C++ ABI and native graphics callbacks
         run: |
           mkdir -p build/ui build/lib

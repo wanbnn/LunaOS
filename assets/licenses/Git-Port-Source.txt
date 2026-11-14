@@ -1,0 +1,19 @@
+Git 2.56.1 for LunaOS
+
+This image contains the upstream Git executable as a separate user process.
+Git's license is supplied as Git-GPL-2.txt in this directory (split into parts
+where required by the LunaOS text viewer). Musl and zlib notices are also
+included here. SHA-1 collision detection retains its notices in upstream source.
+
+Corresponding source and build instructions are in the LunaOS source tree:
+  https://github.com/wanbnn/LunaOS
+  third_party/git (submodule, commit 03b41523c576f26ad34085378717a0c1b287470f)
+  third_party/git/sha1collisiondetection (pinned upstream submodule)
+  third_party/musl, third_party/zlib
+  third_party/dash (commit 4bbf8721a3ac6401ced6a0454956801f6ba37256)
+  sdk/musl-luna, sdk/guest/memory.c, sdk/guest/luna32.ld
+  tools/git-port/build-native.py and Makefile
+
+Initialize the pinned submodules, then run make git-native-build.
+The Git source is not linked into the LunaOS kernel as executable code;
+the kernel carries a compressed application payload mounted at /bin/git.

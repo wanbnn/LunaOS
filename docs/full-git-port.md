@@ -1,6 +1,8 @@
 # Porte do Git original ao LunaOS — contrato de compatibilidade
 
-**Status: infraestrutura nativa experimental implementada e testada; execucao do Git upstream no LunaOS guest ainda nao implementada.**
+**Status: Git upstream 2.56.1 e Dash executam nativamente no guest e integram a imagem. Fluxos locais foram validados; HTTPS/SSH e a aceitacao completa continuam pendentes.**
+
+Uso e build atuais: [git-native.md](git-native.md). As secoes de milestones abaixo preservam o historico anterior.
 
 Estado consolidado, branches e verificacoes: [git-port-status.md](git-port-status.md). Este documento define o requisito solicitado: executar o `git` real a partir do `lunaSH` com o mesmo fluxo de trabalho que em sistemas POSIX, incluindo trabalho offline, remotos HTTPS/SSH e interoperabilidade com repositórios criados em outros sistemas. Nenhuma substituicao parcial, emulacao de respostas ou dependencia obrigatoria de um host Linux e aceitavel.
 

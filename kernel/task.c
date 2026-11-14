@@ -1,4 +1,5 @@
 #include "update.h"
+#include "clock.h"
 #include "task.h"
 #include "elf32.h"
 #include "driver.h"
@@ -12,20 +13,46 @@
 Task tasks[TASK_MAX];
 int current_task;
 static bool initialized, idling;
+static TrapFrame *exec_deliver_signal(Task *, TrapFrame *);
 static uint32_t next_pid = 1, stamp, sample_stamp, sample_tick;
 static uint32_t directories[TASK_MAX][1024] __attribute__((aligned(4096)));
 static uint32_t user_tables[TASK_MAX][1024] __attribute__((aligned(4096)));
 /* Up to 8 MiB application image plus a third PDE for the guarded ELF stack. */
 static uint32_t user_large_tables[TASK_MAX][1024] __attribute__((aligned(4096)));
 static uint32_t user_stack_tables[TASK_MAX][1024] __attribute__((aligned(4096)));
-/* A maximum of 2 MiB of demand-allocated 4 KiB pages per native process.
+/* A maximum of 4 MiB of demand-allocated 4 KiB pages per native process.
  * Only physical handles, never heap page content, are stored in kernel BSS. */
-#define EXEC_HEAP_LIMIT (2u * 1024u * 1024u)
+#define EXEC_HEAP_LIMIT (4u * 1024u * 1024u)
 #define EXEC_HEAP_MAX_PAGES (EXEC_HEAP_LIMIT / LUNA_ELF_PAGE_BYTES)
 static PmmAllocation exec_heap_pages[TASK_MAX][EXEC_HEAP_MAX_PAGES];
+/* Immutable ELF pages can be shared by fork without copying Git's entire
+ * text image. Writable segments and brk pages remain private. */
+static struct { PmmAllocation allocation; unsigned refs; } shared_images[TASK_MAX*LUNA_ELF_MAX_SEGMENTS];
+static bool exec_share_image(const PmmAllocation *allocation) {
+    uint32_t irq=drv_irq_save();
+    unsigned empty=TASK_MAX*LUNA_ELF_MAX_SEGMENTS;
+    for(unsigned i=0;i<TASK_MAX*LUNA_ELF_MAX_SEGMENTS;i++) {
+        if(shared_images[i].refs && shared_images[i].allocation.cookie==allocation->cookie) {
+            shared_images[i].refs++;drv_irq_restore(irq);return true;
+        }
+        if(!shared_images[i].refs)empty=i;
+    }
+    if(empty==TASK_MAX*LUNA_ELF_MAX_SEGMENTS){drv_irq_restore(irq);return false;}
+    shared_images[empty].allocation=*allocation;shared_images[empty].refs=2;
+    drv_irq_restore(irq);return true;
+}
+static int exec_release_image(const PmmAllocation *allocation) {
+    uint32_t irq=drv_irq_save();
+    for(unsigned i=0;i<TASK_MAX*LUNA_ELF_MAX_SEGMENTS;i++)
+        if(shared_images[i].refs && shared_images[i].allocation.cookie==allocation->cookie) {
+            if(--shared_images[i].refs){drv_irq_restore(irq);return 0;}
+            break;
+        }
+    int rc=memory_release(allocation);drv_irq_restore(irq);return rc;
+}
 static uint8_t user_code[4096] __attribute__((aligned(4096)));
 /* ELF image pages are allocated per process through the physical allocator. */
-static uint8_t user_stacks[TASK_MAX][USER_STACK_BYTES] __attribute__((aligned(4096)));
+static uint8_t user_stacks[TASK_MAX][USER_ELF_STACK_BYTES] __attribute__((aligned(4096)));
 static uint8_t kernel_stacks[TASK_MAX][KSTACK_BYTES] __attribute__((aligned(4096), section(".bss.stacks")));
 static uint8_t shell_stack[SHELL_STACK_BYTES] __attribute__((aligned(4096)));
 #define EXEC_PIPE_COUNT 16u
@@ -40,7 +67,7 @@ static ExecPipe exec_pipes[EXEC_PIPE_COUNT];
 /* The transport backend is global: at most one guest stream can own it. */
 static uint32_t exec_net_owner;
 static void exec_close_fd(Task *t, unsigned fd) {
-    if (fd >= EXEC_FD_MAX || !t->exec_fds[fd].open)
+    if (fd >= EXEC_FD_STORAGE || !t->exec_fds[fd].open)
         return;
     unsigned kind = t->exec_fds[fd].kind, id = t->exec_fds[fd].pipe_id;
     if (kind == 3u || kind == 4u) {
@@ -58,6 +85,7 @@ static void exec_close_fd(Task *t, unsigned fd) {
                 memset(p, 0, sizeof(*p));
         }
     }
+    if(fd>=EXEC_FD_MAX)t->std_closed[fd-EXEC_FD_MAX]=true;
     memset(&t->exec_fds[fd], 0, sizeof(t->exec_fds[fd]));
 }
 
@@ -103,7 +131,7 @@ uint32_t task_memory_enter(uint32_t pid) {
 }
 void task_memory_leave(uint32_t previous) { task_current()->memory_owner=previous; }
 static uint32_t private_reservation(const Task *t) {
-    return t->ring ? t->stack_bytes+USER_STACK_BYTES+sizeof(directories[0])+sizeof(user_tables[0])+
+    return t->ring ? t->stack_bytes+(t->exec_image ? USER_ELF_STACK_BYTES : USER_STACK_BYTES)+sizeof(directories[0])+sizeof(user_tables[0])+
            (t->exec_image ? sizeof(user_large_tables[0])+sizeof(user_stack_tables[0])+
                              t->exec_physical_bytes : 0u) : 0;
 }
@@ -115,7 +143,7 @@ void task_memory_stats(const Task *t,TaskMemoryStats *out) {
     out->heap_committed=own.committed_bytes; out->heap_live=own.live_bytes;
     out->heap_allocations=own.allocations;
     if (t->ring) {
-        out->stack_reserved=t->stack_bytes+USER_STACK_BYTES;
+        out->stack_reserved=t->stack_bytes+(t->exec_image ? USER_ELF_STACK_BYTES : USER_STACK_BYTES);
         out->page_tables=sizeof(directories[0])+sizeof(user_tables[0]);
         out->ram_bytes=private_reservation(t)+own.committed_bytes;
     } else {
@@ -164,7 +192,7 @@ void task_init(void) {
          * data selector and reach supervisor mappings. */
         uint32_t base = ring ? USER_CODE : 0;
         uint32_t limit = ring == 3 ?
-            (LUNA_ELF_STACK_OFFSET + USER_STACK_BYTES - 1u) >> 12 :
+            (LUNA_ELF_STACK_OFFSET + USER_ELF_STACK_BYTES - 1u) >> 12 :
             (ring ? 0x13fffu : 0xfffffu);
         uint8_t flags = ring == 3 || ring == 0 ? 0xc : 4;
         gdt[1 + ring * 2] = segment(base, limit, 0x9a | (ring << 5), flags);
@@ -213,9 +241,12 @@ static uint32_t spawn(int app, const char *name, unsigned ring, unsigned probe,
     if (!initialized || ring < 1 || ring > 3 || app >= APP_COUNT)
         return 0;
     int slot;
-    for (slot = 1; slot < TASK_MAX; slot++)
-        if (tasks[slot].state == TASK_UNUSED || tasks[slot].state == TASK_EXITED)
-            break;
+    for (slot = 1; slot < TASK_MAX; slot++) {
+        Task *parent=task_by_pid(tasks[slot].parent_pid);
+        if (tasks[slot].state == TASK_UNUSED ||
+            (tasks[slot].state == TASK_EXITED && (!tasks[slot].exec_image || tasks[slot].exec_reaped ||
+                                                 !parent || parent->state==TASK_EXITED)))break;
+    }
     if (slot == TASK_MAX)
         return 0;
     Task *t = &tasks[slot];
@@ -235,7 +266,7 @@ static uint32_t spawn(int app, const char *name, unsigned ring, unsigned probe,
     t->stack_bytes = app == APP_SHELL ? SHELL_STACK_BYTES : KSTACK_BYTES;
     memset(t->kernel_stack, 0xcc, t->stack_bytes);
     *(uint32_t *)t->kernel_stack = STACK_MAGIC;
-    memset(user_stacks[slot], 0, USER_STACK_BYTES);
+    memset(user_stacks[slot], 0, USER_ELF_STACK_BYTES);
     memcpy(directories[slot], directories[0], 4096);
     memset(user_tables[slot], 0, 4096);
     memset(user_large_tables[slot], 0, 4096);
@@ -273,7 +304,7 @@ static bool prepare_exec_stack(uint8_t *stack, int argc, const char *const argv[
                                int envc, const char *const envp[], uint32_t *esp_out) {
     if (argc < 1 || argc > 24 || envc < 0 || envc > 16)
         return false;
-    unsigned sp = USER_STACK_BYTES;
+    unsigned sp = USER_ELF_STACK_BYTES;
     uint32_t args[24], env[16];
     for (int group = 0; group < 2; group++) {
         int count = group ? envc : argc;
@@ -307,9 +338,26 @@ static bool prepare_exec_stack(uint8_t *stack, int argc, const char *const argv[
     *esp_out = LUNA_ELF_STACK_OFFSET + sp;
     return true;
 }
+static bool exec_cached_segment(const File *file,const LunaElfSegment *segment,unsigned index,PmmAllocation *out) {
+    if(!file->readonly || !file->data || (segment->flags&LUNA_ELF_WRITE))return false;
+    uint32_t irq=drv_irq_save();
+    for(unsigned i=1;i<TASK_MAX;i++) {
+        Task *t=&tasks[i];
+        if(!t->exec_image || t->state==TASK_EXITED || t->state==TASK_UNUSED ||
+           t->exec_source!=(uintptr_t)file->data || index>=t->exec_segments ||
+           t->exec_allocation[index].bytes!=segment->page_count*4096u)continue;
+        if(exec_share_image(&t->exec_allocation[index])) {
+            *out=t->exec_allocation[index];drv_irq_restore(irq);return true;
+        }
+    }
+    drv_irq_restore(irq);return false;
+}
 uint32_t task_spawn_elf_args(const char *path, int argc, const char *const argv[],
                              int envc, const char *const envp[]) {
-    File *f = fs_find(path);
+    uint32_t file_irq=drv_irq_save();
+    File *f = fs_find(path);File source;
+    if(f) {source=*f;f=&source;}
+    drv_irq_restore(file_irq);
     if (!f || f->dir || f->size < 84u || f->size > LUNA_ELF_MAX_FILE_BYTES)
         return 0;
     /* Only read the ELF and PHDR header; stream PT_LOAD bytes to the PMM.
@@ -333,6 +381,7 @@ uint32_t task_spawn_elf_args(const char *path, int argc, const char *const argv[
     for (unsigned i = 0; i < image->segments; i++) {
         const LunaElfSegment *seg = &image->load[i];
         uint32_t bytes = seg->page_count * LUNA_ELF_PAGE_BYTES;
+        if(exec_cached_segment(f,seg,i,&allocations[i])) { physical_bytes+=bytes;continue; }
         if (memory_allocate(bytes, LUNA_ELF_PAGE_BYTES, UINT32_MAX, 0u,
                             true, true, &allocations[i]))
             goto fail_load;
@@ -361,7 +410,7 @@ uint32_t task_spawn_elf_args(const char *path, int argc, const char *const argv[
     }
     /* Remove the legacy stack alias (at 64 KiB). New guest stack lives
      * at an isolated third PDE above the 8 MiB program image. */
-    for (unsigned i = 0; i < USER_STACK_BYTES / 4096u; i++) {
+    for (unsigned i = 0; i < USER_ELF_STACK_BYTES / 4096u; i++) {
         user_tables[slot][16 + i] = 0;
         user_stack_tables[slot][16 + i] =
             ((uint32_t)user_stacks[slot] + i * 4096u) | 7u;
@@ -395,14 +444,18 @@ uint32_t task_spawn_elf_args(const char *path, int argc, const char *const argv[
     t->frame->eip = image->entry;
     t->frame->useresp = stack_esp;
     t->parent_pid = parent_pid;
+    t->session_id=parent->session_id?parent->session_id:parent_pid;
+    t->process_group=parent->exec_image?parent->process_group:pid;
     strcpy(t->exec_cwd, parent_cwd);
     t->exec_image = true;
+    t->exec_source=f->readonly?(uintptr_t)f->data:0;
+    fs_path(path,t->exec_path);
     /* POSIX-like descriptor inheritance for regular files and pipes.
      * Guest network descriptors are not inherited: the underlying driver
      * is still a single host-wide TCP transport, not a cloneable socket. */
     if (parent->exec_image) {
         uint32_t irq=drv_irq_save();
-        for (unsigned i=0;i<EXEC_FD_MAX;i++) {
+        for (unsigned i=0;i<EXEC_FD_STORAGE;i++) {
             if (!parent->exec_fds[i].open) continue;
             unsigned kind=parent->exec_fds[i].kind;
             if (kind==3u || kind==4u) continue;
@@ -423,7 +476,7 @@ uint32_t task_spawn_elf_args(const char *path, int argc, const char *const argv[
     return pid;
 fail_load:
     for (unsigned i = 0; i < LUNA_ELF_MAX_SEGMENTS; i++)
-        if (allocations[i].cookie && memory_release(&allocations[i]))
+        if (allocations[i].cookie && exec_release_image(&allocations[i]))
             kernel_fault();
     heap_release(image);
     return 0;
@@ -441,16 +494,19 @@ static bool task_execve_elf(Task *t, TrapFrame *frame, const char *path,
                             int envc, const char *const envp[]) {
     if (!t->exec_image || t->ring != 3)
         return false;
-    uint8_t *new_stack = heap_allocate(USER_STACK_BYTES);
+    uint8_t *new_stack = heap_allocate(USER_ELF_STACK_BYTES);
     if (!new_stack)
         return false;
-    memset(new_stack, 0, USER_STACK_BYTES);
+    memset(new_stack, 0, USER_ELF_STACK_BYTES);
     uint32_t new_esp = 0;
     if (!prepare_exec_stack(new_stack, argc, argv, envc, envp, &new_esp)) {
         heap_release(new_stack);
         return false;
     }
-    File *file = fs_find(path);
+    uint32_t file_irq=drv_irq_save();
+    File *file = fs_find(path);File source;
+    if(file) {source=*file;file=&source;}
+    drv_irq_restore(file_irq);
     if (!file || file->dir || file->size < 84u ||
         file->size > LUNA_ELF_MAX_FILE_BYTES) {
         heap_release(new_stack);
@@ -475,6 +531,7 @@ static bool task_execve_elf(Task *t, TrapFrame *frame, const char *path,
     for (unsigned i = 0; i < image->segments; i++) {
         const LunaElfSegment *s = &image->load[i];
         uint32_t n = s->page_count * LUNA_ELF_PAGE_BYTES;
+        if(exec_cached_segment(file,s,i,&fresh[i])) {physical_bytes+=n;continue;}
         if (memory_allocate(n, LUNA_ELF_PAGE_BYTES, UINT32_MAX, 0u,
                             true, true, &fresh[i])) {
             loaded = false;
@@ -491,12 +548,17 @@ static bool task_execve_elf(Task *t, TrapFrame *frame, const char *path,
     }
     if (!loaded) {
         for (unsigned i = 0; i < LUNA_ELF_MAX_SEGMENTS; i++)
-            if (fresh[i].cookie && memory_release(&fresh[i]))
+            if (fresh[i].cookie && exec_release_image(&fresh[i]))
                 kernel_fault();
         heap_release(image);
         heap_release(new_stack);
         return false;
     }
+    for(unsigned fd=0;fd<EXEC_FD_STORAGE;fd++)
+        if(t->exec_fds[fd].open && (t->exec_fds[fd].flags&0x80000u))exec_close_fd(t,fd);
+    for(unsigned sig=0;sig<31u;sig++)
+        if(t->signal_actions[sig].handler>1u)t->signal_actions[sig]=(ExecSignalAction){0};
+    t->in_signal=false;
     /* Commit point. The current trap frame stays on a supervisor stack.
      * Interrupts are disabled while the active CR3 mappings change. */
     uint32_t irq = drv_irq_save();
@@ -506,10 +568,10 @@ static bool task_execve_elf(Task *t, TrapFrame *frame, const char *path,
     memcpy(previous, t->exec_allocation, sizeof(previous));
     memset(user_tables[slot], 0, sizeof(user_tables[slot]));
     memset(user_large_tables[slot], 0, sizeof(user_large_tables[slot]));
-    for (unsigned i = 0; i < USER_STACK_BYTES / 4096u; i++)
+    for (unsigned i = 0; i < USER_ELF_STACK_BYTES / 4096u; i++)
         user_stack_tables[slot][16 + i] =
             ((uint32_t)user_stacks[slot] + i * 4096u) | 7u;
-    memcpy(user_stacks[slot], new_stack, USER_STACK_BYTES);
+    memcpy(user_stacks[slot], new_stack, USER_ELF_STACK_BYTES);
     memset(t->exec_allocation, 0, sizeof(t->exec_allocation));
     for (unsigned i = 0; i < image->segments; i++) {
         const LunaElfSegment *s = &image->load[i];
@@ -554,8 +616,10 @@ static bool task_execve_elf(Task *t, TrapFrame *frame, const char *path,
     frame->eflags = 0x202u;
     __asm__ volatile("mov %0,%%cr3" :: "r"(t->directory) : "memory");
     for (unsigned i = 0; i < old_count; i++)
-        if (previous[i].cookie && memory_release(&previous[i]))
+        if (previous[i].cookie && exec_release_image(&previous[i]))
             kernel_fault();
+    strcpy(t->exec_path,path);
+    t->exec_source=file->readonly?(uintptr_t)file->data:0;
     drv_irq_restore(irq);
     heap_release(image);
     heap_release(new_stack);
@@ -568,8 +632,10 @@ bool task_wait_elf(uint32_t pid, uint32_t timeout_ms, unsigned *exit_code) {
         if (!t || !t->exec_image || t->parent_pid != parent)
             return false;
         if (t->state == TASK_EXITED) {
+            uint32_t irq=drv_irq_save();
             if (exit_code) *exit_code = t->exit_code;
-            return true;
+            t->exec_reaped=true;
+            drv_irq_restore(irq);return true;
         }
         if ((uint32_t)(frame_clock - started) >= timeout_ms)
             return false;
@@ -599,13 +665,16 @@ bool task_post(uint32_t pid, AppEvent e) {
 static void finish(Task *t, unsigned code) {
     t->exit_code = code;
     t->state = TASK_EXITED;
+    Task *parent=task_by_pid(t->parent_pid);
+    if(parent && parent->exec_image && parent->state!=TASK_EXITED)
+        parent->signal_pending|=1u<<16; /* SIGCHLD */
     net_cancel_owner(t->pid);
     if (t->exec_image)
-        for (unsigned fd = 0; fd < EXEC_FD_MAX; fd++)
+        for (unsigned fd = 0; fd < EXEC_FD_STORAGE; fd++)
             exec_close_fd(t, fd);
     for (unsigned i = 0; i < t->exec_segments; i++) {
         if (t->exec_allocation[i].cookie &&
-            memory_release(&t->exec_allocation[i]))
+            exec_release_image(&t->exec_allocation[i]))
             kernel_fault();
         t->exec_allocation[i] = (PmmAllocation){0};
     }
@@ -720,7 +789,7 @@ static TrapFrame *schedule(TrapFrame *f) {
     if (t->directory != old->directory)
         __asm__ volatile("mov %0,%%cr3" ::"r"(t->directory) : "memory");
     perf_resume();
-    return t->frame;
+    return exec_deliver_signal(t, t->frame);
 }
 static void sample(void) {
     uint32_t now = clock_units(), interval = now - sample_stamp;
@@ -747,8 +816,8 @@ static bool exec_user_range(const Task *t, uint32_t off, uint32_t n, bool writab
     if (!t->exec_image || t->ring != 3)
         return false;
     if (off >= LUNA_ELF_STACK_OFFSET &&
-        off < LUNA_ELF_STACK_OFFSET + USER_STACK_BYTES)
-        return n <= LUNA_ELF_STACK_OFFSET + USER_STACK_BYTES - off;
+        off < LUNA_ELF_STACK_OFFSET + USER_ELF_STACK_BYTES)
+        return n <= LUNA_ELF_STACK_OFFSET + USER_ELF_STACK_BYTES - off;
     if (off >= LUNA_ELF_IMAGE_BYTES || n > LUNA_ELF_IMAGE_BYTES - off)
         return false;
     if (!n)
@@ -807,6 +876,134 @@ static bool exec_guest_vector(Task *t, uint32_t offsets, char strings[][256],
     }
     return false;
 }
+/* Signal handlers execute only on a validated ring-3 stack. Kernel frames
+ * are never delivered to userspace. One active handler is supported; nested
+ * pending signals remain queued until sigreturn restores the saved context. */
+static TrapFrame *exec_deliver_signal(Task *t, TrapFrame *f) {
+    if (!t->exec_image || (f->cs & 3u) != 3u || t->in_signal) return f;
+    uint32_t pending = t->signal_pending & ~(uint32_t)t->signal_mask;
+    while (pending) {
+        unsigned sig=1;
+        while (!(pending & (1u<<(sig-1u)))) sig++;
+        uint32_t bit=1u<<(sig-1u);
+        t->signal_pending &= ~bit; pending &= ~bit;
+        ExecSignalAction *action=&t->signal_actions[sig-1u];
+        if(action->handler==1u || (!action->handler && (sig==17u || sig==18u || sig==23u || sig==28u)))
+            continue;
+        if(!action->handler) {
+            t->termination_signal=sig;finish(t,128u+sig);
+            return schedule(f);
+        }
+        uint32_t sp=f->useresp-8u;
+        if(f->useresp<8u || !exec_user_range(t,sp,8u,true)) {
+            finish(t,139u);return schedule(f);
+        }
+        t->signal_frame=*f;
+        t->signal_saved_mask=t->suspend_restore?t->suspend_old_mask:t->signal_mask;
+        t->suspend_restore=false;t->in_signal=true;
+        uint32_t args[2]={action->restorer,sig};
+        memcpy((void *)(uintptr_t)(USER_CODE+sp),args,sizeof(args));
+        t->signal_mask |= (uint64_t)action->mask[0] | ((uint64_t)action->mask[1]<<32);
+        if(!(action->flags&0x40000000u))t->signal_mask|=bit; /* SA_NODEFER */
+        f->eip=action->handler;f->useresp=sp;
+        if(action->flags&0x80000000u)action->handler=0; /* SA_RESETHAND */
+        break;
+    }
+    return f;
+}
+static unsigned exec_free_slot(const Task *t,unsigned skip) {
+    for(unsigned fd=0;fd<3u+EXEC_FD_MAX;fd++) {
+        unsigned slot=fd<3u?EXEC_FD_MAX+fd:fd-3u;
+        if(slot!=skip && !t->exec_fds[slot].open && (fd>=3u || t->std_closed[fd]))return slot;
+    }
+    return EXEC_FD_STORAGE;
+}
+static unsigned exec_publish_fd(Task *t,unsigned slot) {
+    if(slot>=EXEC_FD_MAX){t->std_closed[slot-EXEC_FD_MAX]=false;return slot-EXEC_FD_MAX;}
+    return slot+3u;
+}
+static uint32_t exec_io_fd(const Task *t,uint32_t fd) {
+    return fd<3u && t->exec_fds[EXEC_FD_MAX+fd].open ? fd+3u+EXEC_FD_MAX : fd;
+}
+static void exec_retain_fd(Task *t,unsigned slot) {
+    unsigned kind=t->exec_fds[slot].kind,id=t->exec_fds[slot].pipe_id;
+    if(id<EXEC_PIPE_COUNT && exec_pipes[id].used) {
+        if(kind==1u)exec_pipes[id].readers++;
+        if(kind==2u)exec_pipes[id].writers++;
+    }
+}
+static uint32_t exec_fork(Task *parent,const TrapFrame *frame) {
+    uint32_t pid=spawn(-1,"ELF32 fork child",3,0,NULL,true);
+    if(!pid)return 0;
+    Task *child=task_by_pid(pid);
+    unsigned ps=(unsigned)(parent-tasks),cs=(unsigned)(child-tasks);
+    child->exec_image=true;child->parent_pid=parent->pid;
+    child->session_id=parent->session_id;child->process_group=parent->process_group;
+    strcpy(child->exec_cwd,parent->exec_cwd);
+    strcpy(child->exec_path,parent->exec_path);
+    child->exec_source=parent->exec_source;
+    memcpy(child->std_closed,parent->std_closed,sizeof(child->std_closed));
+    memset(user_tables[cs],0,sizeof(user_tables[cs]));
+    memset(user_large_tables[cs],0,sizeof(user_large_tables[cs]));
+    for(unsigned i=0;i<parent->exec_segments;i++) {
+        PmmAllocation *allocation=&parent->exec_allocation[i];
+        bool writable=false;
+        for(unsigned page=0;page<LUNA_ELF_PAGES;page++) {
+            uint32_t pte=(page<1024u?user_tables[ps]:user_large_tables[ps])[page&1023u];
+            uint32_t address=pte&~4095u;
+            if((pte&3u)==3u && address>=allocation->address &&
+               address-allocation->address<allocation->bytes)writable=true;
+        }
+        if(!writable && exec_share_image(allocation))child->exec_allocation[i]=*allocation;
+        else {
+            if(memory_allocate(allocation->bytes,4096u,UINT32_MAX,0u,true,true,
+                               &child->exec_allocation[i]))goto fail;
+            memcpy((void *)(uintptr_t)child->exec_allocation[i].address,
+                   (void *)(uintptr_t)allocation->address,allocation->bytes);
+        }
+        child->exec_segments++;
+        child->exec_physical_bytes+=child->exec_allocation[i].bytes;
+    }
+    for(unsigned i=0;i<parent->exec_heap_pages;i++) {
+        if(memory_allocate(4096u,4096u,UINT32_MAX,0u,true,true,&exec_heap_pages[cs][i]))goto fail;
+        child->exec_heap_pages++;
+        memcpy((void *)(uintptr_t)exec_heap_pages[cs][i].address,
+               (void *)(uintptr_t)exec_heap_pages[ps][i].address,4096u);
+    }
+    child->exec_heap_base=parent->exec_heap_base;child->exec_heap_break=parent->exec_heap_break;
+    for(unsigned page=0;page<LUNA_ELF_PAGES;page++) {
+        uint32_t pte=(page<1024u?user_tables[ps]:user_large_tables[ps])[page&1023u];
+        if(!(pte&1u))continue;
+        uint32_t old=pte&~4095u,address=0;
+        for(unsigned i=0;i<parent->exec_segments;i++)
+            if(old>=parent->exec_allocation[i].address && old-parent->exec_allocation[i].address<parent->exec_allocation[i].bytes)
+                address=child->exec_allocation[i].address+(old-parent->exec_allocation[i].address);
+        if(!address && page*4096u>=parent->exec_heap_base) {
+            unsigned i=(page*4096u-parent->exec_heap_base)/4096u;
+            if(i<child->exec_heap_pages)address=exec_heap_pages[cs][i].address;
+        }
+        if(!address)goto fail;
+        (page<1024u?user_tables[cs]:user_large_tables[cs])[page&1023u]=address|(pte&4095u);
+    }
+    memcpy(child->exec_permissions,parent->exec_permissions,sizeof(child->exec_permissions));
+    memcpy(user_stacks[cs],user_stacks[ps],USER_ELF_STACK_BYTES);
+    for(unsigned i=0;i<USER_ELF_STACK_BYTES/4096u;i++)
+        user_stack_tables[cs][16u+i]=((uint32_t)user_stacks[cs]+4096u*i)|7u;
+    *child->frame=*frame;child->frame->eax=0;
+    child->signal_mask=parent->signal_mask;
+    child->signal_saved_mask=parent->signal_saved_mask;
+    child->signal_frame=parent->signal_frame;child->in_signal=parent->in_signal;
+    memcpy(child->signal_actions,parent->signal_actions,sizeof(child->signal_actions));
+    for(unsigned i=0;i<EXEC_FD_STORAGE;i++) {
+        unsigned kind=parent->exec_fds[i].kind;
+        if(!parent->exec_fds[i].open || kind==3u || kind==4u)continue;
+        child->exec_fds[i]=parent->exec_fds[i];exec_retain_fd(child,i);
+    }
+    child->state=TASK_READY;
+    return pid;
+fail:
+    child->parent_pid=0;finish(child,255u);return 0;
+}
 static TrapFrame *syscall(TrapFrame *f) {
     Task *t = task_current();
     unsigned call = f->eax;
@@ -857,12 +1054,14 @@ static TrapFrame *syscall(TrapFrame *f) {
         finish(t, f->ebx);
         break;
     case SYS_EXEC_WRITE: {
-        uint32_t fd = f->ebx, pos = f->ecx, length = f->edx;
+        uint32_t fd = exec_io_fd(t, f->ebx), pos = f->ecx, length = f->edx;
         if (length > 4096u || !exec_user_range(t, pos, length, false)) {
             f->eax = (uint32_t)-1;
             break;
         }
-        if (fd == 1 || fd == 2) {
+        if(f->ebx<3u && t->std_closed[f->ebx]) {f->eax=(uint32_t)-9;break;}
+        if (fd == 1 || fd == 2 ||
+            (fd>=3u && fd<3u+EXEC_FD_STORAGE && t->exec_fds[fd-3u].open && t->exec_fds[fd-3u].kind==8u)) {
             /* Terminal currently prints bounded text, not arbitrary binary. */
             if (length > 256u) { f->eax = (uint32_t)-1; break; }
             char buffer[257];
@@ -873,7 +1072,7 @@ static TrapFrame *syscall(TrapFrame *f) {
             f->eax = length;
             break;
         }
-        if (fd < 3 || fd >= 3 + EXEC_FD_MAX ||
+        if (fd < 3 || fd >= 3 + EXEC_FD_STORAGE ||
             !t->exec_fds[fd - 3].open || !(t->exec_fds[fd - 3].flags & 3u)) {
             f->eax = (uint32_t)-1;
             break;
@@ -881,6 +1080,7 @@ static TrapFrame *syscall(TrapFrame *f) {
         if (t->exec_fds[fd - 3].kind) {
             unsigned kind = t->exec_fds[fd - 3].kind;
             unsigned id = t->exec_fds[fd - 3].pipe_id;
+            if(kind==6u) {f->eax=length;break;}
             if (kind == 3u || kind == 4u) {
                 int wrote = exec_net_owner == t->pid ?
                     (kind == 4u ?
@@ -915,6 +1115,7 @@ static TrapFrame *syscall(TrapFrame *f) {
                     break;
                 }
                 drv_irq_restore(irq);
+                if(t->exec_fds[fd-3u].flags&2048u) {f->eax=(uint32_t)-11;break;}
                 if (frame_clock - began >= 30000u) {
                     f->eax=(uint32_t)-1;
                     break;
@@ -952,16 +1153,21 @@ static TrapFrame *syscall(TrapFrame *f) {
             f->eax = (uint32_t)-1;
             break;
         }
+        unsigned device=!strcmp(path,"/dev/null")?6u:!strcmp(path,"/dev/urandom")?7u:0u;
+        if(device) {
+            if((flags&(64u|128u))==(64u|128u)) {f->eax=(uint32_t)-17;break;}
+            unsigned slot=exec_free_slot(t,EXEC_FD_STORAGE);
+            if(slot==EXEC_FD_STORAGE) {f->eax=(uint32_t)-24;break;}
+            t->exec_fds[slot].kind=device;t->exec_fds[slot].flags=flags;t->exec_fds[slot].open=true;
+            f->eax=exec_publish_fd(t,slot);break;
+        }
         File *file = fs_find(path);
         if ((!file && !(flags & 64u)) || (file && file->dir)) {
             f->eax = (uint32_t)-1;
             break;
         }
-        unsigned slot = 0;
-        for (; slot < EXEC_FD_MAX; slot++)
-            if (!t->exec_fds[slot].open)
-                break;
-        if (slot == EXEC_FD_MAX) { f->eax = (uint32_t)-1; break; }
+        unsigned slot=exec_free_slot(t,EXEC_FD_STORAGE);
+        if (slot == EXEC_FD_STORAGE) { f->eax = (uint32_t)-1; break; }
         if (flags & 128u) {
             /* fs_create only allocates RAM. Exclude timer preemption across
              * its existence check and insertion, never across disk I/O. */
@@ -985,13 +1191,15 @@ static TrapFrame *syscall(TrapFrame *f) {
         t->exec_fds[slot].offset = (flags & 1024u) ? file->size : 0;
         t->exec_fds[slot].flags = flags;
         t->exec_fds[slot].open = true;
-        f->eax = slot + 3u;
+        f->eax = exec_publish_fd(t,slot);
         break;
     }
     case SYS_EXEC_READ: {
-        uint32_t fd = f->ebx, addr = f->ecx, length = f->edx;
+        uint32_t fd = exec_io_fd(t, f->ebx), addr = f->ecx, length = f->edx;
+        if(f->ebx<3u && t->std_closed[f->ebx]) {f->eax=(uint32_t)-9;break;}
+        if(fd==0u && exec_user_range(t,addr,length,true)) {f->eax=0;break;}
         if (length > 4096u || !exec_user_range(t, addr, length, true) ||
-            fd < 3 || fd >= 3 + EXEC_FD_MAX ||
+            fd < 3 || fd >= 3 + EXEC_FD_STORAGE ||
             !t->exec_fds[fd - 3].open ||
             (t->exec_fds[fd - 3].flags & 3u) == 1u) {
             f->eax = (uint32_t)-1;
@@ -1000,6 +1208,11 @@ static TrapFrame *syscall(TrapFrame *f) {
         if (t->exec_fds[fd - 3].kind) {
             unsigned kind = t->exec_fds[fd - 3].kind;
             unsigned id = t->exec_fds[fd - 3].pipe_id;
+            if(kind==6u || kind==9u) {f->eax=0;break;}
+            if(kind==7u) {
+                f->eax=random_bytes((void *)(uintptr_t)(USER_CODE+addr),length)?length:(uint32_t)-11;
+                break;
+            }
             if (kind == 3u || kind == 4u) {
                 int n = exec_net_owner == t->pid ?
                     (kind == 4u ?
@@ -1032,6 +1245,7 @@ static TrapFrame *syscall(TrapFrame *f) {
                     break;
                 }
                 drv_irq_restore(irq);
+                if(t->exec_fds[fd-3u].flags&2048u) {f->eax=(uint32_t)-11;break;}
                 if (frame_clock-began>=30000u) {
                     f->eax=(uint32_t)-1;
                     break;
@@ -1054,8 +1268,14 @@ static TrapFrame *syscall(TrapFrame *f) {
         break;
     }
     case SYS_EXEC_CLOSE: {
-        uint32_t fd = f->ebx;
-        if (!t->exec_image || t->ring != 3 || fd < 3 || fd >= 3 + EXEC_FD_MAX ||
+        if(!t->exec_image || t->ring!=3u) {f->eax=(uint32_t)-1;break;}
+        if(f->ebx<3u) {
+            if(t->std_closed[f->ebx]) {f->eax=(uint32_t)-9;break;}
+            exec_close_fd(t,EXEC_FD_MAX+f->ebx);t->std_closed[f->ebx]=true;
+            f->eax=0;break;
+        }
+        uint32_t fd = exec_io_fd(t, f->ebx);
+        if (!t->exec_image || t->ring != 3 || fd < 3 || fd >= 3 + EXEC_FD_STORAGE ||
             !t->exec_fds[fd - 3].open) {
             f->eax = (uint32_t)-1; break;
         }
@@ -1064,9 +1284,9 @@ static TrapFrame *syscall(TrapFrame *f) {
         break;
     }
     case SYS_EXEC_LSEEK: {
-        uint32_t fd = f->ebx, whence = f->edx;
+        uint32_t fd = exec_io_fd(t, f->ebx), whence = f->edx;
         int32_t delta = (int32_t)f->ecx;
-        if (!t->exec_image || fd < 3 || fd >= 3 + EXEC_FD_MAX ||
+        if (!t->exec_image || fd < 3 || fd >= 3 + EXEC_FD_STORAGE ||
             !t->exec_fds[fd - 3].open || whence > 2u) {
             f->eax = (uint32_t)-1; break;
         }
@@ -1089,11 +1309,15 @@ static TrapFrame *syscall(TrapFrame *f) {
             !exec_path(t, raw, path) || !exec_user_range(t, addr, 20u, true)) {
             f->eax = (uint32_t)-1; break;
         }
+        if(!strcmp(path,"/dev/null") || !strcmp(path,"/dev/urandom")) {
+            uint32_t value[5]={0,0020666u,0x200000u+(!strcmp(path,"/dev/null")?0u:1u),0,0};
+            memcpy((void *)(uintptr_t)(USER_CODE+addr),value,sizeof(value));f->eax=0;break;
+        }
         File *file = fs_find(path);
         if (!file) { f->eax = (uint32_t)-1; break; }
         uint32_t value[5] = {file->size,
                              file->mode ? file->mode : (file->dir ? 0040755u : 0100644u),
-                             0, file->mtime, file->ctime};
+                             (uint32_t)(file - files) + 1u, file->mtime, file->ctime};
         memcpy((void *)(uintptr_t)(USER_CODE + addr), value, sizeof(value));
         f->eax = 0;
         break;
@@ -1139,6 +1363,246 @@ static TrapFrame *syscall(TrapFrame *f) {
         f->eax = fs_rename(path1, path2) ? (uint32_t)-1 : 0;
         break;
     }
+    case SYS_EXEC_POLL: {
+        struct PollFd {int32_t fd;int16_t events,revents;} descriptors[64];
+        uint32_t addr=f->ebx,count=f->ecx;int32_t timeout=(int32_t)f->edx;
+        if(count>64u || !exec_user_range(t,addr,count*sizeof(descriptors[0]),true)) {
+            f->eax=(uint32_t)-22;break;
+        }
+        memcpy(descriptors,(void *)(uintptr_t)(USER_CODE+addr),count*sizeof(descriptors[0]));
+        uint32_t began=frame_clock;
+        for(;;) {
+            unsigned ready=0;uint32_t irq=drv_irq_save();
+            for(unsigned i=0;i<count;i++) {
+                struct PollFd *p=&descriptors[i];p->revents=0;
+                if(p->fd<0)continue;
+                uint32_t fd=exec_io_fd(t,(uint32_t)p->fd);
+                if(p->fd<3 && t->std_closed[p->fd])p->revents=32;
+                else if(fd<3u)p->revents=p->events&(fd?4:1);
+                else if(fd>=3u+EXEC_FD_STORAGE || !t->exec_fds[fd-3u].open)p->revents=32;
+                else {
+                    unsigned kind=t->exec_fds[fd-3u].kind,id=t->exec_fds[fd-3u].pipe_id;
+                    if(kind==1u || kind==2u) {
+                        ExecPipe *pipe=&exec_pipes[id];
+                        if(kind==1u) {
+                            if(pipe->length)p->revents|=p->events&1;
+                            if(!pipe->writers)p->revents|=16;
+                        } else {
+                            if(!pipe->readers)p->revents|=8;
+                            else if(pipe->length<EXEC_PIPE_CAP)p->revents|=p->events&4;
+                        }
+                    } else if(kind==3u || kind==4u)p->revents=8; /* Singleton sockets have no poll interface. */
+                    else p->revents=p->events&((kind==7u || kind==9u)?1:kind==8u?4:5);
+                }
+                if(p->revents)ready++;
+            }
+            drv_irq_restore(irq);
+            if(ready || timeout==0 || (timeout>0 && frame_clock-began>=(uint32_t)timeout)) {
+                memcpy((void *)(uintptr_t)(USER_CODE+addr),descriptors,count*sizeof(descriptors[0]));
+                f->eax=ready;break;
+            }
+            if(t->signal_pending&~(uint32_t)t->signal_mask) {f->eax=(uint32_t)-4;break;}
+            task_sleep_ms(2);
+        }
+        break;
+    }
+    case SYS_EXEC_FCHMOD:
+    case SYS_EXEC_FUTIME: {
+        uint32_t fd=exec_io_fd(t,f->ebx);
+        if(fd<3u || fd>=3u+EXEC_FD_STORAGE || !t->exec_fds[fd-3u].open ||
+           (t->exec_fds[fd-3u].kind && t->exec_fds[fd-3u].kind!=5u)) {f->eax=(uint32_t)-9;break;}
+        f->eax=call==SYS_EXEC_FCHMOD?fs_chmod(t->exec_fds[fd-3u].path,f->ecx&0777u):
+                                   fs_set_mtime(t->exec_fds[fd-3u].path,f->ecx);
+        break;
+    }
+    case SYS_EXEC_SIGSUSPEND: {
+        if(!exec_user_range(t,f->ebx,8,false)) {f->eax=(uint32_t)-22;break;}
+        uint64_t mask;
+        memcpy(&mask,(void *)(uintptr_t)(USER_CODE+f->ebx),8);
+        t->suspend_old_mask=t->signal_mask;t->suspend_restore=true;
+        t->signal_mask=mask&~((1ull<<8)|(1ull<<18));
+        for(;;) {
+            uint32_t ready=t->signal_pending&~(uint32_t)t->signal_mask;
+            for(unsigned sig=1;sig<=31;sig++) {
+                uint32_t handler=t->signal_actions[sig-1].handler;
+                if(handler==1u || (!handler && (sig==17u || sig==18u || sig==23u || sig==28u)))
+                    t->signal_pending&=~(1u<<(sig-1));
+            }
+            if(ready&t->signal_pending)break;
+            task_sleep_ms(2);
+        }
+        f->eax=(uint32_t)-4;break;
+    }
+    case SYS_EXEC_SESSION: {
+        uint32_t operation=f->ebx,pid=f->ecx,group=f->edx;
+        Task *target=pid?task_by_pid(pid):t;
+        if(!t->exec_image || !target || !target->exec_image || target->state==TASK_EXITED) {
+            f->eax=(uint32_t)-3;break;
+        }
+        if(operation==0u) {
+            if(t->process_group==t->pid) {f->eax=(uint32_t)-1;break;}
+            t->session_id=t->process_group=t->pid;f->eax=t->pid;
+        } else if(operation==1u || operation==2u)f->eax=target->process_group;
+        else if(operation==3u)f->eax=target->session_id;
+        else if(operation==5u)f->eax=t->parent_pid;
+        else if(operation==4u && (target==t || target->parent_pid==t->pid) && target->session_id==t->session_id) {
+            if(!group)group=target->pid;
+            Task *leader=task_by_pid(group);
+            if(target->session_id==target->pid || (group!=target->pid && (!leader || leader->session_id!=t->session_id)))
+                f->eax=(uint32_t)-1;
+            else {target->process_group=group;f->eax=0;}
+        } else f->eax=(uint32_t)-22;
+        break;
+    }
+    case SYS_EXEC_FORK:
+        f->eax=t->exec_image?exec_fork(t,f):0;
+        if(!f->eax)f->eax=(uint32_t)-12;
+        break;
+    case SYS_EXEC_FDFLAGS: {
+        uint32_t fd=exec_io_fd(t,f->ebx);
+        if(fd<3u && t->exec_image && !t->std_closed[fd]) {
+            if(f->edx==2u){f->eax=fd?1u:0u;break;}
+            unsigned slot=EXEC_FD_MAX+fd;
+            t->exec_fds[slot].kind=fd?8u:9u;t->exec_fds[slot].flags=fd?1u:0u;
+            t->exec_fds[slot].open=true;fd=slot+3u;
+        }
+        if(fd<3u || fd>=3u+EXEC_FD_STORAGE || !t->exec_fds[fd-3u].open) {
+            f->eax=(uint32_t)-9;break;
+        }
+        if(f->edx==2u){f->eax=t->exec_fds[fd-3u].flags;break;}
+        if(f->edx==1u)t->exec_fds[fd-3u].flags=(t->exec_fds[fd-3u].flags&~3072u)|(f->ecx&3072u);
+        else t->exec_fds[fd-3u].flags=(t->exec_fds[fd-3u].flags&~0x80000u)|(f->ecx?0x80000u:0u);
+        f->eax=0;break;
+    }
+    case SYS_EXEC_DUP2: {
+        uint32_t old=f->ebx,next=f->ecx,source=exec_io_fd(t,old),slot;
+        if(!t->exec_image) {f->eax=(uint32_t)-9;break;}
+        if(source>=3u && (source>=3u+EXEC_FD_STORAGE || !t->exec_fds[source-3u].open)) {
+            f->eax=(uint32_t)-9;break;
+        }
+        if(source<3u && t->std_closed[source]) {f->eax=(uint32_t)-9;break;}
+        if(next==old) {f->eax=old;break;}
+        if(next==(uint32_t)-1) {
+            slot=exec_free_slot(t,EXEC_FD_STORAGE);
+            if(slot==EXEC_FD_STORAGE) {f->eax=(uint32_t)-24;break;}
+            next=slot>=EXEC_FD_MAX?slot-EXEC_FD_MAX:slot+3u;
+        }
+        if(next>=3u+EXEC_FD_MAX || (source<3u && t->std_closed[source])) {f->eax=(uint32_t)-38;break;}
+        slot=next<3u?EXEC_FD_MAX+next:next-3u;
+        uint32_t irq=drv_irq_save();
+        exec_close_fd(t,slot);
+        if(source>=3u) {
+            t->exec_fds[slot]=t->exec_fds[source-3u];
+            t->exec_fds[slot].flags&=~0x80000u;exec_retain_fd(t,slot);
+        } else {
+            t->exec_fds[slot].open=true;t->exec_fds[slot].kind=source?8u:9u;
+            t->exec_fds[slot].flags=source?1u:0u;
+        }
+        if(next<3u)t->std_closed[next]=false;
+        drv_irq_restore(irq);
+        f->eax=next;break;
+    }
+    case SYS_EXEC_SIGACTION: {
+        uint32_t sig=f->ebx, next=f->ecx, old=f->edx;
+        if(!t->exec_image || !sig || sig>31u || sig==9u || sig==19u ||
+           (next && !exec_user_range(t,next,sizeof(ExecSignalAction),false)) ||
+           (old && !exec_user_range(t,old,sizeof(ExecSignalAction),true))) {
+            f->eax=(uint32_t)-22;break;
+        }
+        ExecSignalAction action={0};
+        if(next) {
+            memcpy(&action,(void *)(uintptr_t)(USER_CODE+next),sizeof(action));
+            if((action.flags&4u) || /* SA_SIGINFO/alternate signal stacks not implemented */
+               (action.flags&0x08000000u) ||
+               (action.handler>1u && (!exec_user_range(t,action.handler,1,false) ||
+                                      !exec_user_range(t,action.restorer,1,false)))) {
+                f->eax=(uint32_t)-38;break;
+            }
+        }
+        if(old)memcpy((void *)(uintptr_t)(USER_CODE+old),&t->signal_actions[sig-1u],sizeof(action));
+        if(next)t->signal_actions[sig-1u]=action;
+        f->eax=0;break;
+    }
+    case SYS_EXEC_SIGMASK: {
+        uint32_t how=f->ebx,next=f->ecx,old=f->edx;
+        if(!t->exec_image || (next && (how>2u || !exec_user_range(t,next,8,false))) ||
+           (old && !exec_user_range(t,old,8,true))) { f->eax=(uint32_t)-22;break; }
+        uint64_t mask=0;
+        if(next)memcpy(&mask,(void *)(uintptr_t)(USER_CODE+next),8);
+        if(old)memcpy((void *)(uintptr_t)(USER_CODE+old),&t->signal_mask,8);
+        if(next) {
+            mask &= ~((1ull<<8)|(1ull<<18)); /* SIGKILL and SIGSTOP cannot be masked */
+            if(how==0u)t->signal_mask|=mask;
+            else if(how==1u)t->signal_mask&=~mask;
+            else t->signal_mask=mask;
+        }
+        f->eax=0;break;
+    }
+    case SYS_EXEC_KILL: {
+        uint32_t pid=f->ebx,sig=f->ecx;
+        Task *target=task_by_pid(pid);
+        if(!t->exec_image || !target || !target->exec_image || target->state==TASK_EXITED || sig>31u) {
+            f->eax=(uint32_t)-3;break;
+        }
+        if(sig==19u || sig==20u || sig==21u || sig==22u) { f->eax=(uint32_t)-38;break; }
+        if(sig==9u){target->termination_signal=9u;finish(target,137u);}
+        else if(sig)target->signal_pending|=1u<<(sig-1u);
+        f->eax=0;break;
+    }
+    case SYS_EXEC_SIGRETURN:
+        if(!t->exec_image || !t->in_signal) { f->eax=(uint32_t)-22;break; }
+        *f=t->signal_frame;t->signal_mask=t->signal_saved_mask;t->in_signal=false;
+        break;
+    case SYS_EXEC_CLOCK: {
+        uint32_t id = f->ebx, addr = f->ecx;
+        if (id > 1u || !exec_user_range(t, addr, 16u, true)) {
+            f->eax = (uint32_t)-1; break;
+        }
+        uint64_t ms = id ? frame_clock : clock_utc_ms();
+        uint32_t record[4] = {(uint32_t)(ms / 1000u),
+                             (uint32_t)((ms / 1000u) >> 32),
+                             (uint32_t)(ms % 1000u) * 1000000u, 0};
+        memcpy((void *)(uintptr_t)(USER_CODE + addr), record, sizeof(record));
+        f->eax = 0;
+        break;
+    }
+    case SYS_EXEC_RANDOM: {
+        uint32_t addr = f->ebx, n = f->ecx;
+        if (n > 4096u || !exec_user_range(t, addr, n, true)) {
+            f->eax = (uint32_t)-1; break;
+        }
+        f->eax = random_bytes((void *)(uintptr_t)(USER_CODE + addr), n) ?
+            n : (uint32_t)-11;
+        break;
+    }
+    case SYS_EXEC_FSTAT: {
+        uint32_t fd = exec_io_fd(t, f->ebx), addr = f->ecx;
+        if(fd<3u && !t->std_closed[fd] && exec_user_range(t,addr,20u,true)) {
+            uint32_t record[5]={0,0020666u,0x300000u+fd,0,0};
+            memcpy((void *)(uintptr_t)(USER_CODE+addr),record,sizeof(record));f->eax=0;break;
+        }
+        if (fd < 3u || fd >= 3u + EXEC_FD_STORAGE ||
+            !t->exec_fds[fd-3u].open ||
+            !exec_user_range(t, addr, 20u, true)) {
+            f->eax = (uint32_t)-1; break;
+        }
+        if(t->exec_fds[fd-3u].kind>=6u) {
+            uint32_t record[5]={0,0020666u,0x200000u+t->exec_fds[fd-3u].kind,0,0};
+            memcpy((void *)(uintptr_t)(USER_CODE+addr),record,sizeof(record));f->eax=0;break;
+        }
+        if(t->exec_fds[fd-3u].kind==1u || t->exec_fds[fd-3u].kind==2u) {
+            uint32_t record[5]={0,0010600u,0x100000u+t->exec_fds[fd-3u].pipe_id,0,0};
+            memcpy((void *)(uintptr_t)(USER_CODE+addr),record,sizeof(record));
+            f->eax=0;break;
+        }
+        File *file = fs_find(t->exec_fds[fd-3u].path);
+        if (!file) { f->eax = (uint32_t)-1; break; }
+        uint32_t record[5] = {file->size, file->mode,
+            (uint32_t)(file-files)+1u, file->mtime, file->ctime};
+        memcpy((void *)(uintptr_t)(USER_CODE+addr), record, sizeof(record));
+        f->eax = 0;
+        break;
+    }
     case SYS_EXEC_GETPID:
         f->eax = t->exec_image ? t->pid : (uint32_t)-1;
         break;
@@ -1147,15 +1611,11 @@ static TrapFrame *syscall(TrapFrame *f) {
         if (!exec_user_range(t, user_array, sizeof(uint32_t) * 2u, true)) {
             f->eax = (uint32_t)-1; break;
         }
-        unsigned rd = EXEC_FD_MAX, wr = EXEC_FD_MAX, pipe = EXEC_PIPE_COUNT;
-        for (unsigned i = 0; i < EXEC_FD_MAX; i++)
-            if (!t->exec_fds[i].open) {
-                if (rd == EXEC_FD_MAX) rd = i;
-                else { wr = i; break; }
-            }
+        unsigned rd=exec_free_slot(t,EXEC_FD_STORAGE);
+        unsigned wr=exec_free_slot(t,rd),pipe=EXEC_PIPE_COUNT;
         for (unsigned i = 0; i < EXEC_PIPE_COUNT; i++)
             if (!exec_pipes[i].used) { pipe = i; break; }
-        if (wr == EXEC_FD_MAX || pipe == EXEC_PIPE_COUNT) {
+        if (rd == EXEC_FD_STORAGE || wr == EXEC_FD_STORAGE || pipe == EXEC_PIPE_COUNT) {
             f->eax = (uint32_t)-1; break;
         }
         ExecPipe *p = &exec_pipes[pipe];
@@ -1166,14 +1626,14 @@ static TrapFrame *syscall(TrapFrame *f) {
         t->exec_fds[wr].open = true;
         t->exec_fds[wr].kind = 2; t->exec_fds[wr].pipe_id = (uint8_t)pipe;
         t->exec_fds[wr].flags = 1;
-        uint32_t result[2] = {rd + 3u, wr + 3u};
+        uint32_t result[2] = {exec_publish_fd(t,rd),exec_publish_fd(t,wr)};
         memcpy((void *)(uintptr_t)(USER_CODE + user_array), result, sizeof(result));
         f->eax = 0;
         break;
     }
     case SYS_EXEC_FSYNC: {
-        uint32_t fd = f->ebx;
-        if (!t->exec_image || fd < 3u || fd >= 3u + EXEC_FD_MAX ||
+        uint32_t fd = exec_io_fd(t, f->ebx);
+        if (!t->exec_image || fd < 3u || fd >= 3u + EXEC_FD_STORAGE ||
             !t->exec_fds[fd - 3u].open || t->exec_fds[fd - 3u].kind) {
             f->eax = (uint32_t)-1; break;
         }
@@ -1210,22 +1670,20 @@ static TrapFrame *syscall(TrapFrame *f) {
         if (!directory || !directory->dir) {
             f->eax = (uint32_t)-1; break;
         }
-        unsigned slot=0;
-        for (; slot<EXEC_FD_MAX; slot++)
-            if (!t->exec_fds[slot].open) break;
-        if (slot==EXEC_FD_MAX) {f->eax=(uint32_t)-1;break;}
+        unsigned slot=exec_free_slot(t,EXEC_FD_STORAGE);
+        if (slot==EXEC_FD_STORAGE) {f->eax=(uint32_t)-1;break;}
         strcpy(t->exec_fds[slot].path, path);
         t->exec_fds[slot].flags = 0u;
         t->exec_fds[slot].offset = 0u;
         t->exec_fds[slot].kind = 5u; /* directory cursor */
         t->exec_fds[slot].open = true;
-        f->eax = slot+3u;
+        f->eax = exec_publish_fd(t,slot);
         break;
     }
     case SYS_EXEC_BRK: {
         /* ABI: brk(0) queries current end. Successful calls return requested
          * end, failures return old end. Physical memory is allocated only
-         * for touched pages. The heap cannot exceed 2 MiB or the 8 MiB
+         * for touched pages. The heap cannot exceed 4 MiB or the 8 MiB
          * program VA span. */
         uint32_t request=f->ebx;
         uint32_t base=t->exec_heap_base;
@@ -1285,9 +1743,9 @@ static TrapFrame *syscall(TrapFrame *f) {
         break;
     }
     case SYS_EXEC_READDIR: {
-        uint32_t fd=f->ebx, ptr=f->ecx;
+        uint32_t fd=exec_io_fd(t,f->ebx), ptr=f->ecx;
         /* LunaGuestDirent: inode, mode, mtime, name[128] (140 bytes). */
-        if (!t->exec_image || fd<3u || fd>=3u+EXEC_FD_MAX ||
+        if (!t->exec_image || fd<3u || fd>=3u+EXEC_FD_STORAGE ||
             !t->exec_fds[fd-3u].open || t->exec_fds[fd-3u].kind!=5u ||
             !exec_user_range(t,ptr,140u,true)) {
             f->eax=(uint32_t)-1; break;
@@ -1331,10 +1789,8 @@ static TrapFrame *syscall(TrapFrame *f) {
             !port || port > 65535u || secure > 1u) {
             f->eax = (uint32_t)-1; break;
         }
-        unsigned slot = 0;
-        for (; slot < EXEC_FD_MAX; slot++)
-            if (!t->exec_fds[slot].open) break;
-        if (slot == EXEC_FD_MAX) {
+        unsigned slot=exec_free_slot(t,EXEC_FD_STORAGE);
+        if (slot == EXEC_FD_STORAGE) {
             f->eax = (uint32_t)-1; break;
         }
         uint32_t irq = drv_irq_save();
@@ -1361,7 +1817,7 @@ static TrapFrame *syscall(TrapFrame *f) {
         t->exec_fds[slot].open = true;
         t->exec_fds[slot].flags = 3u; /* bidirectional stream */
         t->exec_fds[slot].kind = secure ? 4u : 3u;
-        f->eax = slot + 3u;
+        f->eax = exec_publish_fd(t,slot);
         break;
     }
     case SYS_EXEC_CHMOD:
@@ -1394,27 +1850,34 @@ static TrapFrame *syscall(TrapFrame *f) {
         break;
     }
     case SYS_EXEC_WAITPID: {
-        uint32_t pid = f->ebx, status = f->ecx, opts = f->edx;
-        if (!t->exec_image || opts > 1u ||
-            (status && !exec_user_range(t, status, 4u, true))) {
-            f->eax = (uint32_t)-1; break;
+        uint32_t requested=f->ebx,status=f->ecx,opts=f->edx;
+        if(!t->exec_image || (opts&~1u) || (status && !exec_user_range(t,status,4,true))) {
+            f->eax=(uint32_t)-22;break;
         }
-        Task *child = task_by_pid(pid);
-        if (!child || !child->exec_image || child->parent_pid != t->pid) {
-            f->eax = (uint32_t)-1; break;
+        for(;;) {
+            uint32_t irq=drv_irq_save();
+            Task *child=NULL;bool any=false;
+            for(unsigned i=1;i<TASK_MAX;i++) {
+                Task *candidate=&tasks[i];
+                if(!candidate->exec_image || candidate->parent_pid!=t->pid || candidate->exec_reaped ||
+                   (requested!=(uint32_t)-1 && candidate->pid!=requested))continue;
+                any=true;
+                if(candidate->state==TASK_EXITED) {child=candidate;break;}
+            }
+            if(child) {
+                uint32_t encoded=child->termination_signal?child->termination_signal:(child->exit_code&255u)<<8;
+                if(status)memcpy((void *)(uintptr_t)(USER_CODE+status),&encoded,4);
+                f->eax=child->pid;child->exec_reaped=true;
+                drv_irq_restore(irq);break;
+            }
+            if(!any || (opts&1u)) {
+                f->eax=any?0u:(uint32_t)-10;drv_irq_restore(irq);break;
+            }
+            if(t->signal_pending&~(uint32_t)t->signal_mask) {
+                f->eax=(uint32_t)-4;drv_irq_restore(irq);break;
+            }
+            drv_irq_restore(irq);task_sleep_ms(2);
         }
-        if (opts == 1u && child->state != TASK_EXITED) {
-            f->eax = 0; break; /* Limited WNOHANG support. */
-        }
-        unsigned code;
-        if (!task_wait_elf(pid, 60000u, &code)) {
-            f->eax = (uint32_t)-1; break;
-        }
-        if (status) {
-            uint32_t encoded = (code & 255u) << 8;
-            memcpy((void *)(uintptr_t)(USER_CODE + status), &encoded, 4u);
-        }
-        f->eax = pid;
         break;
     }
     case SYS_SYSTEM:
@@ -1431,7 +1894,7 @@ static TrapFrame *syscall(TrapFrame *f) {
         break;
     }
     __asm__ volatile("cli");
-    return t->state == TASK_EXITED ? schedule(f) : f;
+    return t->state == TASK_EXITED ? schedule(f) : exec_deliver_signal(t, f);
 }
 TrapFrame *trap_dispatch(TrapFrame *f) {
     if (f->vector == 32) {
@@ -1468,6 +1931,13 @@ TrapFrame *trap_dispatch(TrapFrame *f) {
         serial_num(t->pid);
         serial_write(" vector=");
         serial_num(f->vector);
+        if(t->exec_image) {
+            char address[16];uint32_t fault_address;
+            __asm__ volatile("mov %%cr2,%0":"=r"(fault_address));
+            serial_write(" eip=");hex(address,f->eip);serial_write(address);
+            serial_write(" address=");hex(address,fault_address);serial_write(address);
+            serial_write(" sp=");hex(address,f->useresp);serial_write(address);
+        }
         serial_write("\n");
         finish(t, pass ? 0 : f->vector);
         return schedule(f);
