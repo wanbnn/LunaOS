@@ -13,6 +13,7 @@ from tempfile import TemporaryDirectory
 from urllib.parse import urlsplit
 import os
 import shutil
+import ssl
 import subprocess
 import threading
 
@@ -27,11 +28,20 @@ def git(*args, cwd=None):
 class SmartGitBackend(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     project_root: str
+    ca_pem: Path
 
     def log_message(self, fmt, *args):
         print("smart-http: " + fmt % args, flush=True)
 
     def do_GET(self):
+        if self.path == "/ca.pem":
+            payload = self.ca_pem.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-pem-file")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         self.serve_backend()
 
     def do_POST(self):
@@ -116,15 +126,46 @@ def main():
         git("symbolic-ref", "HEAD", "refs/heads/main", cwd=bare)
         before = git("rev-parse", "main", cwd=bare)
 
+        # Short-lived test CA, never installed in the release image.
+        ca = root / "ca.pem"
+        key = root / "ca.key"
+        leaf_key = root / "server.key"
+        csr = root / "server.csr"
+        leaf = root / "server.pem"
+        extensions = root / "extensions"
+        def openssl(*args):
+            subprocess.run(["openssl", *args], check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        openssl("req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                "-keyout", str(key), "-out", str(ca), "-days", "2",
+                "-subj", "/CN=Luna temporary Smart HTTP test CA",
+                "-addext", "basicConstraints=critical,CA:TRUE")
+        openssl("req", "-newkey", "rsa:2048", "-nodes", "-keyout", str(leaf_key),
+                "-out", str(csr), "-subj", "/CN=luna.test")
+        extensions.write_text("subjectAltName=DNS:luna.test\nbasicConstraints=CA:FALSE\n")
+        openssl("x509", "-req", "-in", str(csr), "-CA", str(ca),
+                "-CAkey", str(key), "-CAcreateserial", "-out", str(leaf),
+                "-days", "2", "-extfile", str(extensions))
+
         SmartGitBackend.project_root = str(root)
-        server = ThreadingHTTPServer(("127.0.0.1", 0), SmartGitBackend)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
+        SmartGitBackend.ca_pem = ca
+        plain = ThreadingHTTPServer(("127.0.0.1", 0), SmartGitBackend)
+        secured = ThreadingHTTPServer(("127.0.0.1", 0), SmartGitBackend)
+        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls.maximum_version = ssl.TLSVersion.TLSv1_2
+        tls.load_cert_chain(leaf, leaf_key)
+        secured.socket = tls.wrap_socket(secured.socket, server_side=True)
+        for server in (plain, secured):
+            threading.Thread(target=server.serve_forever, daemon=True).start()
         disk = TEST / "git-http-disk.img"
         shutil.copyfile(ROOT / "dist/LunaOS.img", disk)
         guest = None
         try:
             guest = Guest(disk, ram=int(os.environ.get("LUNA_GIT_TEST_RAM", "128")))
-            url = f"http://10.0.2.2:{server.server_port}/example.git"
+            guest.command('write /etc/hosts "10.0.2.2 luna.test"')
+            guest.command(f"wget http://10.0.2.2:{plain.server_port}/ca.pem /etc/tls/custom.pem",
+                          "Saved", timeout=45)
+            url = f"https://luna.test:{secured.server_port}/example.git"
             guest.command(f"git ls-remote {url}", "refs/heads/main", timeout=90)
             guest.command("echo $?", "\n0\n")
             guest.command(f"git clone {url} /home/luna/git-http-copy", timeout=120)
@@ -144,12 +185,14 @@ def main():
             guest.command("git -C /home/luna/git-http-copy fetch origin", timeout=120)
             guest.command("echo $?", "\n0\n")
             guest.command("sync", timeout=60)
-            print("PASS: guest Git Smart HTTP ls-remote/clone/push/fetch", flush=True)
+            print("PASS: guest Git Smart HTTPS ls-remote/clone/push/fetch with verified TLS",
+                  flush=True)
         finally:
             if guest:
                 guest.close()
-            server.shutdown()
-            server.server_close()
+            for server in (plain, secured):
+                server.shutdown()
+                server.server_close()
 
 
 if __name__ == "__main__":
