@@ -151,6 +151,22 @@ int main(int argc, char **argv)
     curl_easy_cleanup(h);
 
     memset(&result, 0, sizeof(result));
+    make_url(url, sizeof(url), port, "/auth-redirect");
+    h = prepare(url, &result);
+    CHECK(h);
+    {
+        struct curl_slist *headers = NULL;
+        headers = curl_slist_append(headers, "Authorization: Bearer fixture-token");
+        CHECK(headers);
+        curl_easy_setopt(h, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
+        CHECK(curl_easy_perform(h) == CURLE_OK);
+        CHECK(!strcmp(result.data, "NO-LEAK"));
+        curl_easy_cleanup(h);
+        curl_slist_free_all(headers);
+    }
+
+    memset(&result, 0, sizeof(result));
     make_url(url, sizeof(url), port, "/userpwd");
     h = prepare(url, &result);
     CHECK(h);
