@@ -455,6 +455,7 @@ struct luna_handle {
     /* Authentication retry bookkeeping. */
     int auth_sent;
     int auth_challenged;
+    int allow_sensitive_headers;
     /* Multi interface bookkeeping. */
     int in_use;
     int finished;
@@ -697,6 +698,11 @@ static CURLcode transfer_once(struct luna_handle *handle, const char *url,
         struct curl_slist *entry;
         for (entry = handle->headers; entry; entry = entry->next) {
             const char *value = entry->data;
+            if (!handle->allow_sensitive_headers &&
+                (header_is(value, "Authorization") ||
+                 header_is(value, "Proxy-Authorization") ||
+                 header_is(value, "Cookie")))
+                continue; /* Don't forward caller-supplied secrets cross-origin. */
             if (!strncasecmp(value, "Expect:", 7))
                 continue; /* Never advertise 100-continue on this backend. */
             length += snprintf(request + length, sizeof(request) - (size_t)length,
@@ -1017,6 +1023,7 @@ static CURLcode perform_request(struct luna_handle *handle)
     headers_init(&headers);
     handle->auth_challenged = 0;
     handle->auth_sent = 0;
+    handle->allow_sensitive_headers = 1;
     /* curl only sends credentials up front when Basic was requested
      * explicitly; otherwise it waits for the 401 challenge. */
     if (handle->httpauth == CURLAUTH_BASIC && (handle->username || handle->userpwd))
@@ -1064,6 +1071,7 @@ static CURLcode perform_request(struct luna_handle *handle)
                 strcmp(base.host, redirected.host) || base.port != redirected.port) {
                 allow_credentials = 0;
                 handle->auth_sent = 0;
+                handle->allow_sensitive_headers = 0;
             }
             snprintf(current, sizeof(current), "%s", next);
         }
