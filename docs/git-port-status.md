@@ -2,7 +2,7 @@
 
 **Git 2.56.1 executa nativamente no LunaOS e esta incluido em `/bin/git`.**
 Dash upstream 0.5.12 fornece `/bin/sh`. O porte completo ainda nao foi
-concluido: HTTPS/SSH e toda a matriz avancada permanecem pendentes.
+concluido: a camada HTTP está em desenvolvimento, mas HTTPS/SSH e toda a matriz avancada permanecem sem validação integral.
 
 Uso, builds e limites: [git-native.md](git-native.md).
 

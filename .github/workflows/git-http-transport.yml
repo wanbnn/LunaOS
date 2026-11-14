@@ -1,0 +1,35 @@
+name: LunaOS Git HTTP transport regression
+on:
+  pull_request:
+    paths:
+      - 'sdk/curl-luna/**'
+      - 'tools/git-port/**'
+      - 'tests/curl_luna_host.*'
+      - '.github/workflows/git-http-transport.yml'
+      - 'Makefile'
+  push:
+    branches:
+      - main
+      - fix/git-http-transport-hardening
+    paths:
+      - 'sdk/curl-luna/**'
+      - 'tools/git-port/**'
+      - 'tests/curl_luna_host.*'
+      - '.github/workflows/git-http-transport.yml'
+      - 'Makefile'
+permissions:
+  contents: read
+jobs:
+  http-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install C compiler and zlib headers
+        run: sudo apt-get update -qq && sudo apt-get install -y gcc zlib1g-dev
+      - name: Run curl-luna host regression fixture
+        run: python3 tests/curl_luna_host.py
+      - name: Clarify guest limitation
+        run: |
+          echo 'This test verifies the HTTP client using plaintext host loopback.'
+          echo 'It does not validate guest-side networking, TLS, Git Smart HTTP, or SSH.'

@@ -14,6 +14,8 @@ on:
       - 'kernel/native_apps.c'
       - 'tools/git-port/**'
       - 'tests/git_native_guest.py'
+      - 'tests/git_http_guest.py'
+      - 'sdk/curl-luna/**'
       - 'third_party/dash'
       - 'third_party/git'
       - '.gitmodules'
@@ -36,6 +38,8 @@ on:
       - 'kernel/native_apps.c'
       - 'tools/git-port/**'
       - 'tests/git_native_guest.py'
+      - 'tests/git_http_guest.py'
+      - 'sdk/curl-luna/**'
       - 'third_party/dash'
       - 'third_party/git'
       - '.gitmodules'
@@ -99,6 +103,8 @@ jobs:
         run: python3 tests/elf32_guest.py
       - name: Execute bundled upstream Git and POSIX shell in QEMU
         run: python3 tests/git_native_guest.py
+      - name: Verify Git Smart HTTP clone and push inside QEMU
+        run: python3 tests/git_http_guest.py
       - name: Verify small offline workflows at 64 MiB
         env:
           LUNA_GIT_TEST_RAM: '64'

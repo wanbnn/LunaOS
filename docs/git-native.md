@@ -5,9 +5,10 @@ O build padrao inclui **Git 2.56.1** em `/bin/git` e **Dash 0.5.12** em
 do LunaOS. O lunaSH os encontra pelo PATH. Nao ha reimplementacao da CLI Git
 nem servico no host calculando commits, objetos ou historico.
 
-**Porte experimental: HTTPS/SSH ainda nao estao implementados.** A existencia
-do executavel e os testes locais nao encerram a matriz completa de
-`tests/git-full-acceptance.md`.
+**Porte experimental:** existe um helper nativo `git-remote-http` com cliente
+`curl-luna` e integração TLS ao kernel, mas operações Git Smart HTTP/HTTPS
+ainda exigem aprovação nos testes de QEMU. SSH não foi portado. Compilar o
+executável não encerra a matriz de `tests/git-full-acceptance.md`.
 
 ## Uso na nova imagem
 
@@ -91,3 +92,23 @@ O perfil completo usa 128 MiB por padrao.
   avancados da matriz completa ainda precisam de validacao especifica.
 
 As licencas e os caminhos do codigo-fonte ficam em `/etc/licenses`.
+
+## Transporte Git HTTP(S) em desenvolvimento
+
+O helper `/usr/libexec/git-core/git-remote-http` compartilha a mesma imagem
+`git-remote-https`. O cliente `sdk/curl-luna` usa HTTP/1.1 e a syscall
+`SYS_EXEC_TCP_CONNECT` para TCP/TLS verificado pelo kernel. Ele nao inclui
+um cliente SSH e nao substitui uma libcurl completa.
+
+A suite de regressão HTTP em Linux pode ser executada com
+`python3 tests/curl_luna_host.py`. Ela valida URL, POST binario, corpo chunked,
+redirecionamentos, cabeçalhos e eventos da API multi **sem TLS**.
+
+Para validar o protocolo Git Smart HTTPS de verdade, execute
+`make test-git-http-guest` apos gerar a imagem: o teste inicia o Git oficial
+dentro do QEMU, instala uma CA temporária em `/etc/tls/custom.pem` e se
+conecta ao backend Git de teste via TLS 1.2 com hostname verificado. Exercita
+`ls-remote`, `clone`, `push` e `fetch`; o host apenas hospeda o repositório.
+A CA de teste não é empacotada no sistema. **O resultado desse teste ainda
+não foi confirmado no guest.** HTTPS autenticado contra GitHub e transporte
+SSH permanecem pendentes.
