@@ -37,6 +37,12 @@ class Fixture(BaseHTTPRequestHandler):
         elif self.path == "/capture":
             self.respond(b"LEAK" if self.headers.get("Authorization") else b"NO-LEAK",
                          status=400 if self.headers.get("Authorization") else 200)
+        elif self.path == "/userpwd":
+            import base64
+            expected = "Basic " + base64.b64encode(b"tester:secret").decode("ascii")
+            self.respond(b"USERPWD-OK" if self.headers.get("Authorization") == expected
+                         else b"INVALID AUTH",
+                         status=200 if self.headers.get("Authorization") == expected else 401)
         elif self.path == "/informational":
             self.send_response_only(103, "Early Hints")
             self.end_headers()
