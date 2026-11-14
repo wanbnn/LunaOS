@@ -611,6 +611,7 @@ static CURLcode transfer_once(struct luna_handle *handle, const char *url,
     const char *body = NULL;
     size_t body_length = 0;
     int chunked_upload = 0;
+    int sized_upload = 0;
     char request[16384];
     int length;
     int secure;
@@ -640,7 +641,10 @@ static CURLcode transfer_once(struct luna_handle *handle, const char *url,
         body = handle->postfields;
         body_length = handle->postfieldsize;
     } else if (handle->read_cb) {
-        chunked_upload = 1;
+        if (handle->infilesize_set && handle->infilesize >= 0)
+            sized_upload = 1;
+        else
+            chunked_upload = 1;
     }
     /* No Expect handshake: send the request body without a speculative wait. */
 
@@ -683,6 +687,10 @@ static CURLcode transfer_once(struct luna_handle *handle, const char *url,
     if (body) {
         length += snprintf(request + length, sizeof(request) - (size_t)length,
                            "Content-Length: %lu\r\n", (unsigned long)body_length);
+    } else if (sized_upload) {
+        length += snprintf(request + length, sizeof(request) - (size_t)length,
+                           "Content-Length: %llu\r\n",
+                           (unsigned long long)handle->infilesize);
     } else if (chunked_upload) {
         length += snprintf(request + length, sizeof(request) - (size_t)length,
                            "Transfer-Encoding: chunked\r\n");
@@ -714,6 +722,19 @@ static CURLcode transfer_once(struct luna_handle *handle, const char *url,
             close(fd);
             set_error(handle, CURLE_SEND_ERROR, "the request body could not be sent");
             return CURLE_SEND_ERROR;
+        }
+    } else if (sized_upload) {
+        curl_off_t left = handle->infilesize;
+        while (left > 0) {
+            char buffer[4096];
+            size_t want = left < (curl_off_t)sizeof(buffer) ? (size_t)left : sizeof(buffer);
+            size_t produced = handle->read_cb(buffer, 1, want, handle->read_data);
+            if (!produced || produced > want || write_all(fd, buffer, produced)) {
+                close(fd);
+                set_error(handle, CURLE_READ_ERROR, "sized upload aborted or truncated");
+                return CURLE_READ_ERROR;
+            }
+            left -= (curl_off_t)produced;
         }
     } else if (chunked_upload) {
         char chunk[4096];
@@ -1101,7 +1122,8 @@ CURLcode curl_easy_setopt(CURL *handle, int option, ...)
     }
     case CURLOPT_POSTFIELDSIZE_LARGE: {
         curl_off_t size = va_arg(args, curl_off_t);
-        if (size > (curl_off_t)(size_t)-1 || size < -1) {
+        if (size < -1 || (size > 0 &&
+            (unsigned long long)size > (unsigned long long)SIZE_MAX)) {
             va_end(args);
             return CURLE_BAD_FUNCTION_ARGUMENT;
         }
