@@ -582,19 +582,17 @@ static int handle_credentials(struct luna_handle *handle, char *out, size_t capa
     const char *user = handle->username ? handle->username : "";
     const char *password = handle->password ? handle->password : "";
     if (!handle->username && handle->userpwd) {
-        const char *colon = strchr(handle->userpwd, ':');
-        if (!colon)
+        /* The colon must be preserved: Basic encodes username:password. */
+        size_t length = strlen(handle->userpwd);
+        if (length >= capacity || !strchr(handle->userpwd, ':'))
             return -1;
-        if ((size_t)(colon - handle->userpwd) >= capacity)
-            return -1;
-        memcpy(out, handle->userpwd, (size_t)(colon - handle->userpwd));
-        out[colon - handle->userpwd] = 0;
-        snprintf(out + (colon - handle->userpwd),
-                 capacity - (size_t)(colon - handle->userpwd), "%s", colon + 1);
+        memcpy(out, handle->userpwd, length + 1);
         return 0;
     }
-    snprintf(out, capacity, "%s:%s", user, password);
-    return 0;
+    {
+        int length = snprintf(out, capacity, "%s:%s", user, password);
+        return (length < 0 || (size_t)length >= capacity) ? -1 : 0;
+    }
 }
 
 /* Perform one request/response exchange on a fresh connection. */
@@ -744,6 +742,10 @@ static CURLcode transfer_once(struct luna_handle *handle, const char *url,
             char header[32];
             if (!produced)
                 break;
+            if (produced > sizeof(chunk)) {
+                close(fd);
+                return CURLE_READ_ERROR;
+            }
             snprintf(header, sizeof(header), "%lx\r\n", (unsigned long)produced);
             if (write_all(fd, header, strlen(header)) ||
                 write_all(fd, chunk, produced) ||
@@ -775,6 +777,10 @@ static CURLcode transfer_once(struct luna_handle *handle, const char *url,
         if (status < 100 || status > 599) {
             close(fd);
             return CURLE_RECV_ERROR;
+        }
+        if (status == 101) {
+            close(fd);
+            return CURLE_UNSUPPORTED_PROTOCOL;
         }
         if (status >= 200)
             break;
