@@ -78,7 +78,59 @@ static const char *value(const char *name) {
     for (int i = 0; i < 16; i++)
         if (!strcmp(name, vars[i].name))
             return vars[i].value;
-    return "";
+    return !strcmp(name, "PATH") ? "/bin:/usr/bin" : "";
+}
+/* Empty PATH entries select cwd, including a trailing colon. */
+static bool path_directory(const char **cursor, char directory[PATH_CAP]) {
+    while (*cursor) {
+        const char *entry = *cursor, *end = entry;
+        while (*end && *end != ':') end++;
+        *cursor = *end ? end + 1 : 0;
+        size_t n = (size_t)(end - entry);
+        if (n >= PATH_CAP) continue;
+        char raw[PATH_CAP];
+        memcpy(raw, entry, n);
+        raw[n] = 0;
+        if (fs_path(n ? raw : ".", directory)) return true;
+    }
+    return false;
+}
+static bool command_path(const char *name, char path[PATH_CAP]) {
+    if (strchr(name, '/')) return fs_path(name, path) && fs_find(path);
+    const char *cursor = value("PATH");
+    char directory[PATH_CAP];
+    while (path_directory(&cursor, directory)) {
+        size_t n = strlen(directory);
+        if (n + (n > 1 ? 1u : 0u) + strlen(name) > 120u) continue;
+        strcpy(path, directory);
+        if (n > 1) strcat(path, "/");
+        strcat(path, name);
+        File *file = fs_find(path);
+        if (file && !file->dir) return true;
+    }
+    return false;
+}
+static uint32_t launch_native(const char *path, int argc, char **argv) {
+    char envbuf[16][280];
+    const char *env[16];
+    const char *names[] = {"HOME", "PWD", "PATH"};
+    int count = 0;
+    for (unsigned i = 0; i < 3; i++) {
+        strcpy(envbuf[count], names[i]);
+        append(envbuf[count], "=", sizeof(envbuf[0]));
+        append(envbuf[count], value(names[i]), sizeof(envbuf[0]));
+        env[count] = envbuf[count]; count++;
+    }
+    for (int i = 0; i < 16 && count < 16; i++) {
+        if (!vars[i].name[0] || !strcmp(vars[i].name, "HOME") ||
+            !strcmp(vars[i].name, "PWD") || !strcmp(vars[i].name, "PATH") ||
+            strlen(vars[i].name) + strlen(vars[i].value) + 2u > 256u) continue;
+        strcpy(envbuf[count], vars[i].name);
+        append(envbuf[count], "=", sizeof(envbuf[0]));
+        append(envbuf[count], vars[i].value, sizeof(envbuf[0]));
+        env[count] = envbuf[count]; count++;
+    }
+    return task_spawn_elf_args(path, argc, (const char *const *)argv, count, env);
 }
 static int tokenize(const char *line, char tok[96][512]) {
     int n = 0, k = 0;
@@ -304,7 +356,7 @@ static bool direct_child(const char *p) {
         return p[0] == '/' && p[1] && !strchr(p + 1, '/');
     return !strncmp(p, cwd, n) && p[n] == '/' && p[n + 1] && !strchr(p + n + 1, '/');
 }
-static int execute(int argc, char **a, const char *input, char *out) {
+static int execute(int argc, char **a, const char *input, char *out, bool streams, bool *redirect_output) {
     out[0] = 0;
     if (!argc)
         return 0;
@@ -315,6 +367,7 @@ static int execute(int argc, char **a, const char *input, char *out) {
             emit(out, commands[i]);
             emit(out, (i % 7 == 6) ? "\n" : "  ");
         }
+        emit(out, "\nInstalled native applications: searched in $PATH; explicit paths also work.\n");
         emit(out, "\nSyntax: quotes, variables, |, >, >>, <, ;, &&, ||\nSuper: app search | "
                   "Alt+Tab: switch | Alt+F4: close | Tab: complete\n");
     } else if (!strcmp(c, "elfrun")) {
@@ -322,30 +375,7 @@ static int execute(int argc, char **a, const char *input, char *out) {
             emit(out, "usage: elfrun ELF32 [ARG ...] (max 24 argv)\n");
             return 2;
         }
-        /* Linux-like startup stack: argc, argv[], envp[], AT_NULL.
-         * Preserve local shell variables, without exporting OS secrets. */
-        char envbuf[16][280];
-        const char *env[16];
-        int count = 0;
-        strcpy(envbuf[count], "HOME=");
-        append(envbuf[count], account_home(), sizeof(envbuf[0]));
-        env[count] = envbuf[count]; count++;
-        strcpy(envbuf[count], "PWD=");
-        append(envbuf[count], cwd, sizeof(envbuf[0]));
-        env[count] = envbuf[count]; count++;
-        strcpy(envbuf[count], "PATH=/bin:/usr/bin");
-        env[count] = envbuf[count]; count++;
-        for (int i = 0; i < 16 && count < 16; i++) {
-            if (!vars[i].name[0] || strlen(vars[i].name) + strlen(vars[i].value) + 2u > 256u)
-                continue;
-            strcpy(envbuf[count], vars[i].name);
-            append(envbuf[count], "=", sizeof(envbuf[0]));
-            append(envbuf[count], vars[i].value, sizeof(envbuf[0]));
-            env[count] = envbuf[count];
-            count++;
-        }
-        uint32_t pid = task_spawn_elf_args(a[1], argc - 1,
-                                           (const char *const *)(a + 1), count, env);
+        uint32_t pid = launch_native(a[1], argc - 1, a + 1);
         if (!pid) {
             emit(out, "elfrun: unsupported ELF32, resource shortage or invalid arguments\n");
             return 1;
@@ -814,11 +844,13 @@ static int execute(int argc, char **a, const char *input, char *out) {
         emit(out, account_home());
         emit(out, "\nUSER=");
         emit(out, account_name());
+        emit(out, "\nPATH=");
+        emit(out, value("PATH"));
         emit(out, "\nPWD=");
         emit(out, cwd);
         emit(out, "\n");
         for (int i = 0; i < 16; i++)
-            if (vars[i].name[0]) {
+            if (vars[i].name[0] && strcmp(vars[i].name, "PATH")) {
                 emit(out, vars[i].name);
                 emit(out, "=");
                 emit(out, vars[i].value);
@@ -977,6 +1009,30 @@ static int execute(int argc, char **a, const char *input, char *out) {
         else
             poweroff();
     } else {
+        char path[PATH_CAP];
+        if (command_path(c, path)) {
+            if (streams) {
+                *redirect_output = false;
+                emit(out, "lunaSH: native application pipes/redirection are not supported yet\n");
+                return 2;
+            }
+            uint32_t pid = launch_native(path, argc, a);
+            if (!pid) {
+                emit(out, "lunaSH: cannot execute: ");
+                emit(out, c);
+                emit(out, " (unsupported executable, arguments or resource shortage)\n");
+                return 126;
+            }
+            unsigned code = 0;
+            while (!task_wait_elf(pid, 1000u, &code)) {
+                Task *child = task_by_pid(pid);
+                if (!child || child->parent_pid != task_current()->pid) {
+                    emit(out, "lunaSH: application process disappeared\n");
+                    return 1;
+                }
+            }
+            return (int)(code & 255u);
+        }
         emit(out, "lunaSH: unknown command: ");
         emit(out, c);
         emit(out, "\n");
@@ -1002,7 +1058,7 @@ void shell_run(const char *line) {
     }
     char input[CAP] = "", out[CAP] = "";
     int pos = 0;
-    bool run = true;
+    bool run = true, piped_input = false;
     while (pos < n) {
         char *argv[64];
         int argc = 0;
@@ -1045,7 +1101,7 @@ void shell_run(const char *line) {
             return;
         }
         if (run) {
-            bool valid = true;
+            bool valid = true, redirect_output = true;
             if (src) {
                 File *f = fs_find(src);
                 if (!f || f->dir) {
@@ -1064,8 +1120,10 @@ void shell_run(const char *line) {
                 }
             }
             if (valid)
-                status = execute(argc, argv, input, out);
-            if (dest && valid) {
+                status = execute(argc, argv, input, out,
+                                 src || dest || piped_input ||
+                                 (pos < n && is_operator(tok[pos], "|")), &redirect_output);
+            if (dest && valid && redirect_output) {
                 if (fs_write(dest, out, add)) {
                     strcpy(out, "lunaSH: redirection failed\n");
                     status = 1;
@@ -1074,7 +1132,8 @@ void shell_run(const char *line) {
             }
         }
         const char *sep = pos < n ? tok[pos++] : "";
-        if (is_operator(sep, "|")) {
+        piped_input = is_operator(sep, "|");
+        if (piped_input) {
             if (pos == n) {
                 shell_print("lunaSH: missing pipeline command\n");
                 status = 2;
@@ -1113,17 +1172,40 @@ static void complete(void) {
     int length = shell_cursor - begin;
     memcpy(prefix, shell_line + begin, length);
     prefix[length] = 0;
-    bool command = true;
-    for (int i = 0; i < begin; i++)
-        if (shell_line[i] != ' ' && shell_line[i] != '\t')
-            command = false;
-    char (*matches)[256] = heap_allocate(((size_t)fs_file_capacity + 64u) * 256u);
+    int previous = begin - 1;
+    while (previous >= 0 && (shell_line[previous] == ' ' || shell_line[previous] == '\t'))
+        previous--;
+    bool command = previous < 0 || shell_line[previous] == ';' ||
+                   shell_line[previous] == '|' || shell_line[previous] == '&';
+    const int match_limit = fs_file_capacity + (int)(sizeof(commands) / sizeof(commands[0]));
+    char (*matches)[256] = heap_allocate((size_t)match_limit * 256u);
     if (!matches) return;
     int count = 0;
-    if (command) {
-        for (int i = 0; commands[i] && count < fs_file_capacity + 64; i++)
+    if (command && !strchr(prefix, '/')) {
+        for (int i = 0; commands[i] && count < match_limit; i++)
             if (!strncmp(commands[i], prefix, length))
                 strcpy(matches[count++], commands[i]);
+        const char *cursor = value("PATH");
+        char directory[PATH_CAP];
+        while (path_directory(&cursor, directory)) {
+            size_t dn = strlen(directory);
+            for (int i = 0; i < fs_file_capacity && count < match_limit; i++) {
+                File *f = &files[i];
+                const char *name = 0;
+                if (!f->used || f->dir) continue;
+                if (!strcmp(directory, "/")) name = f->path + 1;
+                else if (!strncmp(f->path, directory, dn) && f->path[dn] == '/')
+                    name = f->path + dn + 1;
+                if (!name || strchr(name, '/') || strncmp(name, prefix, length)) continue;
+                unsigned char magic[4];
+                if (f->size < 4 || !fs_read_bytes(f, 0, magic, 4) ||
+                    memcmp(magic, "\177ELF", 4)) continue;
+                bool duplicate = false;
+                for (int j = 0; j < count; j++)
+                    if (!strcmp(matches[j], name)) duplicate = true;
+                if (!duplicate) strcpy(matches[count++], name);
+            }
+        }
     } else {
         char directory[PATH_CAP], fragment[256], lead[256] = "";
         int slash = -1;
@@ -1144,7 +1226,7 @@ static void complete(void) {
         }
         size_t dn = strlen(directory);
         bool only_dirs = !strncmp(shell_line, "cd ", 3);
-        for (int i = 0; i < fs_file_capacity && count < fs_file_capacity + 64; i++) {
+        for (int i = 0; i < fs_file_capacity && count < match_limit; i++) {
             File *f = &files[i];
             if (!f->used || (only_dirs && !f->dir))
                 continue;

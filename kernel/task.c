@@ -926,24 +926,24 @@ static TrapFrame *syscall(TrapFrame *f) {
         const char *path = t->exec_fds[fd - 3].path;
         File *file = fs_find(path);
         uint32_t before = file ? file->size : 0u;
+        uint32_t offset = (t->exec_fds[fd - 3].flags & 1024u) ?
+            before : t->exec_fds[fd - 3].offset;
         if (!file || file->dir ||
-            (!(t->exec_fds[fd - 3].flags & 1024u) &&
-             t->exec_fds[fd - 3].offset != before) ||
-            fs_write_bytes(path, (const void *)(uintptr_t)(USER_CODE + pos), length, true)) {
+            fs_write_at(path, (const void *)(uintptr_t)(USER_CODE + pos), length, offset)) {
             f->eax = (uint32_t)-1;
             break;
         }
-        /* fs_write_bytes can replace directory storage: do not dereference file. */
-        t->exec_fds[fd - 3].offset = before + length;
+        /* Do not retain a File pointer across filesystem mutation. */
+        t->exec_fds[fd - 3].offset = offset + length;
         f->eax = length;
         break;
     }
     case SYS_EXEC_OPEN: {
         uint32_t addr = f->ebx, flags = f->ecx;
-        /* Linux i386 O_{RDONLY,WRONLY,RDWR,CREAT,TRUNC,APPEND} subset. */
-        if (flags & ~(3u | 64u | 512u | 1024u) || (flags & 3u) == 3u ||
-            ((flags & 3u) && !(flags & (512u | 1024u))) ||
-            ((flags & (64u | 512u | 1024u)) && !(flags & 3u))) {
+        /* Linux i386 O_{RDONLY,WRONLY,RDWR,CREAT,EXCL,TRUNC,APPEND} subset. */
+        if (flags & ~(3u | 64u | 128u | 512u | 1024u) || (flags & 3u) == 3u ||
+            ((flags & 128u) && !(flags & 64u)) ||
+            ((flags & 512u) && !(flags & 3u))) {
             f->eax = (uint32_t)-1;
             break;
         }
@@ -962,6 +962,18 @@ static TrapFrame *syscall(TrapFrame *f) {
             if (!t->exec_fds[slot].open)
                 break;
         if (slot == EXEC_FD_MAX) { f->eax = (uint32_t)-1; break; }
+        if (flags & 128u) {
+            /* fs_create only allocates RAM. Exclude timer preemption across
+             * its existence check and insertion, never across disk I/O. */
+            uint32_t irq = drv_irq_save();
+            int rc = fs_create(path, false);
+            drv_irq_restore(irq);
+            if (rc) {
+                f->eax = rc == -2 ? (uint32_t)-17 : (uint32_t)-1;
+                break;
+            }
+            file = fs_find(path);
+        }
         if ((flags & 512u) || (!file && (flags & 64u))) {
             if (fs_write_bytes(path, "", 0, false)) {
                 f->eax = (uint32_t)-1; break;
@@ -1063,8 +1075,7 @@ static TrapFrame *syscall(TrapFrame *f) {
         int64_t base = whence == 0u ? 0 : whence == 1u ?
             t->exec_fds[fd - 3].offset : file->size;
         int64_t wanted = base + delta;
-        if (wanted < 0 || wanted > INT32_MAX ||
-            ((t->exec_fds[fd - 3].flags & 3u) && (uint32_t)wanted != file->size)) {
+        if (t->exec_fds[fd - 3].kind || wanted < 0 || wanted > INT32_MAX) {
             f->eax = (uint32_t)-1; break;
         }
         t->exec_fds[fd - 3].offset = (uint32_t)wanted;

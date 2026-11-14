@@ -5,6 +5,8 @@
 /* Minimal LunaOS freestanding C bridge. Not a complete POSIX libc.
  * Syscall numbers and errno policy are LunaOS-specific and experimental.
  * Pointers are 32-bit guest segment-relative offsets, not Linux addresses. */
+#define LUNA_EEXIST 17
+#define LUNA_O_EXCL 128
 #define LUNA_O_RDONLY 0
 #define LUNA_O_WRONLY 1
 #define LUNA_O_RDWR 2
@@ -32,7 +34,7 @@ int mkdir(const char *path, unsigned mode);
 int unlink(const char *path);
 int rename(const char *from, const char *to);
 int getpid(void);
-int pipe(int fds[2]); /* bounded 4096 B; returns -1 instead of blocking */
+int pipe(int fds[2]); /* inherited 4096 B; blocks with a bounded kernel wait */
 int fsync(int fd); /* persists a LunaFS2 snapshot */
 int luna_spawn(const char *path, const char *const argv[], const char *const envp[]);
 int luna_waitpid(int pid, int *status, int options); /* options 1 = WNOHANG */

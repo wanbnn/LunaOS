@@ -132,6 +132,22 @@ int main(void) {
     assert(fs_load());
     f=fs_find("/home/luna/big.bin");
     assert(matches(f, blob, 256u * 1024u));
+    /* Random writes: preserve binary suffix, zero holes, reject overflow,
+     * and make a zero-byte write past EOF a no-op. */
+    const char *patch_path = "/home/luna/patch.bin";
+    assert(!fs_write_bytes(patch_path, "abcdef", 6, false));
+    assert(!fs_chmod(patch_path, 0750));
+    assert(!fs_write_at(patch_path, "XY", 2, 2));
+    assert(matches(fs_find(patch_path), "abXYef", 6));
+    assert(!fs_write_at(patch_path, "Z", 1, 8));
+    assert(matches(fs_find(patch_path), "abXYef\0\0Z", 9));
+    assert(!fs_write_at(patch_path, NULL, 0, 1000));
+    assert(fs_write_at(patch_path, "x", 1, UINT32_MAX) < 0);
+    assert(fs_write_at("/home/luna", "x", 1, 0) < 0);
+    assert(fs_write_at("/home/luna/missing", "x", 1, 0) < 0);
+    assert(fs_save() && fs_load());
+    assert(matches(fs_find(patch_path), "abXYef\0\0Z", 9));
+    assert(fs_find(patch_path)->mode == 0100750u);
     /* Old v1 installed volume loads and upgrades on the next sync. */
     legacy_snapshot(100);
     assert(fs_load());
@@ -173,6 +189,19 @@ int main(void) {
     uint8_t *large=malloc(large_size);
     assert(large);memset(large,0x5a,large_size);
     assert(!fs_write_bytes("/home/luna/expanded.bin",large,large_size,false));
+    /* Disk-backed patches cross I/O boundaries without losing the tail.
+     * Failed snapshot writes must retain both live and remounted contents. */
+    assert(!fs_write_at("/home/luna/expanded.bin", "HEADER", 6, 16382));
+    memcpy(large + 16382, "HEADER", 6);
+    assert(matches(fs_find("/home/luna/expanded.bin"), large, large_size));
+    assert(fs_load());
+    assert(matches(fs_find("/home/luna/expanded.bin"), large, large_size));
+    writes_left = 4;
+    assert(fs_write_at("/home/luna/expanded.bin", "BAD", 3, 0) < 0);
+    writes_left = -1;
+    assert(matches(fs_find("/home/luna/expanded.bin"), large, large_size));
+    assert(fs_load());
+    assert(matches(fs_find("/home/luna/expanded.bin"), large, large_size));
     for(unsigned i=0;i<200;i++) {
         char path[80];snprintf(path,sizeof(path),"/home/luna/file-%u",i);
         assert(!fs_write(path,"expanded directory",false));

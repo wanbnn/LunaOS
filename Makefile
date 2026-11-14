@@ -492,7 +492,7 @@ test-fs-streaming:
 .PHONY: git-upstream-host-build git-upstream-host-test
 git-upstream-host-build:
 	@test -f third_party/git/Makefile || (echo "Missing upstream Git source. Run git submodule update --init --recursive third_party/git" && exit 1)
-	+$(MAKE) -C third_party/git -j2 NO_GETTEXT=YesPlease NO_TCLTK=YesPlease NO_PERL=YesPlease NO_PYTHON=YesPlease all
+	+$(MAKE) -C third_party/git -j2 NO_RUST=YesPlease NO_GETTEXT=YesPlease NO_TCLTK=YesPlease NO_PERL=YesPlease NO_PYTHON=YesPlease all
 
 git-upstream-host-test: git-upstream-host-build
 	$(PYTHON) tests/git_upstream_host.py --git third_party/git/git
@@ -530,10 +530,13 @@ build/libz-luna.a: $(ZLIB_LUNA_OBJ)
 .PHONY: luna-zlib-guest luna-guest-zlib-smoke
 luna-zlib-guest: build/libz-luna.a
 luna-guest-zlib-smoke: build/guest/zlib-smoke.elf
-build/guest/zlib-smoke.elf: sdk/guest/zlib_smoke.c sdk/guest/memory.c sdk/guest/posix.h sdk/guest/luna32.ld build/guest/hello.elf build/libz-luna.a
+build/guest/memory.o: sdk/guest/memory.c sdk/guest/posix.h
+	@mkdir -p build/guest
+	$(CC) -m32 -std=gnu11 -Os -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Isdk/guest -c $< -o $@
+
+build/guest/zlib-smoke.elf: sdk/guest/zlib_smoke.c build/guest/memory.o sdk/guest/posix.h sdk/guest/luna32.ld build/guest/hello.elf build/libz-luna.a
 	@mkdir -p build/guest
 	$(CC) -m32 -std=gnu11 -Os -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Isdk/guest -Ithird_party/zlib -c sdk/guest/zlib_smoke.c -o build/guest/zlib_smoke.o
-	$(CC) -m32 -std=gnu11 -Os -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Isdk/guest -c sdk/guest/memory.c -o build/guest/memory.o
 	$(LD) -m elf_i386 -T sdk/guest/luna32.ld --build-id=none -o $@ build/guest/crt0.o build/guest/zlib_smoke.o build/guest/posix.o build/guest/memory.o build/libz-luna.a
 	@file $@
 
@@ -563,7 +566,7 @@ build/guest/metadata-check.elf: sdk/guest/metadata_check.c sdk/guest/posix.h sdk
 
 .PHONY: luna-guest-runtime-smoke
 luna-guest-runtime-smoke: build/guest/runtime-smoke.elf
-build/guest/runtime-smoke.elf: sdk/guest/runtime_smoke.c sdk/guest/memory.c sdk/guest/posix.h sdk/guest/luna32.ld build/guest/hello.elf
+build/guest/runtime-smoke.elf: sdk/guest/runtime_smoke.c build/guest/memory.o sdk/guest/posix.h sdk/guest/luna32.ld build/guest/hello.elf
 	@mkdir -p build/guest
 	$(CC) -m32 -Os -std=gnu11 -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Isdk/guest -c sdk/guest/runtime_smoke.c -o build/guest/runtime_smoke.o
 	$(LD) -m elf_i386 -T sdk/guest/luna32.ld --build-id=none -o $@ build/guest/crt0.o build/guest/runtime_smoke.o build/guest/posix.o build/guest/memory.o

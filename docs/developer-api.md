@@ -275,3 +275,32 @@ Os testes de ABI usam mocks no host. `make test-cpython` verifica CPython,
 sintaxe de Python 3.12, imports e ambientes no QEMU. `make test-python`
 verifica MicroPython e o LunaSDK no guest.
 `make test-pip` usa wheels de teste e um índice HTTP local.
+
+
+## Aplicacoes instaladas no lunaSH
+
+O shell procura nomes que nao sejam comandos internos nos diretorios de
+`PATH`, por padrao `/bin:/usr/bin`. Instale o executavel ELF32 nativo com o
+nome do comando desejado: `/bin/minha-app` pode ser invocado como
+`minha-app argumento`, sem alias nem alteracao no codigo do shell.
+Comandos internos continuam tendo precedencia.
+
+Use `set PATH /bin:/usr/bin:/home/luna/bin` para incluir outro diretorio.
+Entradas relativas sao resolvidas contra o diretorio atual e entradas vazias
+(inclusive em `:/bin` ou `/bin:`) representam o diretorio atual. Caminhos
+explicitos como `/opt/app` e `./app` independem de `PATH`. O Tab inclui os
+arquivos com assinatura ELF encontrados em `PATH`, sem repetir nomes.
+
+A execucao direta espera a aplicacao terminar e disponibiliza seu codigo de
+saida em `$?`, com `&&`/`||` condicionados a esse resultado. HOME, PWD, PATH e
+as variaveis locais exportaveis sao passados ao processo. `elfrun` continua
+disponivel para lancamento assincrono e `elfwait` para espera explicita.
+O loader continua limitado ao ELF32/ABI LunaOS; arquivos Linux ou outros
+formatos nao se tornam compativeis por estarem no PATH. No estagio atual,
+a descoberta de ELF nao exige bits de execucao, pois o loader ainda nao
+implementa enforcement completo de permissoes.
+
+Pipes e redirecionamentos de aplicacoes nativas ainda nao sao suportados pelo
+shell: a tentativa e rejeitada antes de executar ou truncar o destino. Os
+pipes e redirecionamentos dos comandos internos conservam o comportamento
+anterior. Codigo 127 indica comando ausente, 126 indica falha no lancamento.

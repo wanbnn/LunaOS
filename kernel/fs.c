@@ -449,6 +449,67 @@ int fs_write_bytes(const char *path, const void *data, size_t n, bool add) {
     fs_dirty=true;
     return 0;
 }
+/* Random-access writes keep untouched bytes and zero-fill a seek past EOF.
+ * Large files use the existing replacement-snapshot transaction so a small
+ * patch never requires allocating the whole file in RAM. */
+int fs_write_at(const char *path, const void *data, size_t n, uint32_t offset) {
+    if (fs_locked || disk_readers || (n && !data) || n > UINT32_MAX - offset)
+        return -1;
+    File *f = fs_find(path);
+    if (!f || f->dir)
+        return -1;
+    if (!n)
+        return 0;
+    uint32_t end = offset + (uint32_t)n;
+    size_t wanted = end > f->size ? end : f->size;
+    size_t used = state_bytes(files, fs_file_capacity, data_limit, 0);
+    if (!used || wanted > data_limit || used - f->size > data_limit - wanted)
+        return -2;
+    if (wanted <= FILE_CACHE_BYTES) {
+        fs_locked = true;
+        char *buffer = allocate_data(wanted);
+        if (!buffer) { fs_locked = false; return -3; }
+        memset(buffer, 0, wanted + 1u);
+        if (f->size && !fs_read_bytes(f, 0, buffer, f->size)) {
+            heap_release(buffer);
+            fs_locked = false;
+            return -3;
+        }
+        memcpy(buffer + offset, data, n);
+        if (f->data) heap_release(f->data);
+        f->data = buffer;
+        f->size = (uint32_t)wanted;
+        f->mtime = f->ctime = fs_epoch();
+        fs_dirty = true;
+        fs_locked = false;
+        return 0;
+    }
+    if (!fs_begin_write(path, false, 0))
+        return -3;
+    /* The old File remains readable until fs_finish_write publishes the
+     * replacement. fs_begin_write does not resize the table for this path. */
+    uint8_t buffer[FS_IO_BYTES];
+    for (uint32_t pos = 0; pos < wanted;) {
+        size_t bytes = wanted - pos;
+        if (bytes > sizeof(buffer)) bytes = sizeof(buffer);
+        memset(buffer, 0, bytes);
+        if (pos < f->size) {
+            size_t old = f->size - pos;
+            if (old > bytes) old = bytes;
+            if (!fs_read_bytes(f, pos, buffer, old)) goto failed;
+        }
+        uint32_t left = pos > offset ? pos : offset;
+        uint32_t right = pos + (uint32_t)bytes < end ? pos + (uint32_t)bytes : end;
+        if (left < right)
+            memcpy(buffer + (left - pos), (const uint8_t *)data + (left - offset), right - left);
+        if (!fs_write_part(buffer, bytes)) goto failed;
+        pos += (uint32_t)bytes;
+    }
+    return fs_finish_write() ? 0 : -3;
+failed:
+    fs_abort_write(0);
+    return -3;
+}
 int fs_write(const char *path,const char *data,bool add) {
     if(!data)return -1;
     return fs_write_bytes(path,data,strlen(data),add);

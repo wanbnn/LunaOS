@@ -138,6 +138,7 @@ int fs_create(const char *, bool);
 int fs_remove(const char *);
 int fs_write(const char *, const char *, bool);
 int fs_write_bytes(const char *, const void *, size_t, bool);
+int fs_write_at(const char *, const void *, size_t, uint32_t);
 bool fs_read_bytes(const File *, uint32_t, void *, size_t);
 bool fs_materialize(File *);
 bool fs_read_text(const File *, char *, size_t);

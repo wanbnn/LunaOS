@@ -1,6 +1,8 @@
 # Porte do Git original ao LunaOS — contrato de compatibilidade
 
-**Status: fase 1 iniciada (fonte Git upstream 2.56.1 fixada, build e testes de referencia no host); execucao do Git no LunaOS guest ainda nao implementada.** Este documento define o requisito solicitado: executar o `git` real a partir do `lunaSH` com o mesmo fluxo de trabalho que em sistemas POSIX, incluindo trabalho offline, remotos HTTPS/SSH e interoperabilidade com repositórios criados em outros sistemas. Nenhuma substituicao parcial, emulacao de respostas ou dependencia obrigatoria de um host Linux e aceitavel.
+**Status: infraestrutura nativa experimental implementada e testada; execucao do Git upstream no LunaOS guest ainda nao implementada.**
+
+Estado consolidado, branches e verificacoes: [git-port-status.md](git-port-status.md). Este documento define o requisito solicitado: executar o `git` real a partir do `lunaSH` com o mesmo fluxo de trabalho que em sistemas POSIX, incluindo trabalho offline, remotos HTTPS/SSH e interoperabilidade com repositórios criados em outros sistemas. Nenhuma substituicao parcial, emulacao de respostas ou dependencia obrigatoria de um host Linux e aceitavel.
 
 ## Decisao arquitetural
 
@@ -13,7 +15,7 @@ Fontes:
 
 A execucao precisa acontecer no **LunaOS guest**, sem delegar todas as operacoes a um servico remoto ou ao sistema hospedeiro. A construcao cruzada no host e permitida. A versao upstream e os hashes dos artefatos devem ser fixados em um manifesto de origem antes de vendorizacao.
 
-## Bloqueios encontrados na main (13/11/2026)
+## Diagnostico inicial (historico, anterior a integracao do PR #8)
 
 | Subsistema | Estado verificavel na main | Contrato necessario para Git |
 | --- | --- | --- |
@@ -72,7 +74,7 @@ Nao habilitar login automatico, armazenar PAT em plaintext, desabilitar TLS, ign
 - Criado `git-upstream-host-build` / `git-upstream-host-test` no Makefile e CI `.github/workflows/git-upstream.yml` para compilar o Git original em Linux. Esses alvos nao entram na ISO.
 - Documentados o ambiente e as etapas em `tools/git-port/README.md`.
 
-**Ainda não há no LunaOS um processo user-mode do Git, loader, ABI POSIX, VFS completo ou SSH/HTTPS para Git.** Uma compilacao no host, mesmo aprovada, nao e demonstracao de Git funcional no guest. A branch parcial anterior `feat/lunash-native-git-foundation` continua isolada e nao deve ser mesclada.
+**Ainda não há processo user-mode do Git, ABI POSIX/libc completa, VFS completo ou SSH/HTTPS para Git. O loader ELF32 e parte da infraestrutura de processos ja foram integrados.** Uma compilacao no host, mesmo aprovada, nao e demonstracao de Git funcional no guest. A branch parcial anterior `feat/lunash-native-git-foundation` continua isolada e nao deve ser mesclada.
 
 ## Milestone 4 — estado da infraestrutura (13/11/2026)
 
@@ -96,3 +98,16 @@ metadados POSIX persistentes, symlinks, locks, timestamps e `rename`
 com todas as garantias Unix; BSD sockets múltiplos, smart Git HTTP(S)
 POST e SSH com host-key verification. Não anunciar Git nativo
 nem fazer merge apenas por testes de infraestrutura aprovados.
+
+
+## Atualizacao da integracao nativa
+
+A main `0fccc60` ja inclui `execve`, heap `brk` de ate 2 MiB com
+malloc/realloc/free, pipes bloqueantes herdados, chmod/mtime persistentes,
+iteracao de diretorios e um transporte TCP/TLS exclusivo. As listas de
+bloqueios dos milestones acima sao historicas; consultar o estado consolidado.
+
+A continuacao adiciona criacao exclusiva (`O_CREAT|O_EXCL`, retorno
+`-LUNA_EEXIST`), seek/escrita em offsets arbitrarios e preenchimento de
+lacunas com zeros. Arquivos maiores que 64 KiB usam substituicao de snapshot,
+com RAM limitada por bloco. Isso nao fornece libc completa nem executa Git.

@@ -20,9 +20,12 @@ make git-upstream-host-build
 make git-upstream-host-test
 ```
 
-These targets compile the **actual upstream Git** on the *developer host* and exercise offline workflows using a temporary local bare remote; they do not run Git in the guest. The host requires GCC, make, Python 3, zlib, libcurl, OpenSSL and expat development headers.
+These targets compile the **actual upstream Git** on the *developer host* and exercise offline workflows using a temporary local bare remote; they do not run Git in the guest. The host requires GCC, make, Python 3, zlib, libcurl, OpenSSL and expat development headers. The build selects upstream `NO_RUST=YesPlease` to use the C implementations without requiring Cargo.
 
-## Architecture work required next
+Current implementation and remaining work: [port status](../../docs/git-port-status.md).
+The numbered list below describes the original plan, not the current completion state.
+
+## Original architecture plan
 
 1. Implement a user-mode executable loader and process launch for `git`, with argv/env/stdio/exit, pipes and signals. **Do not run upstream Git as a kernel built-in**.
 2. Add POSIX-compatible VFS/libc semantics, including directory traversal, file metadata, atomic rename, locking, memory allocation, fsync, chmod, symlink and stat.
@@ -31,7 +34,7 @@ These targets compile the **actual upstream Git** on the *developer host* and ex
 5. Execute the same host fixture on the guest using real Git, then expand the suite to remote HTTPS/SSH and the full command matrix in `tests/git-full-acceptance.md`.
 6. Only then integrate launcher dispatch in `lunaSH` to a real executable, and consider a production merge.
 
-The existing LunaFS2 is not a drop-in POSIX file system and the current lunaSH command dispatcher does not execute ordinary ELF programs. Merely shipping upstream source or building it on Linux **does not satisfy the user's full Git requirement**.
+LunaFS2 is not a drop-in POSIX file system. lunaSH can execute restricted native ELF32 programs using `elfrun`, but no upstream Git executable has been ported. Merely shipping upstream source or building it on Linux **does not satisfy the user's full Git requirement**.
 
 ## CI scope
 
@@ -50,7 +53,7 @@ can be built for freestanding i386 with `make luna-zlib-guest`, and
 See `docs/elf32-execution.md` for the exact syscall semantics
 and limitations. The CI workflow
 `.github/workflows/elf32-exec.yml` verifies native execution.
-These pieces are **NOT POSIX-compliant enough for official Git**:
+Historical milestone gaps (partly addressed since integration; see the current status). These pieces are **NOT POSIX-compliant enough for official Git**:
 `fork/execve`, blocking inherited pipes, mmap, symlinks,
 full stat/mtime/mode, locking/fsync semantics and per-process
 network sockets/Smart HTTP/SSH still need implementation.

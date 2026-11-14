@@ -15,6 +15,11 @@ static int atoi_small(const char *s) {
     return n;
 }
 int main(int argc, char **argv, char **envp) {
+    if (argc == 2 && argv[1][0] == 'L') {
+        int fd = open("/tmp/runtime-test.lock",
+                      LUNA_O_WRONLY | LUNA_O_CREAT | LUNA_O_EXCL | LUNA_O_TRUNC);
+        return fd == -LUNA_EEXIST ? 0 : 155;
+    }
     if (argc==3 && argv[1][0]=='C') {
         int fd=atoi_small(argv[2]);
         if(fd<3)return 131;
@@ -40,6 +45,33 @@ int main(int argc, char **argv, char **envp) {
     for(unsigned i=0;i<8192u*8u;i++)
         if(zero[i])return 138;
     free(zero);
+    static const char lock_path[] = "/tmp/runtime-test.lock";
+    int lock = open(lock_path, LUNA_O_RDWR | LUNA_O_CREAT | LUNA_O_EXCL, 0600);
+    if (lock < 0 || write(lock, "lock", 4) != 4) return 147;
+    if (open(lock_path, LUNA_O_WRONLY | LUNA_O_CREAT | LUNA_O_EXCL | LUNA_O_TRUNC,
+             0600) != -LUNA_EEXIST) return 148;
+    const char *lock_args[] = {"/tmp/runtime.elf", "Lock", 0};
+    int contender = luna_spawn("/tmp/runtime.elf", lock_args,
+                               (const char *const *)envp);
+    int lock_status = -1;
+    if (contender < 1 || luna_waitpid(contender, &lock_status, 0) != contender ||
+        lock_status) return 156;
+    /* Index/pack-like header patch, then seek beyond EOF with zero filling. */
+    if (lseek(lock, 1, LUNA_SEEK_SET) != 1 || write(lock, "A", 1) != 1 ||
+        lseek(lock, 6, LUNA_SEEK_SET) != 6 || write(lock, "Z", 1) != 1 ||
+        lseek(lock, 0, LUNA_SEEK_SET) != 0) return 149;
+    char content[8] = {0};
+    static const char expected_file[] = {'l','A','c','k',0,0,'Z'};
+    if (read(lock, content, sizeof(content)) != 7) return 150;
+    for (unsigned i = 0; i < sizeof(expected_file); i++)
+        if (content[i] != expected_file[i]) return 151;
+    if (close(lock)) return 152;
+    /* O_APPEND must ignore the seek position for writes. */
+    lock = open(lock_path, LUNA_O_WRONLY | LUNA_O_APPEND);
+    if (lock < 0 || lseek(lock, 0, LUNA_SEEK_SET) != 0 ||
+        write(lock, "!", 1) != 1 || close(lock)) return 153;
+    LunaGuestStat info;
+    if (luna_stat(lock_path, &info) || info.size != 8 || unlink(lock_path)) return 154;
     int pair[2];
     if(pipe(pair))return 139;
     char writefd[8]={0};

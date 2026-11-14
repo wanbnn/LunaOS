@@ -35,8 +35,8 @@
 #define SYS_EXIT 3
 #define SYS_SYSTEM 4
 #define SYS_PROBE_FAIL 5
-#define SYS_EXEC_WRITE 6 /* ELF32 ring-3 stdout only, not POSIX write(2). */
-#define SYS_EXEC_OPEN 7  /* Read-only, LunaOS-specific ABI. */
+#define SYS_EXEC_WRITE 6 /* ELF32 console/file/pipe write; LunaOS-specific limits. */
+#define SYS_EXEC_OPEN 7  /* LunaOS flags; includes exclusive-create lockfiles. */
 #define SYS_EXEC_READ 8
 #define SYS_EXEC_CLOSE 9
 #define SYS_EXEC_LSEEK 10
@@ -47,7 +47,7 @@
 #define SYS_EXEC_UNLINK 15
 #define SYS_EXEC_RENAME 16
 #define SYS_EXEC_GETPID 17
-#define SYS_EXEC_PIPE 18 /* Bounded pipe: immediate EAGAIN-like failure when empty/full. */
+#define SYS_EXEC_PIPE 18 /* Inherited 4096-byte pipe, blocking with a bounded wait. */
 #define SYS_EXEC_FSYNC 19 /* Commits LunaFS2 snapshot for durable writes. */
 #define SYS_EXEC_SPAWN 20 /* Native child process, argv/envp pointers. */
 #define SYS_EXEC_WAITPID 21 /* Child exit status, not full waitpid(2) yet. */

@@ -1,8 +1,10 @@
-# LunaOS native ELF32 user-mode execution — Milestone 3
+# LunaOS native ELF32 user-mode execution — milestone history
 
 **State: validated in QEMU for native ELF programs; not a full POSIX ABI, and
 upstream Git 2.56.1 still does NOT execute in the LunaOS guest.**
-Implementation is in PR #8 (draft; no main merge).
+PR #8 is merged in main. Current limits and verified features are recorded in
+[git-port-status.md](git-port-status.md). The milestone sections below preserve
+the original implementation history and are not a current feature inventory.
 
 ## What is implemented
 

@@ -3,6 +3,7 @@ on:
   pull_request:
     paths:
       - '.gitmodules'
+      - 'Makefile'
       - 'third_party/git'
       - 'tools/git-port/**'
       - 'tests/git_upstream_host.py'
@@ -11,6 +12,7 @@ on:
     branches: [feat/full-upstream-git-port]
     paths:
       - '.gitmodules'
+      - 'Makefile'
       - 'third_party/git'
       - 'tools/git-port/**'
       - 'tests/git_upstream_host.py'
@@ -40,7 +42,7 @@ jobs:
           git -C third_party/git describe --tags --exact-match HEAD | grep -Fx v2.56.1
       - name: Build official Git (host comparison only)
         run: |
-          make -C third_party/git -j2 NO_GETTEXT=YesPlease NO_TCLTK=YesPlease NO_PERL=YesPlease NO_PYTHON=YesPlease all
+          make -C third_party/git -j2 NO_RUST=YesPlease NO_GETTEXT=YesPlease NO_TCLTK=YesPlease NO_PERL=YesPlease NO_PYTHON=YesPlease all
       - name: Verify official Git CLI and local push/pull fixture
         run: |
           python3 tests/git_upstream_host.py --git third_party/git/git

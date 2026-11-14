@@ -10,7 +10,7 @@ import shutil
 import struct
 import threading
 
-from guest import Guest, ROOT, TEST
+from guest import Guest, ROOT, TEST, memory, symbol_address, wait_until
 
 
 def sample_elf() -> bytes:
@@ -255,6 +255,52 @@ try:
     assert "LUNA GUEST C POSIX OK" in g.transcript, g.transcript[-3000:]
     g.command("cat /tmp/guest-c-after.txt", "C SDK FILE WRITE OK")
     print("PASS: actual freestanding C ELF32, i386 crt0, argv/envp and file syscalls in QEMU", flush=True)
+    # Applications installed after boot need no per-program shell alias.
+    g.command("mkdir /bin")
+    g.command(f"wget http://10.0.2.2:{port}/c-hello.elf /bin/guest-app", "Saved", timeout=30)
+    g.command("guest-app Apple Banana && echo PATH APPLICATION OK", "PATH APPLICATION OK", timeout=40)
+    g.command("guest-app Wrong || echo APPLICATION FAILED", "APPLICATION FAILED")
+    # Tab updates the editor without a UART echo: use real keyboard events
+    # and inspect the editor, rather than the serial command echo handshake.
+    for key in ("g", "u", "e", "s", "t", "minus", "a", "tab"):
+        g.key(key)
+    line_address = symbol_address("shell_line")
+    wait_until(lambda: memory(g, line_address, 11) == b"guest-app \0")
+    g.command("Wrong")
+    g.command("echo $?", "40")
+    g.command("echo $?", "0")
+    # Use a second command to observe the foreground application's exit code;
+    # variable expansion for an entire line precedes command execution.
+    g.command("guest-app Wrong")
+    g.command("echo $?", "40")
+    g.command("set PATH /tmp:/bin")
+    g.command("env", "PATH=/tmp:/bin")
+    g.command("write /tmp/guest-app invalid-shadow")
+    g.command("guest-app", "cannot execute")
+    g.command("echo $?", "126")
+    g.command("rm /tmp/guest-app")
+    g.command("guest-app Apple Banana && echo CUSTOM PATH OK", "CUSTOM PATH OK", timeout=40)
+    g.command("set PATH /missing")
+    g.command("guest-app", "unknown command")
+    g.command("echo $?", "127")
+    g.command("/missing/guest-app", "unknown command")
+    g.command("echo $?", "127")
+    g.command("/bin/guest-app Apple Banana && echo ABSOLUTE APP OK", "ABSOLUTE APP OK", timeout=40)
+    g.command("cd /bin")
+    g.command("./guest-app Wrong")
+    g.command("echo $?", "40")
+    g.command("set PATH :/missing")
+    g.command("guest-app Wrong")
+    g.command("echo $?", "40")
+    g.command("cd /home/luna")
+    g.command("set PATH /bin:/usr/bin")
+    g.command("write /tmp/invalid-app not-an-executable")
+    g.command("/tmp/invalid-app", "cannot execute")
+    g.command("echo $?", "126")
+    g.command("write /tmp/keep-output PRESERVED")
+    g.command("guest-app Apple Banana > /tmp/keep-output", "not supported yet")
+    g.command("cat /tmp/keep-output", "PRESERVED")
+    print("PASS: installed application PATH lookup, explicit paths, foreground exit status and safe stream rejection", flush=True)
     g.command(f"wget http://10.0.2.2:{port}/zlib.elf /tmp/zlib.elf", "Saved", timeout=30)
     launched = g.command("elfrun /tmp/zlib.elf", "started ring-3 process")
     match = re.search(r"started ring-3 process pid=(\d+)", launched)
@@ -277,7 +323,7 @@ try:
     assert match, launched
     g.command("elfwait " + match.group(1), "exit code 0", timeout=40)
     assert "LUNA HEAP AND IPC GUEST OK" in g.transcript, g.transcript[-4000:]
-    print("PASS: dynamic brk/malloc/free/realloc and blocking inherited-pipe child IPC", flush=True)
+    print("PASS: brk heap, exclusive locks across processes, random writes, zero-filled holes, append and inherited-pipe IPC", flush=True)
 
 
     g.command(f"wget http://10.0.2.2:{port}/execve.elf /tmp/execve.elf", "Saved", timeout=30)
