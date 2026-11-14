@@ -23,9 +23,42 @@
 #include <unistd.h>
 #include <errno.h>
 #include <zlib.h>
+#ifdef LUNA_CURL_HOST_TEST
+#include <netdb.h>
+#include <sys/socket.h>
+#endif
 
-/* LunaOS guest syscall: connect a TCP (optionally TLS) stream. The kernel
- * resolves the name, negotiates TLS and validates the peer certificate. */
+#ifdef LUNA_CURL_HOST_TEST
+/* Host regression harness: HTTP-only loopback sockets, NEVER a TLS fallback. */
+static int luna_stream_connect(const char *host, unsigned port, int secure)
+{
+    struct addrinfo hints, *addresses = NULL, *cursor;
+    char service[8];
+    int fd = -1;
+    if (secure) {
+        errno = EOPNOTSUPP;
+        return -1;
+    }
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    snprintf(service, sizeof(service), "%u", port);
+    if (getaddrinfo(host, service, &hints, &addresses))
+        return -1;
+    for (cursor = addresses; cursor; cursor = cursor->ai_next) {
+        fd = socket(cursor->ai_family, cursor->ai_socktype, cursor->ai_protocol);
+        if (fd < 0)
+            continue;
+        if (!connect(fd, cursor->ai_addr, cursor->ai_addrlen))
+            break;
+        close(fd);
+        fd = -1;
+    }
+    freeaddrinfo(addresses);
+    return fd;
+}
+#else
+/* LunaOS guest syscall: TCP or verified TLS, including peer hostname checks. */
 #define LUNA_SYS_TCP_CONNECT 25
 
 static long luna_syscall3(unsigned number, unsigned a, unsigned b, unsigned c)
@@ -41,11 +74,12 @@ static long luna_syscall3(unsigned number, unsigned a, unsigned b, unsigned c)
 static int luna_stream_connect(const char *host, unsigned port, int secure)
 {
     long fd = luna_syscall3(LUNA_SYS_TCP_CONNECT, (unsigned)(uintptr_t)host,
-                            port, secure ? 1u : 0u);
+                           port, secure ? 1u : 0u);
     if (fd < 3)
         return -1;
     return (int)fd;
 }
+#endif
 
 /* ------------------------------------------------------------------ */
 /* Small helpers                                                       */
@@ -131,63 +165,74 @@ struct luna_url {
 
 static int url_parse(const char *url, struct luna_url *out)
 {
-    const char *p = url;
-    const char *host_start, *host_end;
+    const char *p, *host_start, *host_end, *colon;
 
     if (!url)
         return -1;
+    p = url;
     memset(out, 0, sizeof(*out));
     if (!strncasecmp(p, "http://", 7)) {
-        memcpy(out->scheme, "http", 4);
+        strcpy(out->scheme, "http");
         out->port = 80;
         p += 7;
     } else if (!strncasecmp(p, "https://", 8)) {
-        memcpy(out->scheme, "https", 5);
+        strcpy(out->scheme, "https");
         out->port = 443;
         p += 8;
     } else {
         return -1;
     }
+
     host_start = p;
     while (*p && *p != '/' && *p != '?' && *p != '#')
         p++;
     host_end = p;
-    if (host_end == host_start)
-        return -1;
+    if (host_end == host_start || memchr(host_start, '@', (size_t)(host_end-host_start)))
+        return -1; /* Userinfo belongs in CURLOPT_USERNAME / CURLOPT_PASSWORD. */
+    if (*host_start == '[')
+        return -1; /* IPv6 literals are not yet supported by this backend. */
+    colon = memchr(host_start, ':', (size_t)(host_end - host_start));
+    if (colon) {
+        const char *digit;
+        unsigned port = 0;
+        if (colon == host_start || colon + 1 == host_end)
+            return -1;
+        for (digit = colon + 1; digit < host_end; digit++) {
+            if (*digit < '0' || *digit > '9')
+                return -1;
+            port = port * 10u + (unsigned)(*digit - '0');
+            if (port > 65535u)
+                return -1;
+        }
+        if (!port)
+            return -1;
+        out->port = port;
+        host_end = colon;
+    }
     {
         size_t length = (size_t)(host_end - host_start);
-        const char *colon = memchr(host_start, ':', length);
-        if (colon) {
-            unsigned port = 0;
-            const char *digits = colon + 1;
-            if (!*digits)
-                return -1;
-            for (; *digits; digits++) {
-                if (*digits < '0' || *digits > '9')
-                    return -1;
-                port = port * 10u + (unsigned)(*digits - '0');
-                if (port > 65535u)
-                    return -1;
-            }
-            out->port = port;
-            length = (size_t)(colon - host_start);
-        }
-        if (length >= sizeof(out->host))
+        if (!length || length >= sizeof(out->host))
             return -1;
         memcpy(out->host, host_start, length);
         out->host[length] = 0;
     }
-    if (!*p || *p == '#') {
-        strcpy(out->path, "/");
-    } else {
-        size_t length = strlen(p);
-        const char *hash = strchr(p, '#');
-        if (hash)
-            length = (size_t)(hash - p);
-        if (length >= sizeof(out->path))
-            return -1;
-        memcpy(out->path, p, length);
-        out->path[length] = 0;
+    {
+        const char *fragment = strchr(p, '#');
+        size_t length = fragment ? (size_t)(fragment - p) : strlen(p);
+        if (*p == '?' ) {
+            if (length + 1 >= sizeof(out->path))
+                return -1;
+            out->path[0] = '/';
+            memcpy(out->path + 1, p, length);
+            out->path[length + 1] = 0;
+        } else if (!length) {
+            strcpy(out->path, "/");
+        } else {
+            if (length >= sizeof(out->path))
+                return -1;
+            memcpy(out->path, p, length);
+            out->path[length] = 0;
+        }
     }
     return 0;
 }
@@ -211,37 +256,39 @@ static int url_resolve(const struct luna_url *base, const char *location,
         strcpy(out, location);
         return 0;
     }
-    if (location[0] == '/') {
-        written = snprintf(out, capacity, "%s://%s", base->scheme, base->host);
-        if (written < 0 || (size_t)written >= capacity)
+    written = snprintf(out, capacity, "%s://%s", base->scheme, base->host);
+    if (written < 0 || (size_t)written >= capacity)
+        return -1;
+    if (base->port != url_default_port(base->scheme)) {
+        int more = snprintf(out + written, capacity - (size_t)written,
+                            ":%u", base->port);
+        if (more < 0 || (size_t)more >= capacity - (size_t)written)
             return -1;
-        if (base->port != url_default_port(base->scheme)) {
-            int more = snprintf(out + written, capacity - (size_t)written, ":%u",
-                                base->port);
-            if (more < 0 || (size_t)more >= capacity - (size_t)written)
-                return -1;
-            written += more;
-        }
-        {
-            int more = snprintf(out + written, capacity - (size_t)written, "%s",
-                                location);
-            if (more < 0 || (size_t)more >= capacity - (size_t)written)
-                return -1;
-        }
-        return 0;
+        written += more;
+    }
+    if (location[0] == '/') {
+        int more = snprintf(out + written, capacity - (size_t)written,
+                            "%s", location);
+        return (more < 0 || (size_t)more >= capacity - (size_t)written) ? -1 : 0;
     }
     {
         char base_path[2048];
-        const char *slash;
+        char *slash;
+        size_t path_length;
         snprintf(base_path, sizeof(base_path), "%s", base->path);
+        if ((slash = strchr(base_path, '?')))
+            *slash = 0;
         slash = strrchr(base_path, '/');
         if (slash)
-            base_path[slash - base_path + 1] = 0;
+            slash[1] = 0;
         else
-            base_path[0] = 0;
-        written = snprintf(out, capacity, "%s://%s%s%s", base->scheme, base->host,
-                           base_path, location);
-        if (written < 0 || (size_t)written >= capacity)
+            strcpy(base_path, "/");
+        path_length = strlen(base_path);
+        if (path_length + strlen(location) >= sizeof(base_path))
+            return -1;
+        written = snprintf(out + written, capacity - (size_t)written,
+                           "%s%s", base_path, location);
+        if (written < 0 || (size_t)written >= capacity - (size_t)written)
             return -1;
     }
     return 0;
@@ -308,8 +355,9 @@ static long reader_line(struct luna_reader *reader, char *out, size_t capacity)
                 out[used] = 0;
                 return (long)used;
             }
-            if (used + 1 < capacity)
-                out[used++] = (char)byte;
+            if (used + 1 >= capacity)
+                return -1;
+            out[used++] = (char)byte;
         }
     }
 }
@@ -370,6 +418,7 @@ struct luna_handle {
     struct curl_slist *headers;
     char *postfields;
     size_t postfieldsize;
+    int postfieldsize_set;
     int post;
     int nobody;
     int upload;
@@ -426,6 +475,21 @@ static void set_error(struct luna_handle *handle, CURLcode code, const char *mes
     }
     if (handle->verbose)
         fprintf(stderr, "curl-luna: %s\n", message);
+}
+
+static int deliver_header(struct luna_handle *handle, const char *line)
+{
+    char header[4098];
+    size_t length = strlen(line);
+    if (length + 2 > sizeof(header))
+        return -1;
+    if (!handle->header_cb)
+        return 0;
+    memcpy(header, line, length);
+    header[length++] = '\r';
+    header[length++] = '\n';
+    return handle->header_cb(header, 1, length, handle->header_data) == length
+           ? 0 : -1;
 }
 
 static int deliver(struct luna_handle *handle, const void *data, size_t count)
@@ -512,20 +576,6 @@ static int write_all(int fd, const void *data, size_t count)
     return 0;
 }
 
-static const char *handle_header_value(struct luna_handle *handle, const char *name)
-{
-    struct curl_slist *entry;
-    for (entry = handle->headers; entry; entry = entry->next) {
-        if (header_is(entry->data, name)) {
-            const char *colon = strchr(entry->data, ':');
-            if (!colon)
-                return NULL;
-            return trim((char *)colon + 1);
-        }
-    }
-    return NULL;
-}
-
 /* Build the credentials string for Basic authentication. */
 static int handle_credentials(struct luna_handle *handle, char *out, size_t capacity)
 {
@@ -561,8 +611,6 @@ static CURLcode transfer_once(struct luna_handle *handle, const char *url,
     const char *body = NULL;
     size_t body_length = 0;
     int chunked_upload = 0;
-    int expect_continue = 0;
-    int status_read = 0;
     char request[16384];
     int length;
     int secure;
@@ -594,11 +642,7 @@ static CURLcode transfer_once(struct luna_handle *handle, const char *url,
     } else if (handle->read_cb) {
         chunked_upload = 1;
     }
-    {
-        const char *expect = handle_header_value(handle, "Expect");
-        if (expect && !strcasecmp(expect, "100-continue"))
-            expect_continue = 1;
-    }
+    /* No Expect handshake: send the request body without a speculative wait. */
 
     secure = !strcmp(parsed.scheme, "https");
     fd = luna_stream_connect(parsed.host, parsed.port, secure);
@@ -607,8 +651,9 @@ static CURLcode transfer_once(struct luna_handle *handle, const char *url,
                   "the LunaOS network stack could not open the connection");
         return CURLE_COULDNT_CONNECT;
     }
-    handle->connect_code = 200;
+    handle->connect_code = 0; /* No HTTP proxy CONNECT tunnel. */
     reader_init(&reader, fd);
+    handle->retry_after = -1;
 
     /* Request head. */
     length = snprintf(request, sizeof(request), "%s %s HTTP/1.1\r\n", method,
@@ -646,11 +691,8 @@ static CURLcode transfer_once(struct luna_handle *handle, const char *url,
         struct curl_slist *entry;
         for (entry = handle->headers; entry; entry = entry->next) {
             const char *value = entry->data;
-            if (!strncasecmp(value, "Expect:", 7)) {
-                const char *expect = trim((char *)value + 7);
-                if (!*expect || !strcasecmp(expect, "100-continue"))
-                    continue;
-            }
+            if (!strncasecmp(value, "Expect:", 7))
+                continue; /* Never advertise 100-continue on this backend. */
             length += snprintf(request + length, sizeof(request) - (size_t)length,
                                "%s\r\n", value);
         }
@@ -664,31 +706,6 @@ static CURLcode transfer_once(struct luna_handle *handle, const char *url,
         close(fd);
         set_error(handle, CURLE_SEND_ERROR, "the request could not be sent");
         return CURLE_SEND_ERROR;
-    }
-
-    /* A large upload waits for the server to accept the body. */
-    if (expect_continue) {
-        long got = reader_line(&reader, line, sizeof(line));
-        const char *space;
-        if (got < 0) {
-            close(fd);
-            set_error(handle, CURLE_GOT_NOTHING, "no answer before the upload");
-            return CURLE_GOT_NOTHING;
-        }
-        if (strncmp(line, "HTTP/1.", 7)) {
-            close(fd);
-            return CURLE_RECV_ERROR;
-        }
-        space = strchr(line, ' ');
-        status = space ? strtol(space + 1, NULL, 10) : 0;
-        if (status != 100) {
-            /* The server answered before reading the body. */
-            status_read = 1;
-            *status_out = status;
-            handle->http_code = status;
-            close(fd);
-            return CURLE_OK;
-        }
     }
 
     /* Request body. */
@@ -723,31 +740,55 @@ static CURLcode transfer_once(struct luna_handle *handle, const char *url,
         }
     }
 
-    /* Response status line. */
-    if (!status_read) {
+    /* Consume informational responses before the final HTTP status. */
+    for (;;) {
         long got = reader_line(&reader, line, sizeof(line));
         const char *space;
-        if (got < 0) {
+        if (got <= 0 || strncmp(line, "HTTP/1.", 7) ||
+            !(space = strchr(line, ' '))) {
             close(fd);
-            set_error(handle, CURLE_GOT_NOTHING, "the server did not answer");
-            return CURLE_GOT_NOTHING;
-        }
-        if (strncmp(line, "HTTP/1.", 7)) {
-            close(fd);
-            set_error(handle, CURLE_RECV_ERROR, "the answer was not HTTP");
+            set_error(handle, CURLE_RECV_ERROR, "the server did not send a valid HTTP status");
             return CURLE_RECV_ERROR;
         }
-        space = strchr(line, ' ');
-        status = space ? strtol(space + 1, NULL, 10) : 0;
+        status = strtol(space + 1, NULL, 10);
+        if (status < 100 || status > 599) {
+            close(fd);
+            return CURLE_RECV_ERROR;
+        }
+        if (status >= 200)
+            break;
+        /* 100 Continue / 103 Early Hints: skip their headers. */
+        do {
+            got = reader_line(&reader, line, sizeof(line));
+        } while (got > 0);
+        if (got < 0) {
+            close(fd);
+            return CURLE_RECV_ERROR;
+        }
+    }
+    if (deliver_header(handle, line)) {
+        close(fd);
+        return CURLE_WRITE_ERROR;
     }
 
     /* Response headers. */
     for (;;) {
         long got = reader_line(&reader, line, sizeof(line));
-        if (got <= 0)
+        if (got < 0) {
+            close(fd);
+            return CURLE_RECV_ERROR;
+        }
+        if (!got) {
+            if (deliver_header(handle, "")) {
+                close(fd);
+                return CURLE_WRITE_ERROR;
+            }
             break;
-        if (handle->header_cb)
-            handle->header_cb(line, 1, (size_t)got, handle->header_data);
+        }
+        if (deliver_header(handle, line)) {
+            close(fd);
+            return CURLE_WRITE_ERROR;
+        }
         if (header_is(line, "Location")) {
             const char *colon = strchr(line, ':');
             if (colon) {
@@ -793,7 +834,6 @@ static CURLcode transfer_once(struct luna_handle *handle, const char *url,
     free(handle->content_type);
     handle->content_type = headers->content_type ? dup_string(headers->content_type) : NULL;
     handle->auth_avail = CURLAUTH_BASIC;
-    handle->retry_after = -1;
 
     /* Response body. */
     if (status == 204 || status == 304 || handle->nobody ||
@@ -941,12 +981,14 @@ static CURLcode perform_request(struct luna_handle *handle)
     struct luna_headers headers;
     long status = 0;
     int redirects = 0;
+    int allow_credentials = 1;
     CURLcode code;
 
     if (!handle->url)
         return CURLE_URL_MALFORMAT;
     snprintf(current, sizeof(current), "%s", handle->url);
     headers_init(&headers);
+    handle->auth_challenged = 0;
     handle->auth_sent = 0;
     /* curl only sends credentials up front when Basic was requested
      * explicitly; otherwise it waits for the 401 challenge. */
@@ -959,7 +1001,7 @@ static CURLcode perform_request(struct luna_handle *handle)
         if (code != CURLE_OK)
             break;
         /* Authentication challenge: retry once with the credentials. */
-        if (status == 401 && !handle->auth_sent && !handle->auth_challenged &&
+        if (status == 401 && allow_credentials && !handle->auth_sent && !handle->auth_challenged &&
             (handle->username || handle->userpwd)) {
             handle->auth_sent = 1;
             handle->auth_challenged = 1;
@@ -981,9 +1023,20 @@ static CURLcode perform_request(struct luna_handle *handle)
         }
         {
             char next[4096];
-            if (url_resolve(&base, headers.location, next, sizeof(next))) {
+            struct luna_url redirected;
+            if (url_resolve(&base, headers.location, next, sizeof(next)) ||
+                url_parse(next, &redirected)) {
                 code = CURLE_URL_MALFORMAT;
                 break;
+            }
+            if (!strcmp(base.scheme, "https") && strcmp(redirected.scheme, "https")) {
+                code = CURLE_UNSUPPORTED_PROTOCOL; /* Never downgrade TLS. */
+                break;
+            }
+            if (strcmp(base.scheme, redirected.scheme) ||
+                strcmp(base.host, redirected.host) || base.port != redirected.port) {
+                allow_credentials = 0;
+                handle->auth_sent = 0;
             }
             snprintf(current, sizeof(current), "%s", next);
         }
@@ -1033,15 +1086,30 @@ CURLcode curl_easy_setopt(CURL *handle, int option, ...)
         session->headers = va_arg(args, struct curl_slist *);
         break;
     case CURLOPT_POSTFIELDS:
+        /* libcurl borrows this buffer; Git may pass binary pack data. */
         session->postfields = va_arg(args, char *);
-        session->postfieldsize = session->postfields ? strlen(session->postfields) : 0;
+        if (!session->postfieldsize_set)
+            session->postfieldsize = session->postfields ? strlen(session->postfields) : 0;
+        session->post = 1;
         break;
-    case CURLOPT_POSTFIELDSIZE:
-        session->postfieldsize = (size_t)va_arg(args, long);
+    case CURLOPT_POSTFIELDSIZE: {
+        long size = va_arg(args, long);
+        session->postfieldsize_set = size >= 0;
+        session->postfieldsize = size >= 0 ? (size_t)size :
+                                 (session->postfields ? strlen(session->postfields) : 0);
         break;
-    case CURLOPT_POSTFIELDSIZE_LARGE:
-        session->postfieldsize = (size_t)va_arg(args, curl_off_t);
+    }
+    case CURLOPT_POSTFIELDSIZE_LARGE: {
+        curl_off_t size = va_arg(args, curl_off_t);
+        if (size > (curl_off_t)(size_t)-1 || size < -1) {
+            va_end(args);
+            return CURLE_BAD_FUNCTION_ARGUMENT;
+        }
+        session->postfieldsize_set = size >= 0;
+        session->postfieldsize = size >= 0 ? (size_t)size :
+                                 (session->postfields ? strlen(session->postfields) : 0);
         break;
+    }
     case CURLOPT_POST:
         session->post = va_arg(args, long) ? 1 : 0;
         break;
@@ -1129,6 +1197,13 @@ CURLcode curl_easy_setopt(CURL *handle, int option, ...)
     case CURLOPT_HTTP_VERSION:
         session->http_version = va_arg(args, long);
         break;
+    case CURLOPT_PINNEDPUBLICKEY:
+        /* Never pretend that requested certificate pinning was enforced. */
+        if (va_arg(args, const char *)) {
+            va_end(args);
+            return CURLE_NOT_BUILT_IN;
+        }
+        break;
     case CURLOPT_ENCODING:
     case CURLOPT_CAINFO:
     case CURLOPT_CAPATH:
@@ -1143,7 +1218,6 @@ CURLcode curl_easy_setopt(CURL *handle, int option, ...)
     case CURLOPT_SSL_VERIFYPEER:
     case CURLOPT_SSL_VERIFYHOST:
     case CURLOPT_USE_SSL:
-    case CURLOPT_PINNEDPUBLICKEY:
     case CURLOPT_IPRESOLVE:
     case CURLOPT_PROTOCOLS:
     case CURLOPT_REDIR_PROTOCOLS:
@@ -1245,7 +1319,6 @@ void curl_easy_cleanup(CURL *handle)
         return;
     free(session->url);
     free(session->method);
-    free(session->postfields);
     free(session->username);
     free(session->password);
     free(session->userpwd);
@@ -1270,6 +1343,7 @@ CURL *curl_easy_duphandle(CURL *handle)
     copy->headers = source->headers;
     copy->postfields = source->postfields;
     copy->postfieldsize = source->postfieldsize;
+    copy->postfieldsize_set = source->postfieldsize_set;
     copy->post = source->post;
     copy->nobody = source->nobody;
     copy->upload = source->upload;
@@ -1429,7 +1503,6 @@ CURLMcode curl_multi_perform(CURLM *multi, int *running_handles)
 {
     struct luna_multi *session = multi;
     unsigned index;
-    int running = 0;
     if (!session)
         return CURLM_BAD_HANDLE;
     /* The LunaOS network backend owns a single stream, so transfers run one
@@ -1441,12 +1514,9 @@ CURLMcode curl_multi_perform(CURLM *multi, int *running_handles)
         target->result = curl_easy_perform(target);
         target->finished = 1;
     }
-    for (index = 0; index < session->count; index++) {
-        if (session->handles[index]->finished != 2)
-            running++;
-    }
+    /* Transfers are synchronous; completion messages remain queued. */
     if (running_handles)
-        *running_handles = running;
+        *running_handles = 0;
     return CURLM_OK;
 }
 
