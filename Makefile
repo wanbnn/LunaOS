@@ -604,3 +604,17 @@ ifeq ($(LUNA_NATIVE_GIT),1)
 build/kernel.elf: build/git-native/sh-payload.o
 OBJECTS += build/git-native/sh-payload.o
 endif
+
+# The HTTP(S) transport helper that the upstream Git spawns for remote
+# operations. It carries the LunaOS libcurl-compatible client.
+build/git-native/git-remote-http.elf: build/git-native/git.elf
+	@test -s $@ || $(PYTHON) tools/git-port/build-native.py --git
+build/git-native/remote-http-payload: build/git-native/git-remote-http.elf
+	$(PYTHON) -c 'import pathlib,struct,zlib; p=pathlib.Path("$<").read_bytes(); pathlib.Path("$@").write_bytes(struct.pack("<I",len(p))+zlib.compress(p,9))'
+build/git-native/remote-http-payload.o: build/git-native/remote-http-payload
+	$(LD) -m elf_i386 -r -b binary -o $@ $<
+	objcopy --rename-section .data=.rodata,alloc,load,readonly,data,contents $@
+ifeq ($(LUNA_NATIVE_GIT),1)
+build/kernel.elf: build/git-native/remote-http-payload.o
+OBJECTS += build/git-native/remote-http-payload.o
+endif

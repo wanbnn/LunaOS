@@ -5,8 +5,9 @@
 #ifdef LUNA_NATIVE_GIT
 extern const unsigned char _binary_build_git_native_payload_start[], _binary_build_git_native_payload_end[];
 extern const unsigned char _binary_build_git_native_sh_payload_start[], _binary_build_git_native_sh_payload_end[];
+extern const unsigned char _binary_build_git_native_remote_http_payload_start[], _binary_build_git_native_remote_http_payload_end[];
 extern int uncompress(unsigned char *, unsigned long *, const unsigned char *, unsigned long);
-static struct { unsigned char *data; uint32_t size; } images[2];
+static struct { unsigned char *data; uint32_t size; } images[3];
 static bool unpack(unsigned id,const unsigned char *p,const unsigned char *end) {
     if(images[id].data)return true;
     size_t packed=end-p;
@@ -21,7 +22,8 @@ static bool unpack(unsigned id,const unsigned char *p,const unsigned char *end) 
 }
 void native_apps_mount(void) {
     if(!unpack(0,_binary_build_git_native_payload_start,_binary_build_git_native_payload_end) ||
-       !unpack(1,_binary_build_git_native_sh_payload_start,_binary_build_git_native_sh_payload_end)) {
+       !unpack(1,_binary_build_git_native_sh_payload_start,_binary_build_git_native_sh_payload_end) ||
+       !unpack(2,_binary_build_git_native_remote_http_payload_start,_binary_build_git_native_remote_http_payload_end)) {
         serial_write("Native application payload could not be unpacked\n");return;
     }
     bool dirty=fs_dirty;
@@ -40,6 +42,12 @@ void native_apps_mount(void) {
             serial_write("Native Git mount failed\n");
     if(fs_mount_readonly("/bin/sh",images[1].data,images[1].size,0755u))
         serial_write("Native shell mount failed\n");
+    /* The upstream Git spawns this helper for HTTP(S) remotes. */
+    static const char *http_paths[]={"/usr/libexec/git-core/git-remote-http",
+        "/usr/libexec/git-core/git-remote-https"};
+    for(unsigned i=0;i<sizeof(http_paths)/sizeof(*http_paths);i++)
+        if(fs_mount_readonly(http_paths[i],images[2].data,images[2].size,0755u))
+            serial_write("Native Git HTTP transport mount failed\n");
     fs_dirty=dirty;
 }
 #endif

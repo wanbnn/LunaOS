@@ -104,6 +104,30 @@ def build_dash():
     (obj/'src/dash').unlink(missing_ok=True)
     run('make','-j'+JOBS,cwd=obj,env=env)
     shutil.copyfile(obj/'src/dash',BUILD/'sh.elf')
+def build_curl():
+    """Build the LunaOS libcurl-compatible client used by the Git HTTP
+    transport. The TLS policy lives in the kernel; this library owns HTTP."""
+    cc = BUILD/'luna-cc'
+    run(cc,'-Os','-fno-pie','-fno-pic','-fno-stack-protector',
+        '-fno-asynchronous-unwind-tables','-mno-sse','-mno-mmx','-mfpmath=387',
+        '-I'+str(ROOT/'sdk/curl-luna/include'),'-I'+str(ROOT/'third_party/zlib'),
+        '-c',str(ROOT/'sdk/curl-luna/curl-luna.c'),'-o',str(BUILD/'curl-luna.o'))
+    run('ar','rcs',str(BUILD/'libcurl-luna.a'),str(BUILD/'curl-luna.o'))
+    config = BUILD/'curl-config'
+    config.write_text(
+        '#!/bin/sh\n'
+        '# Reports the LunaOS HTTP client as a libcurl replacement.\n'
+        'case "$1" in\n'
+        '  --version) echo "7.66.0" ;;\n'
+        '  --vernum) echo "074200" ;;\n'
+        '  --cflags) echo "-I'+str(ROOT/'sdk/curl-luna/include')+'" ;;\n'
+        '  --libs) echo "'+str(BUILD/'libcurl-luna.a')+'" ;;\n'
+        '  --static) echo "'+str(BUILD/'libcurl-luna.a')+'" ;;\n'
+        '  --protocols) echo "http https" ;;\n'
+        '  --features) echo "SSL IPv6" ;;\n'
+        '  *) echo "" ;;\n'
+        'esac\n')
+    config.chmod(0o755)
 def build_git():
     upstream = ROOT/'third_party/git'
     sha = subprocess.check_output(['git','-C',str(upstream),'rev-parse','HEAD'],text=True).strip()
@@ -126,21 +150,27 @@ def build_git():
     cc = BUILD/'luna-cc'
     cc.write_text('#!/bin/sh\nexec gcc -m32 -nostdinc -isystem "'+str(BUILD/'sysroot/include')+'" -isystem "'+subprocess.check_output(['gcc','-print-file-name=include'],text=True).strip()+'" "$@"\n')
     cc.chmod(0o755)
+    build_curl()
     config = {
         'CC':str(cc),'AR':'ar','RANLIB':'ranlib', 'uname_S':'LunaOS',
         'CFLAGS':'-I'+str(ROOT/'third_party/zlib')+' -Os -fno-pie -fno-pic -fno-stack-protector -fno-asynchronous-unwind-tables -mno-sse -mno-mmx -mfpmath=387 -ffunction-sections -fdata-sections',
         'LDFLAGS':'-nostdlib -static -no-pie -Wl,--gc-sections,--build-id=none -Wl,-T,'+str(ROOT/'sdk/guest/luna32.ld')+' '+str(BUILD/'crt0.o')+' '+str(BUILD/'start.o')+' '+str(BUILD/'memory.o')+' '+str(BUILD/'syscall.o'),
         'EXTLIBS':str(ROOT/'build/libz-luna.a')+' '+str(BUILD/'sysroot/lib/libc.a')+' '+subprocess.check_output(['gcc','-m32','-print-libgcc-file-name'],text=True).strip(),
+        'CURL_CONFIG':str(BUILD/'curl-config'),
+        'CURL_CFLAGS':'-I'+str(ROOT/'sdk/curl-luna/include'),
+        'CURL_LDFLAGS':str(BUILD/'libcurl-luna.a'),
         'NO_RUST':'YesPlease','NO_GETTEXT':'YesPlease','NO_TCLTK':'YesPlease',
-        'NO_PERL':'YesPlease','NO_PYTHON':'YesPlease','NO_CURL':'YesPlease',
+        'NO_PERL':'YesPlease','NO_PYTHON':'YesPlease',
         'NO_EXPAT':'YesPlease','NO_OPENSSL':'YesPlease','NO_ICONV':'YesPlease',
         'NO_PTHREADS':'YesPlease','NO_MMAP':'YesPlease','NO_UNIX_SOCKETS':'YesPlease',
         'NO_DYNLOAD':'YesPlease','NO_REGEX':'YesPlease',
         'prefix':'/usr','sysconfdir':'/etc','GIT_VERSION':'2.56.1', 'GIT_BUILT_FROM_COMMIT':sha,
     }
     (target/'git').unlink(missing_ok=True)
-    run('make','-j'+JOBS,*[k+'='+v for k,v in config.items()],'git',cwd=target)
+    (target/'git-remote-http').unlink(missing_ok=True)
+    run('make','-j'+JOBS,*[k+'='+v for k,v in config.items()],'git','git-remote-http',cwd=target)
     shutil.copyfile(target/'git',BUILD/'git.elf')
+    shutil.copyfile(target/'git-remote-http',BUILD/'git-remote-http.elf')
     build_smoke()
     build_dash()
 if __name__ == '__main__':
