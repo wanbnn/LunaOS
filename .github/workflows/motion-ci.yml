@@ -35,7 +35,7 @@ jobs:
       - name: Compile freestanding i386 motion implementation
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y gcc-multilib libc6-dev-i386
+          sudo apt-get install -y autoconf automake m4 gcc-multilib libc6-dev-i386
           mkdir -p build/ci
           gcc -m32 -std=gnu11 -O2 -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Iui -c ui/motion.c -o build/ci/motion.o
   image-build:
@@ -49,7 +49,7 @@ jobs:
       - name: Install LunaOS build dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y gcc-multilib g++-multilib libc6-dev-i386 clang lld cmake zlib1g-dev libcairo2 python3-pip
+          sudo apt-get install -y autoconf automake m4 gcc-multilib g++-multilib libc6-dev-i386 clang lld cmake zlib1g-dev libcairo2 python3-pip
           mkdir -p .tools/python build dist
           python3 -m pip install --target .tools/python -r requirements-dev.txt
       - name: Build native LunaOS image and ISO

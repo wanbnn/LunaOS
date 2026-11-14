@@ -60,7 +60,7 @@ build/font.h: tools/fontgen.py assets/fonts/InterTight.ttf assets/fonts/NotoSans
 	$(PYTHON) tools/fontgen.py
 build/notices.h: tools/notices.py assets/fonts/OFL.txt assets/fonts/NotoSans-OFL.txt \
              assets/fonts/Montserrat-OFL.txt assets/fonts/NotoSansSymbols2-OFL.txt \
-             assets/icons/lucide/LICENSE $(wildcard assets/licenses/*) third_party/quickjs/LICENSE third_party/micropython/LICENSE third_party/wasm3/LICENSE third_party/musl/COPYRIGHT third_party/bearssl/LICENSE.txt third_party/stb/LICENSE third_party/uacpi/LICENSE $(wildcard third_party/lexbor/LICENSE third_party/zlib/LICENSE third_party/litehtml/LICENSE third_party/litehtml/src/gumbo/LICENSE)
+             assets/icons/lucide/LICENSE $(wildcard assets/licenses/*) third_party/quickjs/LICENSE third_party/micropython/LICENSE third_party/wasm3/LICENSE third_party/musl/COPYRIGHT third_party/bearssl/LICENSE.txt third_party/stb/LICENSE third_party/uacpi/LICENSE $(wildcard third_party/git/COPYING third_party/git/sha1dc/LICENSE.txt third_party/dash/COPYING third_party/lexbor/LICENSE third_party/zlib/LICENSE third_party/litehtml/LICENSE third_party/litehtml/src/gumbo/LICENSE)
 	$(PYTHON) tools/notices.py
 build/uacpi/%.o: third_party/uacpi/source/%.c $(shell find third_party/uacpi/include -name '*.h')
 	@mkdir -p $(dir $@)
@@ -199,7 +199,7 @@ LITEHTML_LIBS := $(LITEHTML_NATIVE)/liblitehtml.a $(LITEHTML_NATIVE)/src/gumbo/l
 build/kernel.elf: $(LITEHTML_LIBS)
 endif
 build/kernel.elf: $(OBJECTS) build/libbearssl.a $(LEXBOR_NATIVE_LIB) $(MICROPYTHON_LIB) kernel/link.ld
-	$(LD) -m elf_i386 -T kernel/link.ld --gc-sections -Map build/kernel.map -o $@ $(OBJECTS) build/libbearssl.a $(LEXBOR_NATIVE_LIB) $(LITEHTML_LIBS) $(MICROPYTHON_LIB) third_party/musl/lib/libc.a $(LIBGCC32)
+	$(LD) -m elf_i386 -T kernel/link.ld --gc-sections -Map build/kernel.map -o $@ $(OBJECTS) build/libbearssl.a $(LEXBOR_NATIVE_LIB) $(LITEHTML_LIBS) $(MICROPYTHON_LIB) $(if $(filter 1,$(LUNA_NATIVE_GIT)),build/libz-luna.a) third_party/musl/lib/libc.a $(LIBGCC32)
 build/kernel.bin: build/kernel.elf
 	objcopy -O binary $< $@
 
@@ -571,3 +571,36 @@ build/guest/runtime-smoke.elf: sdk/guest/runtime_smoke.c build/guest/memory.o sd
 	$(CC) -m32 -Os -std=gnu11 -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Isdk/guest -c sdk/guest/runtime_smoke.c -o build/guest/runtime_smoke.o
 	$(LD) -m elf_i386 -T sdk/guest/luna32.ld --build-id=none -o $@ build/guest/crt0.o build/guest/runtime_smoke.o build/guest/posix.o build/guest/memory.o
 	@file $@
+
+# Actual upstream Git, statically linked against an isolated LunaOS musl
+# sysroot. LUNA_NATIVE_GIT=0 is an explicit emergency build without Git.
+LUNA_NATIVE_GIT ?= 1
+.PHONY: git-native-build test-git-native-guest
+git-native-build: build/git-native/git.elf
+build/git-native/git.elf: .gitmodules third_party/dash/configure.ac tools/git-port/build-native.py $(wildcard sdk/musl-luna/*) sdk/guest/memory.c sdk/guest/luna32.ld build/libz-luna.a
+	$(PYTHON) tools/git-port/build-native.py --git
+build/git-native/payload: build/git-native/git.elf
+	$(PYTHON) -c 'import pathlib,struct,zlib; p=pathlib.Path("$<").read_bytes(); pathlib.Path("$@").write_bytes(struct.pack("<I",len(p))+zlib.compress(p,9))'
+build/git-native/payload.o: build/git-native/payload
+	$(LD) -m elf_i386 -r -b binary -o $@ $<
+	objcopy --rename-section .data=.rodata,alloc,load,readonly,data,contents $@
+ifeq ($(LUNA_NATIVE_GIT),1)
+CFLAGS += -DLUNA_NATIVE_GIT
+build/kernel.elf: build/git-native/payload.o build/libz-luna.a
+# Append here: build/kernel.elf's recipe expands OBJECTS at execution time.
+OBJECTS += build/git-native/payload.o
+endif
+test-git-native-guest: all
+	$(PYTHON) tests/git_native_guest.py
+
+build/git-native/sh.elf: build/git-native/git.elf
+	@test -s $@ || $(PYTHON) tools/git-port/build-native.py --git
+build/git-native/sh-payload: build/git-native/sh.elf
+	$(PYTHON) -c 'import pathlib,struct,zlib; p=pathlib.Path("$<").read_bytes(); pathlib.Path("$@").write_bytes(struct.pack("<I",len(p))+zlib.compress(p,9))'
+build/git-native/sh-payload.o: build/git-native/sh-payload
+	$(LD) -m elf_i386 -r -b binary -o $@ $<
+	objcopy --rename-section .data=.rodata,alloc,load,readonly,data,contents $@
+ifeq ($(LUNA_NATIVE_GIT),1)
+build/kernel.elf: build/git-native/sh-payload.o
+OBJECTS += build/git-native/sh-payload.o
+endif

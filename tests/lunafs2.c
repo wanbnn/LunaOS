@@ -232,6 +232,24 @@ int main(void) {
     assert(matches(f, large, large_size));
     FsVolume volume;
     assert(fs_volume(0,false,&volume) && volume.extended && volume.exists);
+    /* Immutable application mounts are borrowed, write protected and do not
+     * consume writable snapshot capacity or get freed by clone/restore. */
+    static const char system_app[] = "immutable application";
+    assert(!fs_mount_readonly("/home/luna/system-app", system_app, sizeof(system_app)-1, 0755));
+    assert(matches(fs_find("/home/luna/system-app"), system_app, sizeof(system_app)-1));
+    assert(fs_remove("/home/luna/system-app") < 0);
+    assert(fs_write("/home/luna/system-app", "overwrite", false) < 0);
+    assert(fs_write_at("/home/luna/system-app", "x", 1, 0) < 0);
+    assert(fs_chmod("/home/luna/system-app", 0644) < 0);
+    assert(fs_rename("/home/luna/system-app", "/home/luna/moved-app") < 0);
+    assert(!fs_begin_write("/home/luna/system-app", false, 0));
+    FileState mounted_backup = {0};
+    assert(!fs_clone(&mounted_backup, files));
+    fs_restore_state(&mounted_backup);
+    assert(matches(fs_find("/home/luna/system-app"), system_app, sizeof(system_app)-1));
+    assert(fs_save() && fs_verify_on(0));
+    assert(fs_load());
+    assert(!fs_find("/home/luna/system-app")); /* source will remount at boot */
     /* An overlapping table must never authorize writes into another volume. */
     uint32_t overlap=LUNA_IMAGE_BYTES/512;
     memcpy(disk[0]+446+2*16+8,&overlap,4);

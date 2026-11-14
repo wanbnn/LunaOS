@@ -13,3 +13,6 @@
 [submodule "third_party/zlib"]
 	path = third_party/zlib
 	url = https://github.com/madler/zlib.git
+[submodule "third_party/dash"]
+	path = third_party/dash
+	url = https://git.kernel.org/pub/scm/utils/dash/dash.git

@@ -10,6 +10,13 @@ on:
       - 'tests/elf32.c'
       - 'tests/elf32_guest.py'
       - 'sdk/guest/**'
+      - 'sdk/musl-luna/**'
+      - 'kernel/native_apps.c'
+      - 'tools/git-port/**'
+      - 'tests/git_native_guest.py'
+      - 'third_party/dash'
+      - 'third_party/git'
+      - '.gitmodules'
       - 'third_party/zlib'
       - 'tools/notices.py'
       - 'Makefile'
@@ -25,6 +32,13 @@ on:
       - 'tests/elf32.c'
       - 'tests/elf32_guest.py'
       - 'sdk/guest/**'
+      - 'sdk/musl-luna/**'
+      - 'kernel/native_apps.c'
+      - 'tools/git-port/**'
+      - 'tests/git_native_guest.py'
+      - 'third_party/dash'
+      - 'third_party/git'
+      - '.gitmodules'
       - 'third_party/zlib'
       - 'tools/notices.py'
       - 'Makefile'
@@ -45,7 +59,7 @@ jobs:
       - name: Compile freestanding i386 loader
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y gcc-multilib libc6-dev-i386
+          sudo apt-get install -y autoconf automake m4 gcc-multilib libc6-dev-i386
           mkdir -p build/ci
           gcc -m32 -std=gnu11 -O2 -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Ikernel -c kernel/elf32.c -o build/ci/elf32.o
   iso-integration:
@@ -58,7 +72,7 @@ jobs:
       - name: Install build toolchain
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y gcc-multilib g++-multilib libc6-dev-i386 clang lld cmake zlib1g-dev libcairo2 python3-pip qemu-system-x86
+          sudo apt-get install -y autoconf automake m4 gcc-multilib g++-multilib libc6-dev-i386 clang lld cmake zlib1g-dev libcairo2 python3-pip qemu-system-x86
           mkdir -p .tools/python build dist
           python3 -m pip install --target .tools/python -r requirements-dev.txt
       - name: Build actual LunaOS ISO with loader and shell changes
@@ -83,3 +97,10 @@ jobs:
         run: python3 -m py_compile tests/elf32_guest.py
       - name: Execute ELF32 in QEMU ring 3 with open/read/write
         run: python3 tests/elf32_guest.py
+      - name: Execute bundled upstream Git and POSIX shell in QEMU
+        run: python3 tests/git_native_guest.py
+      - name: Verify small offline workflows at 64 MiB
+        env:
+          LUNA_GIT_TEST_RAM: '64'
+          LUNA_GIT_TEST_TRANSPORT: '0'
+        run: python3 tests/git_native_guest.py

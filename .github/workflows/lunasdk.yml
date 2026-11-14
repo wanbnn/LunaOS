@@ -37,7 +37,7 @@ jobs:
       - name: Compile native driver examples for i386
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-multilib cmake
+          sudo apt-get install -y autoconf automake m4 gcc-multilib cmake
           mkdir -p build/ci
           gcc -m32 -std=gnu11 -O2 -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Ikernel -c kernel/lunasdk_hardware.c -o build/ci/lunasdk_hardware.o
           gcc -m32 -std=gnu11 -O2 -ffreestanding -fno-builtin -fno-pie -fno-pic -fno-stack-protector -mno-sse -mno-mmx -msoft-float -Wall -Wextra -Werror -Ikernel -c kernel/lunasdk_edu.c -o build/ci/lunasdk_edu.o

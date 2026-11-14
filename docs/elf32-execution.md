@@ -1,7 +1,9 @@
 # LunaOS native ELF32 user-mode execution — milestone history
 
-**State: validated in QEMU for native ELF programs; not a full POSIX ABI, and
-upstream Git 2.56.1 still does NOT execute in the LunaOS guest.**
+**Current state: Git 2.56.1 and Dash run as native ELF32 programs. This is
+still not a complete POSIX ABI or the full Git HTTPS/SSH acceptance contract.**
+
+See [current native Git documentation](git-native.md).
 PR #8 is merged in main. Current limits and verified features are recorded in
 [git-port-status.md](git-port-status.md). The milestone sections below preserve
 the original implementation history and are not a current feature inventory.

@@ -38,8 +38,17 @@ into `build/libz-luna.a` with freestanding i386 compilation.
 The upstream zlib license remains at `third_party/zlib/LICENSE`
 and is distributed as `/etc/licenses/zlib.txt` in images with
 the submodule checked out. The bundled freestanding test allocator
-in `sdk/guest/memory.c` is **test-only**, not a Git/libc heap.
+in `sdk/guest/memory.c` is the single-threaded bootstrap allocator used by the native Git libc bridge.
 
 This does not implement Git's remaining requirements: portable
 filesystem metadata, BSD sockets, HTTPS Git smart protocol, SSH,
 POSIX processes, CLI command helpers, credential management.
+
+
+## Native Git and POSIX shell
+
+Git 2.56.1 is built as a separate user-mode ELF32 executable, never as a
+kernel Git implementation. Dash 0.5.12 is pinned at
+`4bbf8721a3ac6401ced6a0454956801f6ba37256` in `dash/` and provides `/bin/sh`.
+The musl syscall/initialization adaptations are in `sdk/musl-luna`.
+The build and current limits are documented in `docs/git-native.md`.

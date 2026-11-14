@@ -323,3 +323,10 @@ O filesystem de dados ainda não é redimensionável.
 
 Veja [projeto do armazenamento](docs/storage.md). Execute `make test-storage-matrix`
 para simular todos os backends implementados, incluindo eMMC sem PCI via ACPI.
+
+
+### Git nativo experimental
+
+O build padrao inclui Git upstream 2.56.1 (`git`) e Dash (`/bin/sh`) em
+processos ELF32 nativos. Fluxos locais ja executam no guest; HTTPS/SSH
+continuam pendentes. Uso, build e limitacoes: [docs/git-native.md](docs/git-native.md).

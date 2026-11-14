@@ -19,10 +19,15 @@ extra = {
     "BearSSL.txt": "third_party/bearssl/LICENSE.txt",
     "Musl.txt": "third_party/musl/COPYRIGHT",
     "zlib.txt": "third_party/zlib/LICENSE",
+    "Git-Port-Source.txt": "assets/licenses/Git-Port-Source.txt",
     "GCC-Runtime-Exception.txt": "assets/licenses/GCC-Runtime-Exception.txt",
     "GCC-GPL3.txt": "assets/licenses/GPL-3.txt",
 }
 for filename, path in {
+    "SHA1DC-MIT.txt": "third_party/git/sha1dc/LICENSE.txt",
+    "Dash-BSD.txt": "third_party/dash/COPYING",
+    "Git-GPL-2.txt": "third_party/git/COPYING",
+
     "Lexbor-Apache-2.0.txt": "third_party/lexbor/LICENSE",
     "litehtml-BSD.txt": "third_party/litehtml/LICENSE",
     "Gumbo-Apache-2.0.txt": "third_party/litehtml/src/gumbo/LICENSE",

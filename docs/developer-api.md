@@ -304,3 +304,19 @@ Pipes e redirecionamentos de aplicacoes nativas ainda nao sao suportados pelo
 shell: a tentativa e rejeitada antes de executar ou truncar o destino. Os
 pipes e redirecionamentos dos comandos internos conservam o comportamento
 anterior. Codigo 127 indica comando ausente, 126 indica falha no lancamento.
+
+
+## Git e shell nativos
+
+O build padrao inclui `/bin/git` (upstream 2.56.1) e `/bin/sh` (Dash 0.5.12).
+O porte da musl fica isolado em `sdk/musl-luna`. Os aplicativos usam numeros
+internos da musl que sao traduzidos para a ABI LunaOS, nunca enviados como
+numeros Linux diretamente ao kernel.
+
+A ABI nativa agora oferece clocks (29), entropia (30), fstat (31), sinais e
+mascara (32/33), kill e retorno de sinal (34/35), fork (36), duplicacao de
+FD (37), flags/close-on-exec (38), sessoes (39), espera por sinal (40),
+fchmod/mtime de FD (41/42) e poll limitado a 64 entradas (43).
+Offsets de arquivos regulares herdados ainda nao sao compartilhados como
+POSIX; a semantica de pipes/stdio e testada no guest. Detalhes de uso e
+limites do porte estao em [git-native.md](git-native.md).

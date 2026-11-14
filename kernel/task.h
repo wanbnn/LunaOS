@@ -28,6 +28,7 @@
 #define USER_CODE 0x40000000u
 #define USER_STACK 0x40010000u
 #define USER_STACK_BYTES 16384u
+#define USER_ELF_STACK_BYTES (128u * 1024u)
 #define USER_ELF_STACK (USER_CODE + LUNA_ELF_STACK_OFFSET)
 #define SYS_HELLO 0
 #define SYS_WAIT_EVENT 1
@@ -58,7 +59,23 @@
 #define SYS_EXEC_OPENDIR 26 /* Descriptor-backed directory iterator. */
 #define SYS_EXEC_READDIR 27 /* One LunaGuestDirent record per call. */
 #define SYS_EXEC_BRK 28 /* Bounded process heap, Linux-like program-break result. */
+#define SYS_EXEC_CLOCK 29 /* clock id, 16-byte {seconds64,nsec32,reserved32}. */
+#define SYS_EXEC_RANDOM 30 /* Fill a validated guest buffer from kernel entropy. */
+#define SYS_EXEC_FSTAT 31 /* Native 20-byte stat record for an open file. */
+#define SYS_EXEC_SIGACTION 32
+#define SYS_EXEC_SIGMASK 33
+#define SYS_EXEC_KILL 34
+#define SYS_EXEC_SIGRETURN 35
+#define SYS_EXEC_FORK 36
+#define SYS_EXEC_DUP2 37
+#define SYS_EXEC_FDFLAGS 38
+#define SYS_EXEC_SESSION 39
+#define SYS_EXEC_SIGSUSPEND 40
+#define SYS_EXEC_FCHMOD 41
+#define SYS_EXEC_FUTIME 42
+#define SYS_EXEC_POLL 43
 #define EXEC_FD_MAX 8
+#define EXEC_FD_STORAGE (EXEC_FD_MAX + 3)
 /* Saved by the common interrupt entry; useresp/ss exist only on privilege transitions. */
 typedef struct {
     uint32_t gs, fs, es, ds, edi, esi, ebp, esp_dummy, ebx, edx, ecx, eax;
@@ -76,6 +93,7 @@ typedef struct {
     uint32_t type;
     int a, b;
 } AppEvent;
+typedef struct { uint32_t handler, flags, restorer, mask[2]; } ExecSignalAction;
 typedef struct {
     uint32_t pid;
     char name[32];
@@ -96,9 +114,18 @@ typedef struct {
     PmmAllocation exec_allocation[LUNA_ELF_MAX_SEGMENTS];
     uint32_t exec_segments, exec_physical_bytes;
     uint32_t exec_heap_base, exec_heap_break, exec_heap_pages;
-    uint32_t parent_pid;
+    uint32_t parent_pid, session_id, process_group, termination_signal;
+    ExecSignalAction signal_actions[31];
+    uint64_t signal_mask, signal_saved_mask;
+    uint32_t signal_pending;
+    TrapFrame signal_frame;
+    bool in_signal, suspend_restore, exec_reaped;
+    uint64_t suspend_old_mask;
     char exec_cwd[128];
-    struct { char path[128]; uint32_t offset, flags; uint8_t kind, pipe_id; bool open; } exec_fds[EXEC_FD_MAX];
+    char exec_path[128];
+    bool std_closed[3];
+    uintptr_t exec_source; /* Immutable payload identity, zero for writable files. */
+    struct { char path[128]; uint32_t offset, flags; uint8_t kind, pipe_id; bool open; } exec_fds[EXEC_FD_STORAGE];
     void (*service)(void);
     PerfArea perf_area;
     unsigned storage_depth;

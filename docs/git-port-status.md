@@ -1,132 +1,67 @@
-# Estado do porte upstream Git — 13/11/2026
+# Estado do porte Git upstream — 13/11/2026
 
-**O porte completo ainda nao esta concluido. Nao existe `git.elf` executavel
-no LunaOS.** Compilar o Git no Linux nao substitui essa evidencia.
+**Git 2.56.1 executa nativamente no LunaOS e esta incluido em `/bin/git`.**
+Dash upstream 0.5.12 fornece `/bin/sh`. O porte completo ainda nao foi
+concluido: HTTPS/SSH e toda a matriz avancada permanecem pendentes.
 
-## Analise de branches
+Uso, builds e limites: [git-native.md](git-native.md).
 
-- `main` local estava em `82448a7`, 164 commits atras de `origin/main`.
-  Foi atualizada por fast-forward para `0fccc60`.
-- `origin/feat/full-upstream-git-port` (`1d1a540`) e ancestral de
-  `origin/main`: seu conteudo ja entrou pelo PR #8. Fazer merge dessa branch
-  novamente nao acrescenta um executavel Git.
-- `origin/feat/lunash-native-git-foundation` (`9b0565a`) contem um built-in
-  parcial de init/config/hash-object. Nao atende ao contrato upstream e
-  permanece separado, conforme a decisao documentada do projeto.
-- `feat/git-upstream-luna-runtime` aponta para a mesma base da main, em
-  outro worktree com alteracoes locais. Essas alteracoes foram preservadas.
-  A correcao independente da dependencia de `memory.o` no Makefile foi
-  reaproveitada na continuacao.
-- A continuacao esta em `feat/git-native-runtime-completion`.
-  As demais branches remotas tratam de browser, storage, wireless, motion e
-  atualizacoes; nao contem uma implementacao alternativa completa do Git.
+## Evidencia atual no guest
 
-## Infraestrutura existente
+A suite `tests/git_native_guest.py` usa o Git da propria imagem, sem baixar
+um Git do host nem delegar operacoes de repositorio a servicos externos.
+Passaram os fluxos init/config/add/commit/log/status, tags, branches e merge
+fast-forward, hash de blob comparado ao formato Git, fsck e leitura depois
+de reboot. Tambem passaram clone local, clone bare, push, fetch e pull entre
+repositorios locais usando os auxiliares Git e pipes reais.
 
-| Area | Implementacao verificavel |
-| --- | --- |
-| Loader | ELF32 i386 ET_EXEC estatico, 8 MiB de VA segment-relative, arquivo ate 16 MiB, 16 segmentos, stack 16 KiB |
-| Processo | ring 3, argv/envp limitados, spawn/wait e substituicao execve preservando PID/FDs |
-| Heap | brk com paginas alocadas pelo PMM e limite 2 MiB por processo; malloc/calloc/realloc/free bootstrap |
-| I/O | 8 descritores alem do console; arquivos, diretorios, pipes herdados com espera limitada a 30 s |
-| Metadata | chmod e mtime persistentes no snapshot v3; ainda sem enforcement completo |
-| Compressao | zlib upstream 1.4 compilada para i386 e executada no guest |
-| Rede | transporte exclusivo TCP ou TLS verificado, compartilhado pelo kernel; nao e BSD sockets |
+O fixture completo de transporte local executa com 128 MiB. Os fluxos
+pequenos offline e clone local foram exercitados com 64 MiB. Push com tres
+ou mais processos pode esgotar os 64 MiB; o perfil completo recomenda
+128 MiB. A configuracao padrao desabilita manutencao automatica para evitar
+picos em background. Nao ha promessa de suportar grandes repositorios com
+os mesmos limites.
 
-A ABI usa offsets relativos ao segmento, numeros proprios de syscall e
-retornos negativos; nao e a ABI Linux. A musl que ja integra o kernel nao
-fornece automaticamente uma libc para esses executaveis.
+Um programa C independente testa sinais bloqueados/entregues, terminacao
+por sinal, fork com heap privado, pipe/dup2, execve com Git e Dash e
+redirecionamento para /dev/null. Os arquivos e metadados persistem depois
+de sync/reboot. Nao ha resultado inventado para um comando do Git.
 
-## Correcoes nesta continuacao
+## Implementacao
 
-- `open(O_CREAT|O_EXCL)` insere o arquivo com preempcao desabilitada somente
-  durante a operacao em RAM. Uma disputa retorna `-17` (`LUNA_EEXIST`), sem
-  truncar o arquivo existente mesmo quando `O_TRUNC` tambem foi solicitado.
-- `open` permite escrita sem exigir truncamento ou append. `lseek` permite
-  reposicionar um arquivo gravavel; descritores de stream nao sao seekable.
-- `fs_write_at` preserva prefixo/sufixo e preenche com zeros o intervalo
-  entre o EOF e o offset. Uma escrita de zero bytes nao estende o arquivo.
-- Arquivos pequenos usam substituicao do buffer; acima de 64 KiB a escrita
-  reconstroi o snapshot por blocos de 16 KiB, preservando o snapshot anterior
-  em falhas de staging. Esse caminho custa O(tamanho do snapshot) por escrita;
-  ainda precisa de trabalho de desempenho para packfiles grandes.
-- `O_APPEND` escolhe o EOF em cada chamada de escrita, independentemente de
-  `lseek`. Isso nao atesta todas as garantias POSIX de append concorrente.
-- `build/guest/memory.o` tem regra propria: o teste runtime pode ser compilado
-  sem depender de ter compilado antes o teste de zlib.
+- Git upstream fixado em `03b41523c576f26ad34085378717a0c1b287470f`.
+- Dash fixado em `4bbf8721a3ac6401ced6a0454956801f6ba37256`.
+- Sysroot musl isolado e ABI adaptada em `sdk/musl-luna`.
+- ELF32 em ring 3; codigo imutavel compartilhado entre processos, segmentos
+  gravaveis privados; heap brk de ate 4 MiB e stack de 128 KiB.
+- Fork, execve, wait de filho especifico/qualquer filho, sinais basicos,
+  sessoes, pipes, poll e descritores com close-on-exec e stdio redirecionado.
+- Lockfiles O_EXCL, leitura/escrita em offsets, metadados persistentes,
+  dispositivos ABI /dev/null e /dev/urandom e timestamps do clock do kernel.
+- Executaveis comprimidos em mounts imutaveis, excluidos do snapshot
+  gravavel. Nao consomem os 2 MiB do volume legado para guardar a CLI.
+- Licencas e caminhos do codigo-fonte incluidos em /etc/licenses.
 
-- O baseline host e seu CI selecionam `NO_RUST=YesPlease`, opcao oficial do
-  upstream. Sem isso, a receita falhava com `cargo: not found`.
+A ISO continua com aproximadamente 66,125 MiB; o kernel, incluindo os
+payloads comprimidos, permanece abaixo da reserva de 8 MiB do bootloader.
 
-## Verificacao reproduzivel
+## Analise das branches anteriores
 
-```
-git submodule update --init third_party/git third_party/zlib
-make test-lunafs2 test-elf32
-make -j4 all luna-guest-runtime-smoke luna-guest-spawn-smoke \
-    luna-guest-execve-smoke luna-guest-tcp-smoke luna-guest-metadata-check
-make luna-guest-zlib-smoke
-python3 tests/elf32_guest.py
-make git-upstream-host-test
-```
+A main local foi atualizada de `82448a7` para `0fccc60` e recebeu a continuacao
+de infraestrutura/lunaSH em `509f94f`. `origin/feat/full-upstream-git-port`
+ja era ancestral da main pelo PR #8. A branch
+`feat/lunash-native-git-foundation` permanece uma implementacao parcial
+antiga, nao utilizada por este executavel. O outro worktree
+`feat/git-upstream-luna-runtime` foi preservado.
 
-`tests/lunafs2.c` cobre overwrite binario, lacunas, overflow, zero-byte write,
-metadata, persistencia e falha de snapshot durante patch de arquivo de 3 MiB,
-com ASan/UBSan. `sdk/guest/runtime_smoke.c` exercita no guest o lock disputado
-por outro processo, protecao contra truncamento, seek/overwrite/zero-fill e
-append, alem do heap e pipes. O fixture QEMU tambem testa execve, zlib, TCP e
-persistencia de arquivos/metadata apos reboot.
+O executavel, a libc e o shell desta etapa estao na branch
+`feat/git-upstream-native-executable`. Nao confundir os testes locais com CI
+remoto ou com conclusao do contrato completo de Git.
 
-## Resultados desta verificacao
+## Pendencias para o contrato completo
 
-- `make test-lunafs2 test-elf32`: PASS com ASan/UBSan; o teste de filesystem
-  foi repetido apos a revisao final de aritmetica de ponteiros, tambem PASS.
-- Build padrao com Lexbor/litehtml: PASS, kernel 5.560.148 bytes,
-  imagem 66 MiB e ISO 66,125 MiB.
-- Cross-build dos executaveis SDK e zlib: PASS.
-- `python3 tests/elf32_guest.py`: PASS, incluindo lock/seek/escrita/append,
-  heap/IPC, execve, zlib, TCP e metadata apos reboot.
-- `make git-upstream-host-test`: PASS com Git 2.56.1, init/add/commit,
-  branch/merge/rebase/stash, clone/fetch/pull/push em remoto local, fsck/gc.
-- `git diff --check` e sintaxe Python do fixture: PASS.
-
-Esses resultados foram obtidos localmente; nao sao uma execucao de CI remoto
-nem uma demonstracao do executavel Git dentro do LunaOS.
-
-## Trabalho ainda necessario para aceitar o porte completo
-
-1. Sysroot/libc nativos para compilar e ligar Git upstream e seus auxiliares,
-   com errno, stdio, tempo, locale e demais APIs realmente utilizadas.
-2. Descritores com compartilhamento de offsets entre processos, dup2 e
-   redirecionamento de stdin/stdout/stderr; sinais e mecanismos de criacao
-   de processos exigidos pelo Git e seu shell auxiliar.
-3. VFS com symlinks, identidade de arquivos abertos apos rename/unlink,
-   permissao, locking e garantias de durabilidade/concorrencia testadas.
-4. Memoria/stack dimensionadas com o executavel real e perfis de consumo.
-5. Cliente smart HTTP(S) com POST, streaming e autenticacao segura; SSH com
-   host keys verificadas. O transporte TCP/TLS isolado nao implementa isso.
-6. Binario upstream executado via lunaSH e toda a matriz offline/remota,
-   interoperabilidade e falhas de `tests/git-full-acceptance.md` no guest.
-
-Nenhuma dessas pendencias e resolvida apenas juntando branches existentes.
-
-
-## Descoberta de aplicacoes no lunaSH
-
-A continuacao tambem implementa execucao direta de aplicacoes instaladas:
-comandos internos tem precedencia; demais nomes sao procurados em PATH
-(`/bin:/usr/bin` por padrao), com suporte a caminhos explicitos. O shell
-espera o processo e preserva o exit status. PATH e exportado sem duplicacao,
-e Tab inclui os executaveis ELF encontrados nos diretorios configurados.
-Isso permite registrar Git apenas instalando seu futuro executavel como
-`/bin/git`, sem adicionar um alias especifico ao codigo do shell.
-
-A suite QEMU foi executada com sucesso com o fixture ampliado: instalacao
-apos boot, autocomplete por teclado, PATH customizado e sua precedencia,
-entradas vazias, caminho absoluto/relativo, codigos 40/126/127 e rejeicao de
-redirecionamento nativo sem truncar o destino. A suite completa tambem
-passou ate a verificacao de metadata apos reboot.
-
-Pipes/redirecionamentos de processos nativos ainda dependem da integracao
-de descritores com o shell; a descoberta generica de aplicacoes nao altera
-essa pendencia. Detalhes de uso em `docs/developer-api.md`.
+HTTPS smart protocol/libcurl, SSH e host keys; escala de memoria e tamanho
+de repositorios; identidade de arquivos abertos apos rename/unlink;
+compartilhamento de offsets de descritores regulares; symlinks/hardlinks,
+permissoes e locking completos; job control e cobertura adicional de sinais;
+extensoes e todos os fluxos de falha/recuperacao do contrato original.

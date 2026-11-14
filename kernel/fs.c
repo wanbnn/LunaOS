@@ -209,7 +209,7 @@ static bool pinned_slot(unsigned disk, uint32_t base, uint32_t sectors) {
 static void drop_state(FileState *state) {
     unpin_backup(state);
     for (int i = 0; i < state->capacity; i++) {
-        if (state->files[i].data)
+        if (state->files[i].data && !state->files[i].readonly)
             heap_release(state->files[i].data);
     }
     if (state->files)
@@ -262,6 +262,10 @@ static bool valid_state(const File *state, int capacity, size_t limit) {
         const File *f = &state[i];
         if (!f->used)
             continue;
+        if (f->readonly) {
+            if (!f->data || f->dir) return false;
+            continue;
+        }
         if (f->used != 1 || f->dir > 1 || f->size > limit || !has_nul(f->path, PATH_CAP) ||
             f->path[0] != '/')
             return false;
@@ -284,7 +288,7 @@ static size_t state_bytes(const File *state, int capacity, size_t limit, uint32_
     size_t total = 0;
     uint32_t count = 0;
     for (unsigned i = 0; i < (unsigned)capacity; i++)
-        if (state[i].used) {
+        if (state[i].used && !state[i].readonly) {
             size_t bytes = state[i].dir ? 0u : state[i].size;
             if (limit < sizeof(Record) || bytes > limit - sizeof(Record))
                 return 0;
@@ -308,8 +312,8 @@ int fs_clone(FileState *dest, const File *source) {
         return -1;
     for (int i = 0; i < fs_file_capacity; i++) {
         dest->files[i] = source[i];
-        dest->files[i].data = 0;
-        if (source[i].used && source[i].data) {
+        dest->files[i].data = source[i].readonly ? source[i].data : 0;
+        if (source[i].used && source[i].data && !source[i].readonly) {
             dest->files[i].data = allocate_data(source[i].size);
             if (!dest->files[i].data) {
                 drop_state(dest);
@@ -394,7 +398,7 @@ int fs_remove(const char *path) {
     if (fs_locked || disk_readers)
         return -1;
     File *f=fs_find(path);
-    if(!f || !strcmp(f->path,"/") || !strcmp(f->path,cwd))return -1;
+    if(!f || f->readonly || !strcmp(f->path,"/") || !strcmp(f->path,cwd))return -1;
     size_t n=strlen(f->path);
     for(int i=0;i<fs_file_capacity;i++)
         if(files[i].used && !strncmp(files[i].path,f->path,n) && files[i].path[n]=='/')
@@ -409,7 +413,7 @@ int fs_write_bytes(const char *path, const void *data, size_t n, bool add) {
         return -1;
     if((n && !data) || n>data_limit || n>UINT32_MAX)return -1;
     File *f=fs_find(path);
-    if(f && f->dir)return -1;
+    if(f && (f->dir || f->readonly))return -1;
     size_t old=f?f->size:0u, off=add?old:0u;
     if(off>data_limit-n)return -2;
     size_t wanted=off+n, used=state_bytes(files,fs_file_capacity,data_limit,0);
@@ -456,7 +460,7 @@ int fs_write_at(const char *path, const void *data, size_t n, uint32_t offset) {
     if (fs_locked || disk_readers || (n && !data) || n > UINT32_MAX - offset)
         return -1;
     File *f = fs_find(path);
-    if (!f || f->dir)
+    if (!f || f->dir || f->readonly)
         return -1;
     if (!n)
         return 0;
@@ -791,7 +795,7 @@ static bool save_snapshot(unsigned destination) {
     writer_init(&stream, destination, base, &volume);
     unsigned packed = 0;
     for (int i = 0; i < fs_file_capacity; i++)
-        if (files[i].used) {
+        if (files[i].used && !files[i].readonly) {
             Record record = {0};
             record.index = packed++;
             memcpy(record.path, files[i].path, PATH_CAP);
@@ -818,7 +822,7 @@ static bool save_snapshot(unsigned destination) {
     if (destination == disk_boot_index()) {
         uint64_t offset = ((uint64_t)base + 1u) * 512u;
         for (int i = 0; i < fs_file_capacity; i++)
-            if (files[i].used) {
+            if (files[i].used && !files[i].readonly) {
                 offset += sizeof(Record);
                 if (!files[i].dir) {
                     relocate_file(&files[i], destination, offset);
@@ -830,12 +834,14 @@ static bool save_snapshot(unsigned destination) {
     fs_dirty = false;
     return true;
 }
+extern void native_apps_mount(void) __attribute__((weak));
 bool fs_load(void) {
     if (fs_locked || disk_readers)
         return false;
     fs_locked = true;
     bool result = load_snapshot();
     fs_locked = false;
+    if (result && native_apps_mount) native_apps_mount();
     return result;
 }
 bool fs_save_to(unsigned destination) {
@@ -890,7 +896,27 @@ void fs_init(void) {
              "DOM/CSS web engine is not integrated yet.</p>",
              false);
     fs_write("/home/luna/hello.lsh", "echo Hello from lunaSH\npwd\nls\n", false);
+    if (native_apps_mount) native_apps_mount();
     fs_dirty = false;
+}
+
+/* Immutable executable payloads live outside the writable snapshot. The caller
+ * retains storage for the complete lifetime of the OS, including one sentinel
+ * byte after the payload. Mounts are restored after every snapshot load. */
+int fs_mount_readonly(const char *path, const void *bytes, uint32_t size, uint32_t mode) {
+    if (fs_locked || disk_readers || !bytes) return -1;
+    File *f = fs_find(path);
+    if (!f) {
+        if (fs_create(path, false)) return -1;
+        f = fs_find(path);
+    }
+    if (!f || f->dir) return -1;
+    if (f->data && !f->readonly) heap_release(f->data);
+    f->data = (char *)bytes;
+    f->size = size;
+    f->mode = 0100000u | (mode & 0777u);
+    f->readonly = true;
+    return 0;
 }
 
 static bool verify_snapshot(unsigned device) {
@@ -908,7 +934,7 @@ static bool verify_snapshot(unsigned device) {
         if (live_entries != staged_entries)
             same = false;
         for (int i = 0; same && i < fs_file_capacity; i++)
-            if (files[i].used) {
+            if (files[i].used && !files[i].readonly) {
                 const File *match = 0;
                 for (int j = 0; j < staging.capacity; j++)
                     if (staging.files[j].used && !strcmp(files[i].path, staging.files[j].path)) {
@@ -987,7 +1013,7 @@ bool fs_begin_write(const char *path, bool append_data, uint32_t owner) {
     if (!fs_path(path, canonical))
         return false;
     File *old = fs_find(canonical);
-    if (old && old->dir)
+    if (old && (old->dir || old->readonly))
         return false;
     strcpy(parent, canonical);
     char *slash = 0;
@@ -1032,7 +1058,7 @@ bool fs_begin_write(const char *path, bool append_data, uint32_t owner) {
         goto fail;
     writer_init(&transaction.stream, transaction.disk, transaction.base, &transaction.volume);
     for (int i = 0; i < fs_file_capacity; i++)
-        if (files[i].used && i != target) {
+        if (files[i].used && !files[i].readonly && i != target) {
             Record record = {0};
             record.index = transaction.entries++;
             memcpy(record.path, files[i].path, PATH_CAP);
@@ -1155,7 +1181,7 @@ bool fs_finish_write(void) {
         goto fail;
     uint64_t offset = ((uint64_t)transaction.base + 1u) * 512u;
     for (int i = 0; i < fs_file_capacity; i++)
-        if (files[i].used && i != transaction.target) {
+        if (files[i].used && !files[i].readonly && i != transaction.target) {
             offset += sizeof(Record);
             if (!files[i].dir) {
                 relocate_file(&files[i], transaction.disk, offset);
@@ -1217,7 +1243,7 @@ int fs_rename(const char *source, const char *destination) {
     if (!fs_path(destination, path))
         return -1;
     File *file = fs_find(source);
-    if (!file || file->dir || !strcmp(file->path, path))
+    if (!file || file->dir || file->readonly || !strcmp(file->path, path))
         return -1;
     strcpy(parent, path);
     char *slash = 0;
@@ -1231,7 +1257,7 @@ int fs_rename(const char *source, const char *destination) {
     else
         *slash = 0;
     File *directory = fs_find(parent), *target = fs_find(path);
-    if (!directory || !directory->dir || (target && target->dir))
+    if (!directory || !directory->dir || (target && (target->dir || target->readonly)))
         return -1;
     if (target) {
         if (target->data)
@@ -1250,7 +1276,7 @@ int fs_chmod(const char *path, uint32_t mode) {
     if (fs_locked || disk_readers || (mode & ~0777u))
         return -1;
     File *f = fs_find(path);
-    if (!f) return -1;
+    if (!f || f->readonly) return -1;
     f->mode = (f->dir ? 0040000u : 0100000u) | mode;
     f->ctime = fs_epoch();
     fs_dirty = true;
@@ -1260,7 +1286,7 @@ int fs_set_mtime(const char *path, uint32_t unix_seconds) {
     if (fs_locked || disk_readers)
         return -1;
     File *f = fs_find(path);
-    if (!f) return -1;
+    if (!f || f->readonly) return -1;
     f->mtime = unix_seconds;
     f->ctime = fs_epoch();
     fs_dirty = true;
