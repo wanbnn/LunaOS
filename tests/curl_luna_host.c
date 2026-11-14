@@ -151,6 +151,16 @@ int main(int argc, char **argv)
     curl_easy_cleanup(h);
 
     memset(&result, 0, sizeof(result));
+    make_url(url, sizeof(url), port, "/userpwd");
+    h = prepare(url, &result);
+    CHECK(h);
+    curl_easy_setopt(h, CURLOPT_USERPWD, "tester:secret");
+    curl_easy_setopt(h, CURLOPT_HTTPAUTH, (long)CURLAUTH_BASIC);
+    CHECK(curl_easy_perform(h) == CURLE_OK);
+    CHECK(!strcmp(result.data, "USERPWD-OK"));
+    curl_easy_cleanup(h);
+
+    memset(&result, 0, sizeof(result));
     make_url(url, sizeof(url), port, "/informational");
     h = prepare(url, &result);
     CHECK(h && curl_easy_perform(h) == CURLE_OK);
