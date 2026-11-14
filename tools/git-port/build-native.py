@@ -124,7 +124,7 @@ def build_curl():
         '  --libs) echo "'+str(BUILD/'libcurl-luna.a')+'" ;;\n'
         '  --static) echo "'+str(BUILD/'libcurl-luna.a')+'" ;;\n'
         '  --protocols) echo "http https" ;;\n'
-        '  --features) echo "SSL IPv6" ;;\n'
+        '  --features) echo "SSL" ;;\n'
         '  *) echo "" ;;\n'
         'esac\n')
     config.chmod(0o755)
