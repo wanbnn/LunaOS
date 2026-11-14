@@ -577,7 +577,7 @@ build/guest/runtime-smoke.elf: sdk/guest/runtime_smoke.c build/guest/memory.o sd
 LUNA_NATIVE_GIT ?= 1
 .PHONY: git-native-build test-git-native-guest
 git-native-build: build/git-native/git.elf
-build/git-native/git.elf: .gitmodules third_party/dash/configure.ac tools/git-port/build-native.py $(wildcard sdk/musl-luna/*) sdk/guest/memory.c sdk/guest/luna32.ld build/libz-luna.a
+build/git-native/git.elf: .gitmodules third_party/dash/configure.ac tools/git-port/build-native.py $(wildcard sdk/musl-luna/*) sdk/guest/memory.c sdk/guest/luna32.ld build/libz-luna.a sdk/curl-luna/curl-luna.c $(wildcard sdk/curl-luna/include/curl/*.h)
 	$(PYTHON) tools/git-port/build-native.py --git
 build/git-native/payload: build/git-native/git.elf
 	$(PYTHON) -c 'import pathlib,struct,zlib; p=pathlib.Path("$<").read_bytes(); pathlib.Path("$@").write_bytes(struct.pack("<I",len(p))+zlib.compress(p,9))'
