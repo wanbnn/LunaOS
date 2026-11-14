@@ -104,9 +104,11 @@ A suite de regressão HTTP em Linux pode ser executada com
 `python3 tests/curl_luna_host.py`. Ela valida URL, POST binario, corpo chunked,
 redirecionamentos, cabeçalhos e eventos da API multi **sem TLS**.
 
-Para validar o protocolo Git Smart HTTP de verdade, execute
+Para validar o protocolo Git Smart HTTPS de verdade, execute
 `make test-git-http-guest` apos gerar a imagem: o teste inicia o Git oficial
-dentro do QEMU, com um backend Git HTTP de teste no host, e verifica
-`ls-remote`, `clone`, `push` e `fetch`. O host apenas hospeda o repositório.
-**O resultado desse teste ainda não foi confirmado no guest.** HTTPS autenticado
-contra GitHub e transporte SSH permanecem pendentes.
+dentro do QEMU, instala uma CA temporária em `/etc/tls/custom.pem` e se
+conecta ao backend Git de teste via TLS 1.2 com hostname verificado. Exercita
+`ls-remote`, `clone`, `push` e `fetch`; o host apenas hospeda o repositório.
+A CA de teste não é empacotada no sistema. **O resultado desse teste ainda
+não foi confirmado no guest.** HTTPS autenticado contra GitHub e transporte
+SSH permanecem pendentes.
