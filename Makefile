@@ -593,6 +593,10 @@ endif
 test-git-native-guest: all
 	$(PYTHON) tests/git_native_guest.py
 
+.PHONY: test-git-http-guest
+test-git-http-guest: all
+	$(PYTHON) tests/git_http_guest.py
+
 build/git-native/sh.elf: build/git-native/git.elf
 	@test -s $@ || $(PYTHON) tools/git-port/build-native.py --git
 build/git-native/sh-payload: build/git-native/sh.elf
